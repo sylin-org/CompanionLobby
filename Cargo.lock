@@ -130,7 +130,6 @@ dependencies = [
  "sha2",
  "thiserror",
  "tray-icon",
- "ureq",
  "uuid",
  "windows-sys 0.60.2",
 ]

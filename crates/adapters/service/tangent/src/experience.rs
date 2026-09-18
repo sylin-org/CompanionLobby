@@ -3,13 +3,12 @@
 //! forwarded to a different origin.
 
 use std::io::Read;
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 
-
 use companion_core::ports::{ExperienceError, ExperiencePort, RequestContext};
+use companion_core::traits::CONNECTOR_PRODUCT;
 
 const RESPONSE_LIMIT: u64 = 512 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -250,8 +249,4 @@ fn extract_problem(value: &Value) -> Option<(String, String)> {
     let code = value.get("code").and_then(Value::as_str)?;
     let message = value.get("message").and_then(Value::as_str).unwrap_or_default();
     Some((code.to_string(), message.to_string()))
-}
-
-pub fn shared() -> Arc<dyn ExperiencePort> {
-    Arc::new(UreqExperience::new())
 }

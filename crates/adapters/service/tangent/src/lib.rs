@@ -1,80 +1,74 @@
-pub mod experience;
-pub mod contract;
+//! The Tangent service adapter: the ureq experience client exposed through the
+//! connector's adapter contracts. The HTTP spoke itself lives in [`experience`] and
+//! speaks the low-level `ExperiencePort`; this module maps it onto `ServiceAdapter`,
+//! `SocialBrowsing` and `SocialModeration` without duplicating any wire behavior.
 
+pub mod contract;
+pub mod experience;
+
+use serde_json::Value;
+
+use companion_core::ports::{ExperienceError, ExperiencePort, RequestContext};
 use companion_core::traits::{ServiceAdapter, SocialBrowsing, SocialModeration};
 
-impl ServiceAdapter for experience::UreqExperience {
+use experience::UreqExperience;
+
+impl ServiceAdapter for UreqExperience {
     fn name(&self) -> &'static str { "tangent" }
     fn as_social_browsing(&self) -> Option<&dyn SocialBrowsing> { Some(self) }
     fn as_social_moderation(&self) -> Option<&dyn SocialModeration> { Some(self) }
-}
 
-impl SocialBrowsing for experience::UreqExperience {
-        fn list_destinations(&self, destination_url: &str, auth_adapter: &dyn companion_core::traits::AuthAdapter, auth_state: &str, cursor: Option<&str>) -> Result<serde_json::Value, String> {
-        let mut path = format!("{destination_url}/api/v1/experience/tangents");
-        if let Some(c) = cursor {
-            path.push_str(&format!("?cursor={}", urlencoding::encode(c)));
-        }
-        let token = auth_adapter.get_service_auth(auth_state, destination_url)?;
-        let response = self.agent.get(&path).set("Authorization", &format!("Bearer {token}")).call().map_err(|e| e.to_string())?;
-        response.into_json().map_err(|e| e.to_string())
+    fn discover(&self, origin: &str, path: &str) -> Result<Value, ExperienceError> {
+        ExperiencePort::discover(self, origin, path)
     }
-        fn list_conversations(&self, destination_url: &str, auth_adapter: &dyn companion_core::traits::AuthAdapter, auth_state: &str, destination_id: &str, cursor: Option<&str>) -> Result<serde_json::Value, String> {
-        let mut path = format!("{destination_url}/api/v1/experience/tangents/{destination_id}/topics");
-        if let Some(c) = cursor {
-            path.push_str(&format!("?cursor={}", urlencoding::encode(c)));
-        }
-        let token = auth_adapter.get_service_auth(auth_state, destination_url)?;
-        let response = self.agent.get(&path).set("Authorization", &format!("Bearer {token}")).call().map_err(|e| e.to_string())?;
-        response.into_json().map_err(|e| e.to_string())
+
+    fn exchange(&self, origin: &str, path: &str, body: &Value, bearer: &str) -> Result<Value, ExperienceError> {
+        ExperiencePort::exchange(self, origin, path, body, bearer)
     }
-        fn read_conversation(&self, destination_url: &str, auth_adapter: &dyn companion_core::traits::AuthAdapter, auth_state: &str, conversation_id: &str, cursor: Option<&str>) -> Result<serde_json::Value, String> {
-        let mut path = format!("{destination_url}/api/v1/experience/topics/{conversation_id}");
-        if let Some(c) = cursor {
-            path.push_str(&format!("?cursor={}", urlencoding::encode(c)));
-        }
-        
-        let token = auth_adapter.get_service_auth(auth_state, destination_url)?;
-        let response = self.agent.get(&path).set("Authorization", &format!("Bearer {token}")).call().map_err(|e| e.to_string())?;
-        response.into_json().map_err(|e| e.to_string())
+
+    fn server_card(&self, origin: &str) -> Result<Value, ExperienceError> {
+        ExperiencePort::server_profile(self, origin)
     }
-    fn publish(&self, _destination_url: &str, _auth_adapter: &dyn companion_core::traits::AuthAdapter, _auth_token: &str, _destination_id: &str, _content: &str) -> Result<serde_json::Value, String> { Err("not implemented".into()) }
-    fn reply(&self, _destination_url: &str, _auth_adapter: &dyn companion_core::traits::AuthAdapter, _auth_token: &str, _conversation_id: &str, _reply_to_id: &str, _content: &str) -> Result<serde_json::Value, String> { Err("not implemented".into()) }
-    fn mark_read(&self, _destination_url: &str, _auth_adapter: &dyn companion_core::traits::AuthAdapter, _auth_state: &str, _conversation_id: &str, _body: &serde_json::Value) -> Result<serde_json::Value, String> { Err("not implemented".into()) }
-    fn join_destination(&self, _destination_url: &str, _auth_adapter: &dyn companion_core::traits::AuthAdapter, _auth_state: &str, _destination_id: &str, _body: &serde_json::Value) -> Result<serde_json::Value, String> { Err("not implemented".into()) }
-    fn leave_destination(&self, _destination_url: &str, _auth_adapter: &dyn companion_core::traits::AuthAdapter, _auth_state: &str, _destination_id: &str, _request_id: &str) -> Result<serde_json::Value, String> { Err("not implemented".into()) }
-    fn set_watch(&self, _destination_url: &str, _auth_adapter: &dyn companion_core::traits::AuthAdapter, _auth_state: &str, _body: &serde_json::Value) -> Result<serde_json::Value, String> { Err("not implemented".into()) }
-    fn get_profile(&self, destination_url: &str, auth_adapter: &dyn companion_core::traits::AuthAdapter, auth_state: &str) -> Result<serde_json::Value, String> {
-        let path = format!("{destination_url}/api/v1/experience");
-        let token = auth_adapter.get_service_auth(auth_state, destination_url)?;
-        let response = self.agent.get(&path).set("Authorization", &format!("Bearer {token}")).call().map_err(|e| e.to_string())?;
-        response.into_json().map_err(|e| e.to_string())
-    }
-    
-    fn get_operation(&self, destination_url: &str, auth_adapter: &dyn companion_core::traits::AuthAdapter, auth_state: &str, operation_id: &str) -> Result<serde_json::Value, String> {
-        let path = format!("{destination_url}/api/v1/experience/operations/{}", urlencoding::encode(operation_id));
-        let token = auth_adapter.get_service_auth(auth_state, destination_url)?;
-        let response = self.agent.get(&path).set("Authorization", &format!("Bearer {token}")).call().map_err(|e| e.to_string())?;
-        response.into_json().map_err(|e| e.to_string())
-    }
-    
-    fn probe(&self, destination_url: &str) -> Result<(), String> {
-        // Just checking if it responds to discovery
-        let path = format!("{destination_url}/.well-known/mcp-companion");
-        self.agent.get(&path).call().map_err(|e| e.to_string())?;
-        Ok(())
-    }
-    
-    fn server_profile(&self, destination_url: &str) -> Result<serde_json::Value, String> {
-        let path = format!("{destination_url}/.well-known/mcp-companion");
-        let response = self.agent.get(&path).call().map_err(|e| e.to_string())?;
-        response.into_json().map_err(|e| e.to_string())
+
+    fn probe_page(&self, origin: &str) -> Result<(), ExperienceError> {
+        ExperiencePort::probe(self, origin)
     }
 }
 
-impl SocialModeration for experience::UreqExperience {
-    fn list_moderation_cases(&self, _destination_url: &str, _auth_adapter: &dyn companion_core::traits::AuthAdapter, _auth_token: &str, _destination_id: &str, _page: Option<u16>) -> Result<serde_json::Value, String> { Err("not implemented".into()) }
-    fn read_moderation_case(&self, _destination_url: &str, _auth_adapter: &dyn companion_core::traits::AuthAdapter, _auth_token: &str, _case_id: &str) -> Result<serde_json::Value, String> { Err("not implemented".into()) }
-    fn preview_moderation_action(&self, _destination_url: &str, _auth_adapter: &dyn companion_core::traits::AuthAdapter, _auth_token: &str, _case_id: &str, _action: &str, _summary: &str) -> Result<serde_json::Value, String> { Err("not implemented".into()) }
-    fn apply_moderation_action(&self, _destination_url: &str, _auth_adapter: &dyn companion_core::traits::AuthAdapter, _auth_token: &str, _case_id: &str, _action: &str, _summary: &str) -> Result<serde_json::Value, String> { Err("not implemented".into()) }
+impl SocialBrowsing for UreqExperience {
+    fn get(&self, context: &RequestContext, path: &str) -> Result<Value, ExperienceError> {
+        ExperiencePort::get(self, context, path)
+    }
+
+    fn send(&self, context: &RequestContext, method: &str, path: &str, body: &Value) -> Result<Value, ExperienceError> {
+        ExperiencePort::send(self, context, method, path, body)
+    }
+}
+
+impl SocialModeration for UreqExperience {
+    /// The stewardship surface rides the same credentialled experience API: case
+    /// routes are topic- and case-scoped reads and writes, offered only by servers
+    /// whose envelope advertises them.
+    fn list_moderation_cases(&self, context: &RequestContext, topic: &str, page: Option<u16>) -> Result<Value, ExperienceError> {
+        let path = match page {
+            Some(page) => format!("/api/v1/experience/topics/{}/moderation/cases?page={page}", urlencoding::encode(topic)),
+            None => format!("/api/v1/experience/topics/{}/moderation/cases", urlencoding::encode(topic)),
+        };
+        ExperiencePort::get(self, context, &path)
+    }
+
+    fn read_moderation_case(&self, context: &RequestContext, case_id: &str) -> Result<Value, ExperienceError> {
+        let path = format!("/api/v1/experience/moderation/cases/{}", urlencoding::encode(case_id));
+        ExperiencePort::get(self, context, &path)
+    }
+
+    fn preview_moderation_action(&self, context: &RequestContext, case_id: &str, body: &Value) -> Result<Value, ExperienceError> {
+        let path = format!("/api/v1/experience/moderation/cases/{}/previews", urlencoding::encode(case_id));
+        ExperiencePort::send(self, context, "POST", &path, body)
+    }
+
+    fn apply_moderation_action(&self, context: &RequestContext, case_id: &str, body: &Value) -> Result<Value, ExperienceError> {
+        let path = format!("/api/v1/experience/moderation/cases/{}/actions", urlencoding::encode(case_id));
+        ExperiencePort::send(self, context, "POST", &path, body)
+    }
 }

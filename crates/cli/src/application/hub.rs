@@ -33,8 +33,6 @@ pub const DELIVERY_MODE: &str = "tool_response_only";
 /// the server's discovery document must agree, or the enrollment refuses honestly.
 /// One source with the bind's OAuth rpc permission (the oauth module owns it).
 pub const EXCHANGE_LXM: &str = atproto_oauth::EXCHANGE_LXM;
-/// Proof lifetime requested from the PDS; the server's accepted window is now+120 s.
-const PROOF_EXPIRY_SECONDS: i64 = 120;
 /// The public PDS used when the operator does not name one explicitly; the authoritative
 /// origin from the account's DID document replaces it when the PDS reports one.
 pub const DEFAULT_PDS: &str = "https://bsky.social";
@@ -187,6 +185,43 @@ impl ConnectorHub {
     pub fn with_default_page(mut self, url: &str) -> Self {
         self.default_page = url.to_string();
         self
+    }
+
+    /// Installs one service adapter under its own name; the last install wins. The
+    /// binary installs the Tangent adapter; tests install their fake through the same
+    /// seam. An empty registry is a construction bug, never a runtime state.
+    pub fn with_service(self, service: Arc<dyn companion_core::traits::ServiceAdapter>) -> Self {
+        if let Ok(mut services) = self.services.write() {
+            services.insert(service.name().to_string(), service);
+        }
+        self
+    }
+
+    /// Installs one auth adapter under its own name; the last install wins.
+    pub fn with_auth(self, auth: Arc<dyn companion_core::traits::AuthAdapter>) -> Self {
+        if let Ok(mut auths) = self.auths.write() {
+            auths.insert(auth.name().to_string(), auth);
+        }
+        self
+    }
+
+    /// The service adapter the connector participates through. Programmer error if
+    /// missing: every hub is built with one (build_hub or a test's fake).
+    fn service(&self) -> Arc<dyn companion_core::traits::ServiceAdapter> {
+        self.services
+            .read()
+            .ok()
+            .and_then(|services| services.get("tangent").cloned())
+            .expect("the tangent service adapter is installed")
+    }
+
+    /// The auth adapter that mints the bound exchange's service-auth proof.
+    fn auth(&self) -> Arc<dyn companion_core::traits::AuthAdapter> {
+        self.auths
+            .read()
+            .ok()
+            .and_then(|auths| auths.get("atproto").cloned())
+            .expect("the atproto auth adapter is installed")
     }
 
     /// Opens a page the operator asked for (the startup open, the tray), every time.
@@ -347,14 +382,11 @@ impl ConnectorHub {
             dpop: None,
         };
         let raw = {
-            let services = self.services.read().unwrap();
-            let service = services.get("tangent").unwrap();
-            let auths = self.auths.read().unwrap();
-            let auth = auths.get("atproto").unwrap();
-            let browsing = service.as_social_browsing().unwrap();
-            browsing.get_profile(&canonical, auth.as_ref(), session)
-                .map_err(|e| e)?
-        };
+            let service = self.service();
+            let browsing = service.as_social_browsing().expect("the tangent service browses");
+            browsing.get(&context, "/api/v1/experience")
+        }
+        .map_err(|error| error.to_string())?;
         let experience = contract::parse(&raw).map_err(|error| format!("{error}; is this a Tangent experience API?"))?;
         let companion_view = experience.companion.ok_or_else(|| "the server did not confirm a participant companion".to_string())?;
         if companion_view.participant_ref.is_empty() {
@@ -702,13 +734,10 @@ impl ConnectorHub {
     /// server, never hardcoded. Used by `enroll_bound` and by `Connect`'s pre-flight
     /// (an unusable server is an honest error before any operator attention is asked).
     fn discover_proof_spec(&self, canonical: &str) -> Result<contract::ServiceProofDto, String> {
-        let raw = {
-            let services = self.services.read().unwrap();
-            let service = services.get("tangent").unwrap();
-            let browsing = service.as_social_browsing().unwrap();
-            browsing.server_profile(canonical)
-                .map_err(|error| format!("discovery failed: {error}"))?
-        };
+        let raw = self
+            .service()
+            .discover(canonical, "/.well-known/tangent-mcp")
+            .map_err(|error| discovery_error(&error))?;
         let discovery: contract::DiscoveryDto = serde_json::from_value(raw)
             .map_err(|error| format!("malformed discovery document: {error}"))?;
         let proof_spec = discovery.service_proof.ok_or_else(|| {
@@ -775,54 +804,33 @@ impl ConnectorHub {
             let proof_spec = self.discover_proof_spec(&canonical)?;
 
             // Step 2 — the PDS mints the proof: the discovery audience, the exact
-            // exchange method, and an expiry inside the server's accepted window.
-            // Percent-encoding the parameters means a crafted audience or origin can
-            // never inject query structure into the request. OAuth sessions carry a
-            // DPoP proof on this resource request (R2): htm/htu of this exact call,
-            // `ath` binding the access token, and the PDS's OWN nonce — never the
-            // authorization server's (RFC 9449 §8 gives each server its own nonce
-            // context).
-            let exp = now_millis() / 1000 + PROOF_EXPIRY_SECONDS;
-            let auth_path = format!(
-                "/xrpc/com.atproto.server.getServiceAuth?aud={}&lxm={}&exp={}",
-                encode(&proof_spec.audience),
-                encode(EXCHANGE_LXM),
-                exp
-            );
-            let raw = {
-                let auths = self.auths.read().unwrap();
-                let auth = auths.get("atproto").unwrap();
-                let auth_state = serde_json::json!({
-                    "pds": atproto.pds,
-                    "access_jwt": atproto.access_jwt,
-                    "dpop_key": atproto.dpop_key,
-                }).to_string();
-                let token = auth.get_service_auth(&auth_state, &proof_spec.audience)?;
-                serde_json::json!({ "token": token })
-            };
-            let auth: contract::ServiceAuthDto = serde_json::from_value(raw)
-                .map_err(|error| format!("malformed getServiceAuth response: {error}"))?;
-            if auth.token.is_empty() {
+            // exchange method, and an expiry inside the server's accepted window. The
+            // adapter percent-encodes the parameters (a crafted audience or origin can
+            // never inject query structure), proves the request with the session's
+            // DPoP key (R2: htm/htu of this exact call, `ath` binding the access
+            // token, and the PDS's OWN nonce — RFC 9449 §8 gives each server its own
+            // nonce context) and retries once on the resource server's challenge.
+            let auth_state = serde_json::json!({
+                "pds": atproto.pds,
+                "access_jwt": atproto.access_jwt,
+                "dpop_key": atproto.dpop_key,
+            }).to_string();
+            let token = self
+                .auth()
+                .get_service_auth(&auth_state, &proof_spec.audience)
+                .map_err(|error| service_auth_error(&error))?;
+            if token.is_empty() {
                 return Err("the PDS returned no service-auth token".to_string());
             }
 
             // Step 3 — the exchange. Grants are bounded to welcome/read/post; manage is
-            // explicitly never requested.
+            // explicitly never requested. The bearer is the ephemeral proof JWT:
+            // created above, consumed here, never stored or logged.
             let body = json!({ "name": companion.handle, "lifetimeDays": 7, "grants": ["welcome", "read", "post"] });
-            let raw = {
-                let services = self.services.read().unwrap();
-                let service = services.get("tangent").unwrap();
-                let auths = self.auths.read().unwrap();
-                let auth_adapter = auths.get("atproto").unwrap();
-                let browsing = service.as_social_browsing().unwrap();
-                browsing.publish(
-                    &canonical,
-                    auth_adapter.as_ref(),
-                    &auth.token,
-                    "/mcp/token",
-                    &serde_json::to_string(&body).unwrap()
-                ).map_err(|e| e)?
-            };
+            let raw = self
+                .service()
+                .exchange(&canonical, "/mcp/token", &body, &token)
+                .map_err(|error| exchange_error(&error))?;
             let exchanged: contract::BoundExchangeDto = serde_json::from_value(raw)
                 .map_err(|error| format!("malformed exchange response: {error}"))?;
             if exchanged.token.is_empty() {
@@ -1008,13 +1016,8 @@ impl ConnectorHub {
         };
         for candidate in recorded.into_iter().chain([self.default_page.clone()]) {
             if let Some(origin) = page_origin(&candidate) {
-                {
-                    let services = self.services.read().unwrap();
-                    let service = services.get("tangent").unwrap();
-                    let browsing = service.as_social_browsing().unwrap();
-                    if browsing.probe(&origin).is_ok() {
+                if self.service().probe_page(&origin).is_ok() {
                     return Some((candidate, false));
-                }
                 }
             }
         }
@@ -1443,12 +1446,7 @@ impl ConnectorHub {
             }
             attempts.insert(origin.to_string(), now);
         }
-        let Ok(raw) = ({
-            let services = self.services.read().unwrap();
-            let service = services.get("tangent").unwrap();
-            let browsing = service.as_social_browsing().unwrap();
-            browsing.server_profile(origin)
-        }) else { return };
+        let Ok(raw) = self.service().server_card(origin) else { return };
         let Some(card) = project_server_card(origin, &raw, now) else { return };
         let mut store = self.lock_store().expect("state lock");
         // A forgotten enrollment must not be resurrected by an in-flight request.
@@ -1541,18 +1539,13 @@ impl ConnectorHub {
             Operation::Arrive { enrollment_id, server_url } => self.arrive(&enrollment_id, &server_url),
             Operation::ListTangents { context_id, cursor } => {
                 self.with_context("ListTangents", &context_id, ViewMode::Compact, |frame| {
-                    let services = self.services.read().unwrap();
-                    let service = services.get("tangent").expect("tangent adapter missing");
-                    let auths = self.auths.read().unwrap();
-                    let auth = auths.get("atproto").expect("atproto adapter missing");
-                    let browsing = service.as_social_browsing().expect("tangent missing social browsing");
-                    
-                    browsing.list_destinations(
-                        &frame.request.origin,
-                        auth.as_ref(),
-                        &frame.request.credential,
-                        cursor.as_deref()
-                    ).map_err(|e| ExperienceError::Transport(e))
+                    let path = match &cursor {
+                        Some(value) => format!("/api/v1/experience/tangents?cursor={}", encode(value)),
+                        None => "/api/v1/experience/tangents".to_string(),
+                    };
+                    let service = self.service();
+                    let browsing = service.as_social_browsing().expect("the tangent service browses");
+                    browsing.get(&frame.request, &path)
                 })
             }
             Operation::ListTopics { context_id, tangent_ref, cursor } => {
@@ -1560,20 +1553,13 @@ impl ConnectorHub {
                     let Some(tangent) = refs::tangent_key(&frame.request.origin, &tangent_ref) else {
                         return Err(invalid_ref("Tangent"));
                     };
-                    
-                    let services = self.services.read().unwrap();
-                    let service = services.get("tangent").expect("tangent adapter missing");
-                    let auths = self.auths.read().unwrap();
-                    let auth = auths.get("atproto").expect("atproto adapter missing");
-                    let browsing = service.as_social_browsing().expect("tangent missing social browsing");
-                    
-                    browsing.list_conversations(
-                        &frame.request.origin,
-                        auth.as_ref(),
-                        &frame.request.credential,
-                        &tangent,
-                        cursor.as_deref()
-                    ).map_err(|e| ExperienceError::Transport(e))
+                    let path = match &cursor {
+                        Some(value) => format!("/api/v1/experience/tangents/{tangent}/topics?cursor={}", encode(value)),
+                        None => format!("/api/v1/experience/tangents/{tangent}/topics"),
+                    };
+                    let service = self.service();
+                    let browsing = service.as_social_browsing().expect("the tangent service browses");
+                    browsing.get(&frame.request, &path)
                 })
             }
             Operation::ReadTopic { context_id, topic_ref, cursor, around_post_ref, view, limit } => {
@@ -1581,20 +1567,24 @@ impl ConnectorHub {
                     let Some((_tangent, topic)) = refs::topic_keys(&frame.request.origin, &topic_ref) else {
                         return Err(invalid_ref("Topic"));
                     };
-                    let services = self.services.read().unwrap();
-                    let service = services.get("tangent").expect("tangent adapter missing");
-                    let auths = self.auths.read().unwrap();
-                    let auth = auths.get("atproto").expect("atproto adapter missing");
-                    
-                    let browsing = service.as_social_browsing().expect("tangent missing social browsing");
-                    
-                    browsing.read_conversation(
-                        &frame.request.origin,
-                        auth.as_ref(),
-                        &frame.request.credential,
-                        &topic,
-                        cursor.as_deref()
-                    ).map_err(|e| ExperienceError::Transport(e))
+                    let mut path = format!("/api/v1/experience/topics/{topic}");
+                    let mut query = Vec::new();
+                    if let Some(value) = &cursor {
+                        query.push(format!("cursor={}", encode(value)));
+                    }
+                    if let Some(value) = &around_post_ref {
+                        query.push(format!("aroundPostRef={}", encode(value)));
+                    }
+                    if let Some(value) = limit {
+                        query.push(format!("limit={value}"));
+                    }
+                    if !query.is_empty() {
+                        path.push('?');
+                        path.push_str(&query.join("&"));
+                    }
+                    let service = self.service();
+                    let browsing = service.as_social_browsing().expect("the tangent service browses");
+                    browsing.get(&frame.request, &path)
                 })
             }
             Operation::CreatePost { context_id, topic_ref, request_id, text, reply_to, view } => {
@@ -1606,25 +1596,7 @@ impl ConnectorHub {
                     if let Some(reference) = &reply_to {
                         body["replyTo"] = json!(reference);
                     }
-                    {
-                        let services = self.services.read().unwrap();
-                        let service = services.get("tangent").expect("tangent adapter missing");
-                        let auths = self.auths.read().unwrap();
-                        let auth = auths.get("atproto").expect("atproto adapter missing");
-                        let browsing = service.as_social_browsing().expect("tangent missing social browsing");
-                        
-                        self.journaled_send(frame, "CreatePost", &topic_ref, &request_id, &body, || {
-                            let r_to = reply_to.as_deref().unwrap_or("");
-                            browsing.reply(
-                                &frame.request.origin,
-                                auth.as_ref(),
-                                &frame.request.credential,
-                                &topic,
-                                r_to,
-                                &text
-                            )
-                        })
-                    }
+                    self.journaled_send(frame, "CreatePost", &topic_ref, &request_id, Route::TopicPosts(topic.to_string()), &body)
                 })
             }
             Operation::GetUpdates { context_id, view, cursor, scope_ref } => {
@@ -1637,23 +1609,7 @@ impl ConnectorHub {
                     };
                     let request_id = request_id.unwrap_or_else(|| format!("mark-{}", crate::adapters::store::short_uuid()));
                     let body = json!({ "requestId": request_id, "readCursor": read_cursor });
-                    {
-                        let services = self.services.read().unwrap();
-                        let service = services.get("tangent").unwrap();
-                        let auths = self.auths.read().unwrap();
-                        let auth = auths.get("atproto").unwrap();
-                        let browsing = service.as_social_browsing().unwrap();
-                        
-                        self.journaled_send(frame, "MarkRead", &topic_ref, &request_id, &body, || {
-                            browsing.mark_read(
-                                &frame.request.origin,
-                                auth.as_ref(),
-                                &frame.request.credential,
-                                &topic,
-                                &body
-                            )
-                        })
-                    }
+                    self.journaled_send(frame, "MarkRead", &topic_ref, &request_id, Route::TopicReadPosition(topic.to_string()), &body)
                 })
             }
             Operation::JoinTangent { context_id, tangent_ref, request_id, invite_ref, view } => {
@@ -1665,23 +1621,7 @@ impl ConnectorHub {
                     if let Some(reference) = &invite_ref {
                         body["inviteRef"] = json!(reference);
                     }
-                    {
-                        let services = self.services.read().unwrap();
-                        let service = services.get("tangent").unwrap();
-                        let auths = self.auths.read().unwrap();
-                        let auth = auths.get("atproto").unwrap();
-                        let browsing = service.as_social_browsing().unwrap();
-                        
-                        self.journaled_send(frame, "JoinTangent", &tangent_ref, &request_id, &body, || {
-                            browsing.join_destination(
-                                &frame.request.origin,
-                                auth.as_ref(),
-                                &frame.request.credential,
-                                &tangent,
-                                &body
-                            )
-                        })
-                    }
+                    self.journaled_send(frame, "JoinTangent", &tangent_ref, &request_id, Route::Membership(tangent.to_string()), &body)
                 })
             }
             Operation::LeaveTangent { context_id, tangent_ref, request_id, view } => {
@@ -1689,23 +1629,14 @@ impl ConnectorHub {
                     let Some(tangent) = refs::tangent_key(&frame.request.origin, &tangent_ref) else {
                         return Err(invalid_ref("Tangent"));
                     };
-                    {
-                        let services = self.services.read().unwrap();
-                        let service = services.get("tangent").unwrap();
-                        let auths = self.auths.read().unwrap();
-                        let auth = auths.get("atproto").unwrap();
-                        let browsing = service.as_social_browsing().unwrap();
-                        
-                        self.journaled_send(frame, "LeaveTangent", &tangent_ref, &request_id, &Value::Null, || {
-                            browsing.leave_destination(
-                                &frame.request.origin,
-                                auth.as_ref(),
-                                &frame.request.credential,
-                                &tangent,
-                                &request_id
-                            )
-                        })
-                    }
+                    self.journaled_send(
+                        frame,
+                        "LeaveTangent",
+                        &tangent_ref,
+                        &request_id,
+                        Route::Leave(tangent.to_string(), request_id.clone()),
+                        &Value::Null,
+                    )
                 })
             }
             Operation::SetWatch { context_id, scope_ref, mode, request_id, view } => {
@@ -1717,39 +1648,14 @@ impl ConnectorHub {
                     }
                     let request_id = request_id.unwrap_or_else(|| format!("watch-{}", crate::adapters::store::short_uuid()));
                     let body = json!({ "requestId": request_id, "scopeRef": scope_ref, "mode": mode });
-                    {
-                        let services = self.services.read().unwrap();
-                        let service = services.get("tangent").unwrap();
-                        let auths = self.auths.read().unwrap();
-                        let auth = auths.get("atproto").unwrap();
-                        let browsing = service.as_social_browsing().unwrap();
-                        
-                        self.journaled_send(frame, "SetWatch", &scope_ref, &request_id, &body, || {
-                            browsing.set_watch(
-                                &frame.request.origin,
-                                auth.as_ref(),
-                                &frame.request.credential,
-                                &body
-                            )
-                        })
-                    }
+                    self.journaled_send(frame, "SetWatch", &scope_ref, &request_id, Route::Watches, &body)
                 })
             }
             Operation::GetOperation { context_id, request_id, view } => {
                 self.with_context("GetOperation", &context_id, view, |frame| {
-                    {
-                    let services = self.services.read().unwrap();
-                    let service = services.get("tangent").unwrap();
-                    let auths = self.auths.read().unwrap();
-                    let auth = auths.get("atproto").unwrap();
-                    let browsing = service.as_social_browsing().unwrap();
-                    browsing.get_operation(
-                        &frame.request.origin,
-                        auth.as_ref(),
-                        &frame.request.credential,
-                        &request_id
-                    ).map_err(|e| ExperienceError::Transport(e))
-                }
+                    let service = self.service();
+                    let browsing = service.as_social_browsing().expect("the tangent service browses");
+                    browsing.get(&frame.request, &format!("/api/v1/experience/operations/{}", encode(&request_id)))
                 })
             }
             Operation::ListModerationCases { context_id, topic_ref, page, view } => {
@@ -1757,22 +1663,9 @@ impl ConnectorHub {
                     let Some((_tangent, topic)) = refs::topic_keys(&frame.request.origin, &topic_ref) else {
                         return Err(invalid_ref("Topic"));
                     };
-                    let path = page.map(|value| format!("/api/v1/experience/topics/{topic}/moderation/cases?page={value}"))
-                        .unwrap_or_else(|| format!("/api/v1/experience/topics/{topic}/moderation/cases"));
-                    {
-                    let services = self.services.read().unwrap();
-                    let service = services.get("tangent").unwrap();
-                    let auths = self.auths.read().unwrap();
-                    let auth = auths.get("atproto").unwrap();
-                    let moderation = service.as_social_moderation().unwrap();
-                    moderation.list_moderation_cases(
-                        &frame.request.origin,
-                        auth.as_ref(),
-                        &frame.request.credential,
-                        &topic,
-                        page
-                    ).map_err(|e| ExperienceError::Transport(e))
-                }
+                    let service = self.service();
+                    let moderation = service.as_social_moderation().expect("the tangent service moderates");
+                    moderation.list_moderation_cases(&frame.request, &topic, page)
                 })
             }
             Operation::ReadModerationCase { context_id, case_ref, view } => {
@@ -1780,19 +1673,9 @@ impl ConnectorHub {
                     let Some((_tangent, _topic, case_id)) = refs::case_keys(&frame.request.origin, &case_ref) else {
                         return Err(invalid_ref("moderation case"));
                     };
-                    {
-                    let services = self.services.read().unwrap();
-                    let service = services.get("tangent").unwrap();
-                    let auths = self.auths.read().unwrap();
-                    let auth = auths.get("atproto").unwrap();
-                    let moderation = service.as_social_moderation().unwrap();
-                    moderation.read_moderation_case(
-                        &frame.request.origin,
-                        auth.as_ref(),
-                        &frame.request.credential,
-                        &case_id
-                    ).map_err(|e| ExperienceError::Transport(e))
-                }
+                    let service = self.service();
+                    let moderation = service.as_social_moderation().expect("the tangent service moderates");
+                    moderation.read_moderation_case(&frame.request, &case_id)
                 })
             }
             Operation::PreviewModerationAction { context_id, case_ref, action, summary, deferred_until,
@@ -1804,21 +1687,9 @@ impl ConnectorHub {
                     let mut body = json!({ "action": action, "summary": summary,
                         "expectedCaseRevision": expected_case_revision, "expectedSubjectRevision": expected_subject_revision });
                     if let Some(value) = &deferred_until { body["deferredUntil"] = json!(value); }
-                    {
-                    let services = self.services.read().unwrap();
-                    let service = services.get("tangent").unwrap();
-                    let auths = self.auths.read().unwrap();
-                    let auth = auths.get("atproto").unwrap();
-                    let moderation = service.as_social_moderation().unwrap();
-                    moderation.preview_moderation_action(
-                        &frame.request.origin,
-                        auth.as_ref(),
-                        &frame.request.credential,
-                        &case_id,
-                        &action,
-                        &summary
-                    ).map_err(|e| ExperienceError::Transport(e))
-                }
+                    let service = self.service();
+                    let moderation = service.as_social_moderation().expect("the tangent service moderates");
+                    moderation.preview_moderation_action(&frame.request, &case_id, &body)
                 })
             }
             Operation::ApplyModerationAction { context_id, case_ref, request_id, action, summary, deferred_until,
@@ -1830,24 +1701,7 @@ impl ConnectorHub {
                     let mut body = json!({ "requestId": request_id, "action": action, "summary": summary,
                         "expectedCaseRevision": expected_case_revision, "expectedSubjectRevision": expected_subject_revision });
                     if let Some(value) = &deferred_until { body["deferredUntil"] = json!(value); }
-                    {
-                        let services = self.services.read().unwrap();
-                        let service = services.get("tangent").unwrap();
-                        let auths = self.auths.read().unwrap();
-                        let auth = auths.get("atproto").unwrap();
-                        let moderation = service.as_social_moderation().unwrap();
-                        
-                        self.journaled_send(frame, "ApplyModerationAction", &case_ref, &request_id, &body, || {
-                            moderation.apply_moderation_action(
-                                &frame.request.origin,
-                                auth.as_ref(),
-                                &frame.request.credential,
-                                &case_id,
-                                body.get("action").and_then(|v| v.as_str()).unwrap_or(""),
-                                body.get("summary").and_then(|v| v.as_str()).unwrap_or("")
-                            )
-                        })
-                    }
+                    self.journaled_send(frame, "ApplyModerationAction", &case_ref, &request_id, Route::ModerationAction(case_id.to_string()), &body)
                 })
             }
         }
@@ -1972,16 +1826,13 @@ impl ConnectorHub {
             Err(error) => return self.problem_outcome("Arrive", "needs_manager_connection", &error, Some((&companion, None))),
         };
         let request = RequestContext { origin: companion.origin.clone(), credential: session, participant_ref: companion.participant_ref.clone(), dpop: None };
-        let raw = match ({
-            let services = self.services.read().unwrap();
-            let service = services.get("tangent").unwrap();
-            let auths = self.auths.read().unwrap();
-            let auth = auths.get("atproto").unwrap();
-            let browsing = service.as_social_browsing().unwrap();
-            browsing.get_profile(&companion.origin, auth.as_ref(), &request.credential)
-        }) {
+        let raw = match {
+            let service = self.service();
+            let browsing = service.as_social_browsing().expect("the tangent service browses");
+            browsing.get(&request, "/api/v1/experience")
+        } {
             Ok(raw) => raw,
-            Err(error) => return self.transport_problem("Arrive", &companion, None, &ExperienceError::Transport(error)),
+            Err(error) => return self.transport_problem("Arrive", &companion, None, &error),
         };
         let parsed = match contract::parse(&raw) {
             Ok(parsed) => parsed,
@@ -2034,16 +1885,13 @@ impl ConnectorHub {
         } else {
             format!("/api/v1/experience/updates?{}", query.join("&"))
         };
-        let raw = match ({
-            let services = self.services.read().unwrap();
-            let service = services.get("tangent").unwrap();
-            let auths = self.auths.read().unwrap();
-            let auth = auths.get("atproto").unwrap();
-            let browsing = service.as_social_browsing().unwrap();
-            browsing.get_profile(&companion.origin, auth.as_ref(), &request.credential)
-        }) {
+        let raw = match {
+            let service = self.service();
+            let browsing = service.as_social_browsing().expect("the tangent service browses");
+            browsing.get(&request, &path)
+        } {
             Ok(raw) => raw,
-            Err(error) => return self.transport_problem("GetUpdates", &companion, Some(&context_binding), &ExperienceError::Transport(error)),
+            Err(error) => return self.transport_problem("GetUpdates", &companion, Some(&context_binding), &error),
         };
         let parsed = match contract::parse(&raw) {
             Ok(parsed) => parsed,
@@ -2123,18 +1971,15 @@ impl ConnectorHub {
 
     /// Mutation path: the full tuple is journaled before the request leaves, and settled from
     /// the returned receipt. A lost response keeps the entry unsettled for reconciliation.
-    fn journaled_send<F>(
+    fn journaled_send(
         &self,
         frame: &CallFrame,
         operation: &str,
         target_ref: &str,
         request_id: &str,
+        route: Route,
         body: &Value,
-        execute: F,
-    ) -> Result<Value, ExperienceError>
-    where
-        F: FnOnce() -> Result<Value, String>,
-    {
+    ) -> Result<Value, ExperienceError> {
         let write = Receipt {
             request_id: request_id.to_string(),
             context_id: frame.context_id.clone(),
@@ -2154,7 +1999,10 @@ impl ConnectorHub {
             request_id: request_id.to_string(),
             operation: operation.to_string(),
         });
-        let result = execute().map_err(ExperienceError::Transport);
+        let (method, path) = route.build();
+        let service = self.service();
+        let browsing = service.as_social_browsing().expect("the tangent service browses");
+        let result = browsing.send(&frame.request, method, &path, body);
         // A policy denial is a definitive non-write, not an uncertain transport outcome.
         // Settle the local journal and let with_context invalidate this context's schemas.
         if matches!(&result, Err(ExperienceError::Application { code, .. }) if code == "permission_denied") {
@@ -2327,12 +2175,10 @@ impl ConnectorHub {
             None => "/api/v1/experience/updates".to_string(),
         };
         let raw = {
-            let services = self.services.read().unwrap();
-            let service = services.get("tangent").unwrap();
-            let auths = self.auths.read().unwrap();
-            let auth = auths.get("atproto").unwrap();
-            let browsing = service.as_social_browsing().unwrap();
-            browsing.get_profile(&companion.origin, auth.as_ref(), &request.credential)
+            let service = self.service();
+            let browsing = service.as_social_browsing().expect("the tangent service browses");
+            browsing
+                .get(&request, &path)
                 .map_err(|error| format!("check failed: {error}"))?
         };
         let parsed = contract::parse(&raw).map_err(|error| error.to_string())?;
@@ -2366,14 +2212,11 @@ impl ConnectorHub {
             .filter(|write| write.enrollment_id.is_empty() || write.enrollment_id == companion.enrollment_id)
             .take(10)
         {
-            if let Ok(raw) = ({
-                let services = self.services.read().unwrap();
-                let service = services.get("tangent").unwrap();
-                let auths = self.auths.read().unwrap();
-                let auth = auths.get("atproto").unwrap();
-                let browsing = service.as_social_browsing().unwrap();
-                browsing.get_operation(&companion.origin, auth.as_ref(), &request.credential, &write.request_id)
-            }) {
+            if let Ok(raw) = {
+                let service = self.service();
+                let browsing = service.as_social_browsing().expect("the tangent service browses");
+                browsing.get(&request, &format!("/api/v1/experience/operations/{}", encode(&write.request_id)))
+            } {
                 if let Ok(experience) = contract::parse(&raw) {
                     if let Some(receipt) = &experience.result.receipt {
                         if matches!(receipt.state.as_str(), "completed" | "rejected") {
@@ -2511,8 +2354,31 @@ impl ConnectorHub {
     }
 }
 
-/// Mutation routes: method + path construction stays in one place.
+/// Mutation routes: method + path construction stays in one place, so the journaled
+/// tuple (request id + body) and the wire shape can never drift apart.
+enum Route {
+    TopicPosts(String),
+    TopicReadPosition(String),
+    Membership(String),
+    Leave(String, String),
+    Watches,
+    ModerationAction(String),
+}
 
+impl Route {
+    fn build(self) -> (&'static str, String) {
+        match self {
+            Self::TopicPosts(topic) => ("POST", format!("/api/v1/experience/topics/{topic}/posts")),
+            Self::TopicReadPosition(topic) => ("POST", format!("/api/v1/experience/topics/{topic}/read-position")),
+            Self::Membership(tangent) => ("PUT", format!("/api/v1/experience/tangents/{tangent}/membership")),
+            Self::Leave(tangent, request_id) => {
+                ("DELETE", format!("/api/v1/experience/tangents/{tangent}/membership?requestId={}", encode(&request_id)))
+            }
+            Self::Watches => ("PUT", "/api/v1/experience/watches".to_string()),
+            Self::ModerationAction(case_id) => ("POST", format!("/api/v1/experience/moderation/cases/{case_id}/actions")),
+        }
+    }
+}
 
 fn invalid_ref(kind: &str) -> ExperienceError {
     ExperienceError::Application {

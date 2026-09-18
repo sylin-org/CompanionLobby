@@ -1,7 +1,8 @@
-//! tangent-connector: the personal local MCP connector for Tangent. A DDD-aligned monolith:
-//! pure domain vocabulary, an application hub with narrow ports, adapter spokes, and
-//! deterministic presentation. Both input models — MCP over stdio and the command line —
-//! are intakes of the same hub.
+//! companion-lobby: the personal local MCP connector for Tangent. A DDD-aligned
+//! workspace: pure domain vocabulary in `companion-core`, the application hub with
+//! narrow ports and adapter crates, and this crate's own edges — the MCP stdio server,
+//! the command line, the operator manager page. Both input models are intakes of the
+//! same hub.
 
 pub mod adapters;
 pub mod application;
@@ -16,23 +17,28 @@ use crate::application::bus::EventBus;
 use crate::application::hub::ConnectorHub;
 use companion_core::domain::companion::CallerId;
 
-/// Where durable state lives: `$TANGENT_CONNECTOR_HOME` or `~/.tangent-connector`.
+/// Where durable state lives: `$COMPANION_LOBBY_HOME` or `~/.companion-lobby`.
 pub fn data_directory() -> PathBuf {
-    if let Ok(home) = std::env::var("TANGENT_CONNECTOR_HOME") {
+    if let Ok(home) = std::env::var("COMPANION_LOBBY_HOME") {
         return PathBuf::from(home);
     }
     let base = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
-    base.join(".tangent-connector")
+    base.join(".companion-lobby")
 }
 
-/// Builds the hub over the ureq experience client, the durable store and the platform
-/// browser.
+/// Builds the hub over the real adapters — the ureq Tangent experience client, the
+/// atproto proof mint, the durable store and the platform browser. Tests replace the
+/// service through the same registration seam.
 pub fn build_hub(caller: CallerId, data_dir: PathBuf) -> Result<Arc<ConnectorHub>, String> {
     let events = Arc::new(EventBus::new());
     let store = StateStore::open(&data_dir)?;
     adapters::diagnostics::spawn(&events, data_dir.clone());
-    Ok(Arc::new(ConnectorHub::new(store, events, caller).with_pages(adapters::browser::system())))
+    let hub = ConnectorHub::new(store, events, caller)
+        .with_service(Arc::new(adapter_service_tangent::experience::UreqExperience::new()))
+        .with_auth(Arc::new(adapter_auth_atproto::atproto_oauth::AtprotoOauth::new()))
+        .with_pages(adapters::browser::system());
+    Ok(Arc::new(hub))
 }

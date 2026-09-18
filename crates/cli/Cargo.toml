@@ -13,7 +13,6 @@ adapter-service-tangent = { path = "../adapters/service/tangent" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-ureq = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 # atproto OAuth (the /bind flow): pure-Rust cryptography, no new unsafe anywhere.
 # p256: ES256 signing/verification for DPoP proofs and the test fake's proof checks —
