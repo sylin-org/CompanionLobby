@@ -17,7 +17,7 @@ pub struct ExperienceDto {
     #[serde(default)]
     pub snapshot: SnapshotDto,
     #[serde(default)]
-    pub companion: Option<CompanionDto>,
+    pub identity: Option<IdentityDto>,
     #[serde(default)]
     pub place: PlaceDto,
     #[serde(default)]
@@ -55,32 +55,18 @@ pub struct SnapshotDto {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompanionDto {
+pub struct IdentityDto {
     /// The server's canonical participant reference (its GUIDv7 id). The connector keys
     /// on this; it is never empty on a usable response.
     #[serde(default)]
     pub participant_ref: String,
-    /// The participant's atproto DID when one is held; optional since the W2 contract.
+    /// The participant's atproto DID when one is held.
     #[serde(default)]
     pub did: Option<String>,
     #[serde(default)]
     pub display_name: String,
     #[serde(default)]
     pub handle: Option<String>,
-    /// The participant's companion collection, best-first for display per the registry
-    /// (atproto > internal > connector-client > future kinds). Presentation only.
-    #[serde(default)]
-    pub companions: Vec<CompanionKindDto>,
-}
-
-/// One entry of a participant's companion collection.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompanionKindDto {
-    #[serde(default)]
-    pub kind: String,
-    #[serde(default)]
-    pub value: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

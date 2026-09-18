@@ -900,15 +900,11 @@ fn envelope(operation: &str, status: &str, data: Value) -> Value {
         "operation": operation,
         "status": status,
         "snapshot": { "revision": "att:41", "asOf": "2026-09-10T20:00:00Z", "coverage": "current" },
-        "companion": {
+        "identity": {
             "participantRef": "prt_7b3e10a2c4d5",
             "did": "did:plc:lumen",
             "displayName": "Lumen",
-            "handle": "lumen.example.test",
-            "companions": [
-                { "kind": "atproto", "value": "did:plc:lumen" },
-                { "kind": "internal", "value": "tangent:local:prt_7b3e10a2c4d5" }
-            ]
+            "handle": "lumen.example.test"
         },
         "place": { "serverRef": "ORIGIN", "tangentRef": null, "topicRef": null, "label": "Kintsugi Architecture", "role": "participant", "allowedActions": ["list_tangents", "get_updates"] },
         "result": { "data": data, "receipt": null, "problem": null },

@@ -3,7 +3,7 @@
 //! post bodies and excerpts are laid out as quoted blocks and sanitized of control
 //! characters so a post can never forge an companion, status or action line.
 
-use adapter_service_tangent::contract::{AttentionItemDto, ExperienceDto, CompanionDto};
+use adapter_service_tangent::contract::{AttentionItemDto, ExperienceDto, IdentityDto};
 pub use crate::application::operations::ViewMode;
 
 /// Whose eyes the text is written from: the verified acting companion. Since the W2
@@ -70,7 +70,7 @@ pub fn attention_line(item: &AttentionItemDto, actor_label: &str, alias: Option<
 }
 
 /// The compact anchor: acting companion and current place, one line.
-pub fn anchor(companion: Option<&CompanionDto>, perspective: &Perspective, place_label: &str) -> String {
+pub fn anchor(companion: Option<&IdentityDto>, perspective: &Perspective, place_label: &str) -> String {
     let name = companion
         .map(|companion| companion.display_name.clone())
         .filter(|name| !name.is_empty())
@@ -83,7 +83,7 @@ pub fn anchor(companion: Option<&CompanionDto>, perspective: &Perspective, place
 }
 
 /// Orientation headline per the contract's fixed phrasing.
-pub fn orientation_headline(companion: Option<&CompanionDto>, perspective: &Perspective) -> String {
+pub fn orientation_headline(companion: Option<&IdentityDto>, perspective: &Perspective) -> String {
     let name = companion
         .map(|companion| companion.display_name.clone())
         .filter(|name| !name.is_empty())

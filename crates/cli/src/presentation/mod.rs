@@ -50,7 +50,7 @@ fn waiting_count(input: &RenderInput) -> String {
 
 fn render_orientation(input: &RenderInput, budget: usize) -> String {
     let mut text = Budget::new(budget);
-    let companion = input.experience.and_then(|experience| experience.companion.as_ref());
+    let companion = input.experience.and_then(|experience| experience.identity.as_ref());
     text.push_critical(perspective::orientation_headline(companion, input.perspective));
     if let Some(experience) = input.experience {
         if !experience.place.label.is_empty() {
@@ -87,7 +87,7 @@ fn render_orientation(input: &RenderInput, budget: usize) -> String {
 fn render_compact(input: &RenderInput, budget: usize) -> String {
     let mut text = Budget::new(budget);
     let place_label = input.experience.map(|experience| experience.place.label.as_str()).unwrap_or("");
-    text.push_critical(anchor(input.experience.and_then(|experience| experience.companion.as_ref()), input.perspective, place_label));
+    text.push_critical(anchor(input.experience.and_then(|experience| experience.identity.as_ref()), input.perspective, place_label));
     if let Some(experience) = input.experience {
         for line in perspective::result_summary(experience, input.aliases) {
             text.push_critical(line);
@@ -111,7 +111,7 @@ fn render_compact(input: &RenderInput, budget: usize) -> String {
 fn render_expanded(input: &RenderInput) -> String {
     let mut text = Budget::new(EXPANDED_BUDGET);
     let place_label = input.experience.map(|experience| experience.place.label.as_str()).unwrap_or("");
-    text.push_critical(anchor(input.experience.and_then(|experience| experience.companion.as_ref()), input.perspective, place_label));
+    text.push_critical(anchor(input.experience.and_then(|experience| experience.identity.as_ref()), input.perspective, place_label));
     if let Some(experience) = input.experience {
         for line in perspective::result_summary(experience, input.aliases) {
             text.push_critical(line);
