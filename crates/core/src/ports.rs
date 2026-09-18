@@ -40,7 +40,7 @@ pub trait ExperiencePort: Send + Sync {
     fn get(&self, context: &RequestContext, path: &str) -> Result<Value, ExperienceError>;
     /// Submit a mutation (posts, read position, membership, watches).
     fn send(&self, context: &RequestContext, method: &str, path: &str, body: &Value) -> Result<Value, ExperienceError>;
-    /// POST the pre-credential enrollment exchange (W2 contract). No Authorization
+    /// POST the pre-credential enrollment exchange — no Authorization
     /// header: the call happens before any credential exists.
     fn enroll(&self, origin: &str, path: &str, body: &Value) -> Result<Value, ExperienceError>;
     /// GET a pre-credential server document (the atproto service-proof discovery

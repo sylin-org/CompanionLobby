@@ -122,7 +122,7 @@ pub struct BindStart {
 
 /// Tokens an exchange or refresh produced. `sub` is mandatory on both responses: it is
 /// the account the authorization server authenticated — for the code exchange it IS
-/// the binding DID (R1/R3).
+/// the binding DID.
 pub struct OAuthTokens {
     pub access_token: String,
     pub refresh_token: Option<String>,

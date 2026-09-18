@@ -24,7 +24,7 @@ pub enum DomainEvent {
     /// (any process's Connect pops this page); it is never model-visible output. The
     /// SSE feed skips it.
     ManagerPageReady { url: String },
-    /// The on-the-fly handshake's live progress (owner addendum): narration for the
+    /// The on-the-fly handshake's live progress: narration for the
     /// companion manager's activity feed. Presentation-only — never a token, password,
     /// proof or session value. `companion` is the companion handle; `code` on failure is
     /// the honest problem code the model saw; `initiator` names who started this

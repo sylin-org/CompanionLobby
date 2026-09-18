@@ -455,7 +455,7 @@ fn is_json(content_type: &str) -> bool {
     content_type.split(';').next().map(str::trim) == Some("application/json")
 }
 
-/// The SSE feed (owner addendum): the one deliberate exception to this server's
+/// The SSE feed: the one deliberate exception to this server's
 /// one-response-per-connection shape — the response is held open and written as
 /// events arrive. Frames are the existing `DomainEvent` vocabulary serialized as
 /// `data:` JSON (the page reads `kind` from the payload). The `ManagerPageReady`
@@ -561,7 +561,7 @@ fn route(hub: &ConnectorHub, method: &str, target: &str, body: &RequestBody, roo
                 .collect();
             ApiResponse(200, ok_json(json!({ "enrollments": enrollments })), None)
         }
-        // Enrollment deliberately has no route here (R2): it is a consequence of
+        // Enrollment deliberately has no route here: it is a consequence of
         // connecting (the Connect handshake) or an explicit hub/CLI action — the disarm
         // tier — never an operator-page ceremony. The old enroll routes are gone.
         //
@@ -638,7 +638,7 @@ fn html_routes(hub: &ConnectorHub, method: &str, path: &str, query: &str, _body:
                 Err(problem) => bind_problem_page(&problem, local_id),
             }
         }
-        // No POST bind route exists (R4): the bind is a navigation, and a cross-origin
+        // No POST bind route exists: the bind is a navigation, and a cross-origin
         // GET only ever starts a flow the operator sees at the provider. Form posts
         // anywhere outside /api/'s JSON surface fall through to the honest 404.
         _ => not_found_page("only the companion manager, its bind route and /api/* live here"),

@@ -94,7 +94,7 @@ pub struct CallFrame {
 }
 
 /// One waiting-for-operator handshake the connector resumes by itself once the operator
-/// completes the binding (owner addendum). In-memory only: live coordination, never
+/// completes the binding. In-memory only: live coordination, never
 /// durable state — a restart simply asks the model to connect again.
 #[derive(Clone)]
 struct PendingConnect {
@@ -114,10 +114,10 @@ pub struct ConnectorHub {
     /// The loopback companion manager URL this process hosts (serve mode), set once at
     /// startup so `OpenRegistration` can construct the browser target internally.
     manager_page_url: Mutex<Option<String>>,
-    /// The companion whose sign-in a `Connect` popped last (R3): routes the next
+    /// The companion whose sign-in a `Connect` popped last: routes the next
     /// `OpenRegistration` to that companion's bind anchor instead of companion creation.
     pending_bind: Mutex<Option<String>>,
-    /// Browser targets already opened by this process (F2): a looping model must not
+    /// Browser targets already opened by this process: a looping model must not
     /// spawn one tab per retry. Keyed by the full target URL, so distinct anchors stay
     /// distinct.
     opened_pages: Mutex<HashSet<String>>,
@@ -125,7 +125,7 @@ pub struct ConnectorHub {
     /// browser with [`ConnectorHub::with_pages`].
     pages: PageOpener,
     default_page: String,
-    /// Waiting-for-operator connects (A3), shared with the one age-out sweeper.
+    /// Waiting-for-operator connects, shared with the one age-out sweeper.
     pending_connects: Arc<Mutex<Vec<PendingConnect>>>,
     /// The atproto OAuth client (the `/bind` flow's outbound spoke). Replaceable before
     /// serving (tests point the resolution origins at their fake).
@@ -136,7 +136,7 @@ pub struct ConnectorHub {
     /// default. A pub test seam shortens it so the TTL refusal is assertable without
     /// waiting out ten real minutes.
     bind_flight_ttl_ms: AtomicI64,
-    /// Per-companion refresh serialization (R5): one small mutex per companion so a MCP
+    /// Per-companion refresh serialization: one small mutex per companion so a MCP
     /// Connect and the operator auto-resume can never double-refresh one session. The
     /// map itself grows one entry per companion that ever refreshes.
     refresh_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -318,7 +318,7 @@ impl ConnectorHub {
 
     /// The browser target `OpenRegistration` opens. Never rendered into a view, a tool
     /// response or the journal; this accessor exists for the internal open and tests.
-    /// The anchor is routed (R3): a pending sign-in popped by `Connect` wins over the
+    /// The anchor is routed: a pending sign-in popped by `Connect` wins over the
     /// default companion-creation view.
     pub fn registration_target_url(&self) -> Option<String> {
         let page = self.manager_page_url.lock().ok()?.clone()?;
@@ -339,7 +339,7 @@ impl ConnectorHub {
         Some(format!("{page}{}", bind_anchor(local_id)))
     }
 
-    /// Opens one browser target once per process (F2). Returns whether THIS call is the
+    /// Opens one browser target once per process. Returns whether THIS call is the
     /// first to open it — a repeated target answers `false` without opening again, so a
     /// looping model cannot pile up tabs. First-ness is independent of the page opener:
     /// a first call "opened" the page even when the opener opens nothing.
@@ -527,7 +527,7 @@ impl ConnectorHub {
         outcome
     }
 
-    /// The per-companion refresh mutex (R5). Leaf lock: taken only around one
+    /// The per-companion refresh mutex. Leaf lock: taken only around one
     /// companion's refresh, never while holding the store lock (the refresh takes the
     /// store inside, briefly, in its own scopes).
     fn refresh_lock_of(&self, local_id: &str) -> Arc<Mutex<()>> {
@@ -545,13 +545,13 @@ impl ConnectorHub {
     /// Silent refresh before use (the OAuth bind's promise): an access token inside its
     /// refresh margin is renewed from the stored refresh token with the session's DPoP
     /// key, and the renewed session is stored before the caller proceeds. One small
-    /// per-companion mutex serializes this (R5), so a MCP Connect and the operator
+    /// per-companion mutex serializes this, so a MCP Connect and the operator
     /// auto-resume can never double-refresh — the later waiter re-reads the session
     /// and finds the earlier one's renewal. The refreshed `sub` must be the same
-    /// account (R3, mandatory now) or the honest re-bind error. App-password sessions
+    /// account (mandatory) or the honest re-bind error. App-password sessions
     /// carry no refresh material and pass through; a token without a readable expiry
     /// is used as-is (the PDS refuses it honestly if stale). A store failure AFTER a
-    /// rotation keeps the rotated tokens in the live store (R5): the call proceeds on
+    /// rotation keeps the rotated tokens in the live store: the call proceeds on
     /// them and the next save persists them, rather than bricking on the stale disk
     /// copy. A failed refresh is the honest expired-session error.
     fn refresh_atproto_if_stale(&self, local_id: &str) -> Result<AccountSession, String> {
@@ -719,7 +719,7 @@ impl ConnectorHub {
             // exchange method, and an expiry inside the server's accepted window. The
             // adapter percent-encodes the parameters (a crafted audience or origin can
             // never inject query structure), proves the request with the session's
-            // DPoP key (R2: htm/htu of this exact call, `ath` binding the access
+            // DPoP key (htm/htu of this exact call, `ath` binding the access
             // token, and the PDS's OWN nonce — RFC 9449 §8 gives each server its own
             // nonce context) and retries once on the resource server's challenge.
             let auth_state = serde_json::json!({
@@ -793,7 +793,7 @@ impl ConnectorHub {
 
     // ---------- the on-the-fly handshake (Connect) ----------
 
-    /// `Connect { serverUrl, companion? }` — the on-the-fly handshake (owner-directed):
+    /// `Connect { serverUrl, companion? }` — the on-the-fly handshake :
     /// the model says "connect to server X" and enrollment is a consequence, not a
     /// ceremony. (a) the acting companion resolves by behavior — an explicit `companion`
     /// argument (exact match), or exactly one local companion, for every intake alike;
@@ -940,7 +940,7 @@ impl ConnectorHub {
     /// sign-in anchor (guarded, once per target per process), records the pending
     /// connect so the handshake auto-resumes when the operator completes the binding,
     /// narrates it on the feed, and returns the honest outcome. No enrollment side
-    /// effect happens on this branch. `repeated` (P5a) means an identical pending is
+    /// effect happens on this branch. `repeated` means an identical pending is
     /// already narrated: the pending refreshes but the feed stays quiet.
     fn pop_sign_in(&self, companion: &Companion, canonical: &str, repeated: bool, initiator: &str) -> ToolOutcome {
         if let Ok(mut slot) = self.pending_bind.lock() {
@@ -1087,7 +1087,7 @@ impl ConnectorHub {
         }
     }
 
-    /// Records one waiting-for-operator connect (A3) and arms its honest age-out: if
+    /// Records one waiting-for-operator connect and arms its honest age-out: if
     /// the operator never completes (or abandons) the sign-in, the pending connect is
     /// dropped after [`PENDING_CONNECT_TIMEOUT_MS`] with a feed event — never silently.
     /// The age-out runs on ONE shared sweeper thread (armed here on the first pending):
@@ -1146,7 +1146,7 @@ impl ConnectorHub {
         });
     }
 
-    /// The auto-resume (A3), armed right after an operator completed a binding: every
+    /// The auto-resume, armed right after an operator completed a binding: every
     /// fresh pending connect for that companion finishes by itself — no model involved —
     /// through the same enroll-and-arrive steps with the same live progress. The
     /// model's next Connect or Arrive simply finds the enrollment and session ready.
@@ -1672,14 +1672,14 @@ impl ConnectorHub {
         }
     }
 
-    /// Attention, not execution (ADR 0009 invariant): browser-open the companion manager
+    /// Attention, not execution (a standing rule): browser-open the companion manager
     /// so the human operator can create an companion or complete a pending sign-in. The
-    /// anchor is routed (R3): after a `Connect` popped sign-in for one companion, this
+    /// anchor is routed: after a `Connect` popped sign-in for one companion, this
     /// opens that companion's bind anchor; the default is the companion-creation view.
     /// The URL is constructed internally; it never renders into the tool response or
     /// any view. Nothing auto-runs: signing in and enrolling remain operator actions on
     /// that page.
-    /// Once per process (F2): a second call answers honestly instead of spawning
+    /// Once per process: a second call answers honestly instead of spawning
     /// another tab for a looping model.
     fn open_registration(&self) -> ToolOutcome {
         let Some(target) = self.registration_target_url() else {
@@ -2390,7 +2390,7 @@ pub fn registration_target(page_url: &str, anchor: &str) -> String {
     format!("{page_url}{anchor}")
 }
 
-/// The per-companion sign-in target on the companion manager (R2): the connector-served
+/// The per-companion sign-in target on the companion manager: the connector-served
 /// `/bind` page `bind/{localId}/atproto` — a path, not a fragment, since the bind flow
 /// is its own route now.
 pub fn bind_anchor(local_id: &str) -> String {

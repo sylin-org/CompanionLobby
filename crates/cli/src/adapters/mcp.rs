@@ -1,8 +1,8 @@
 //! The MCP spoke: newline-delimited JSON-RPC 2.0 over stdio. The edge owns protocol framing,
 //! negotiation and error codes only — every tool outcome comes from the hub, so the CLI and
-//! MCP intakes observe identical domain behavior. The protocol pattern (bounded framing,
-//! multi-revision negotiation, stateless `server/discover`) is harvested from the sibling
-//! ghostlight connector, which is verified against real MCP hosts.
+//! MCP intakes observe identical domain behavior. The protocol surface (bounded framing,
+//! multi-revision negotiation, stateless `server/discover`) is held to what real MCP
+//! hosts exercise.
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, Write};

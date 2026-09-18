@@ -282,7 +282,7 @@ fn the_operator_api_answers_plainly_and_the_ceremony_routes_are_gone() {
     let (head, body) = http_round_trip(&mut page, "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
     assert!(head.starts_with("HTTP/1.1 200"), "head was: {head}");
     assert!(body.contains("Atmosphere handle"), "the Atmosphere-handle column is live on the page");
-    // The enroll buttons are gone (R2): the page never enrolls, and the per-companion
+    // The enroll buttons are gone: the page never enrolls, and the per-companion
     // bind pages exist for the Connect handshake to open.
     assert!(!body.contains("enroll-bound") && !body.contains("Enroll unbound") && !body.contains("Enroll with bound"), "no enroll buttons remain: {body}");
     assert!(body.contains("/bind/"), "the per-companion bind pages are wired");
@@ -313,7 +313,7 @@ fn the_operator_api_answers_plainly_and_the_ceremony_routes_are_gone() {
     assert!(body.contains("\"handle\":\"lumen\""), "body was: {body}");
     assert_eq!(hub.companions().len(), 1, "the mutation crossed the same hub");
 
-    // The enroll API routes are gone (R2), and the allowlist routes are gone (owner
+    // The enroll API routes are gone, and the allowlist routes are gone (owner
     // correction): both answer an honest 404.
     let mut enroll_attempt = TcpStream::connect(address).expect("connect");
     let (head, _) = http_round_trip(

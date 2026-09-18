@@ -157,7 +157,7 @@ fn the_bind_route_starts_the_flow_immediately_and_binds_the_authenticated_accoun
     assert_eq!(enrollments[0].did.as_deref(), Some("did:plc:lumen"));
     assert!(hub.store().lock().unwrap().has_session(&enrollments[0].enrollment_id));
 
-    // The binding IS the token's subject (R1/R3): no pre-declared DID existed to
+    // The binding IS the token's subject: no pre-declared DID existed to
     // mismatch, and the authenticated account — not the decoy — is what got bound.
     assert_eq!(hub.companion(&companion.local_id).unwrap().bound_did.as_deref(), Some("did:plc:lumen"));
     let session = hub.store().lock().unwrap().atproto_session(&companion.local_id).expect("oauth session");
@@ -210,7 +210,7 @@ fn the_bind_route_starts_the_flow_immediately_and_binds_the_authenticated_accoun
         .expect("the DID document fetch");
     assert!(did_doc_position > token_position, "the bound DID's document is resolved after the token exchange");
     // The service-auth step of the auto-resume used the OAuth session on the
-    // proof-demanding PDS (R2): the DPoP auth scheme (RFC 9449 §7.1), one 401 nonce
+    // proof-demanding PDS: the DPoP auth scheme (RFC 9449 §7.1), one 401 nonce
     // challenge from the PDS's OWN context, and the retried proof embedding it —
     // never the authorization server's nonce.
     let service_auths: Vec<_> = requests
@@ -251,7 +251,7 @@ fn a_state_mismatch_or_missing_issuer_binds_nothing() {
 
     // The forged state matched no flight, so the REAL bind is still parked — but its
     // state is a secret the forger never held, and any other guess is refused the same
-    // way. A callback without an issuer (iss) is refused outright (R5): RFC 9207's
+    // way. A callback without an issuer (iss) is refused outright: RFC 9207's
     // issuer identification is mandatory on this surface.
     let no_issuer = get(address, "/?code=code-1&state=whatever");
     assert!(no_issuer.contains("invalid_callback") && no_issuer.contains("no issuer"), "a missing iss is an honest refusal: {no_issuer}");
@@ -338,7 +338,7 @@ fn an_unknown_provider_or_companion_is_an_honest_404_page() {
     assert!(unknown.starts_with("HTTP/1.1 404"), "the unknown companion is a 404: {unknown}");
     assert!(unknown.contains("No local companion"), "the page says so honestly: {unknown}");
 
-    // No POST surface exists on the bind route at all (R4): the bind is a navigation.
+    // No POST surface exists on the bind route at all: the bind is a navigation.
     let mut post = TcpStream::connect(address).expect("connect");
     let posted = http_round_trip(
         &mut post,
@@ -429,7 +429,7 @@ fn an_expired_oauth_session_refreshes_silently_before_use() {
     assert!(renewed.refresh_jwt.as_deref().is_some_and(|token| token.starts_with("rt_oauth")), "the rotated refresh token is stored");
 
     // The proof mint rode the renewed token — the DPoP scheme with a proof binding it
-    // (R2), on the proof-demanding PDS, after the PDS's own nonce challenge settled.
+    //, on the proof-demanding PDS, after the PDS's own nonce challenge settled.
     let service_auth = requests
         .iter()
         .find(|request| request.path.starts_with("/xrpc/com.atproto.server.getServiceAuth"))

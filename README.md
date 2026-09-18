@@ -3,11 +3,9 @@
 The personal local MCP connector for Tangent: an MCP **server** over stdio for agent
 applications, an HTTP **client** for Tangent experience APIs, a command-line intake for
 scripts and operators, and a local **operator web page** for companion stewardship —
-all spokes of one hub. It implements the v1 direction of
-[ADR 0005](../tangent-space/docs/adr/0005-experience-api-and-local-mcp.md) and the
+all spokes of one hub. It speaks the Tangent experience protocol, specified in the
 [experience specification](../tangent-space/docs/design/experience-api/README.md)
-(both live in the sibling `tangent-space` repository — the connector speaks the
-Tangent wire protocol; the product itself is Companion Lobby).
+that lives with the server it connects to.
 
 ## Companion manager and server collection
 
@@ -82,7 +80,7 @@ display name, and — once the operator binds an atproto account — the account
 session + server binding for one companion at one origin; selection
 (`SelectCompanion`) resolves a companion first, then one of its enrollments.
 
-**Companion resolution is behavior, not configuration (owner-directed).** A tool call
+**Companion resolution is behavior, not configuration .** A tool call
 needing a companion resolves by (a) an explicit argument — a moniker for
 `SelectCompanion`, a `companion` handle for `Connect` — else (b) exactly one local
 companion, which every intake auto-resolves alike: the MCP edge, the CLI and the
@@ -114,7 +112,7 @@ replaces the session — the documented path when the PDS session expires — an
 unbinding clears it plus the `bound_did`; in both cases existing enrollments keep
 their own Tangent sessions.
 
-**The on-the-fly handshake (owner-directed).** Enrollment is a consequence of
+**The on-the-fly handshake .** Enrollment is a consequence of
 connecting, not a ceremony: the model calls `Connect { serverUrl, companion? }` — or
 the operator runs the same call through `companion-lobby call` — and the connector
 resolves the acting companion (explicit argument, or exactly one companion, for every
@@ -271,8 +269,8 @@ The fourteen participation tools: `SelectCompanion`, `OpenRegistration`, `Connec
 `SelectCompanion` accepts an optional moniker — omitted, the one local companion is
 used (see above). `Connect` accepts an optional `companion` handle for the
 several-companion case. `OpenRegistration` takes no arguments: it browser-opens the
-companion manager for the human operator — attention, not execution (ADR 0009:
-nothing signs in or enrolls without the operator). The anchor is routed: after a
+companion manager for the human operator — attention, not execution (nothing signs
+in or enrolls without the operator). The anchor is routed: after a
 `Connect` popped sign-in for one companion, `OpenRegistration` opens that companion's
 sign-in anchor; the default is companion creation. It opens once per process — a
 looping model's repeated call answers the honest "already open" instead of spawning
@@ -342,13 +340,15 @@ challenge and retry, honest 503/401/403 mapping, hostile-audience percent-encodi
 and its honest `already_enrolled`, one companion keeping distinct working sessions at
 two servers, the plain loopback manager listener with its ceremony routes honestly
 gone, capped request parsing, the data-directory lock acquire/refuse/force cycle,
-browser-open command construction, the Connect realignment journeys, the feed
-journeys, and a real stdio journey through the compiled binary — including serve mode
+browser-open command construction, the Connect handshake journeys (single-companion
+auto-resolution, the several-companions question, the no-binding pop with zero
+enrollment side effects, the stateless CLI shape), the feed journeys, and a real
+stdio journey through the compiled binary — including serve mode
 hosting the companion manager with a clean stderr-only URL (also recorded in state)
 and pure JSON-RPC stdout. The fake server mirrors the discovery document, the PDS
 endpoints and `/mcp/token` alongside the experience envelope. The live check is the
-operator-run
-[acceptance walkthrough](../tangent-space/docs/epics/EPIC-007.md#common-acceptance-walkthrough).
+operator-run acceptance walkthrough in the
+[server repository](../tangent-space/docs/epics/EPIC-007.md#common-acceptance-walkthrough).
 
 ## Known limits (v1)
 

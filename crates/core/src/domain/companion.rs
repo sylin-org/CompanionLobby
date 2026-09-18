@@ -62,7 +62,7 @@ pub struct Enrollment {
     pub name: String,
     /// Canonical server origin this enrollment is bound to.
     pub origin: String,
-    /// The server's canonical participant reference (its GUIDv7 id per the W2 contract).
+    /// The server's canonical participant reference (its GUIDv7 id).
     #[serde(default)]
     pub participant_ref: String,
     /// The participant's atproto DID when the server reports one; optional since W2.
@@ -133,7 +133,7 @@ pub struct AccountSession {
     pub obtained_at: i64,
 }
 
-/// Redacted by hand (R7): a derived Debug would print the access token, refresh token
+/// Redacted by hand: a derived Debug would print the access token, refresh token
 /// and DPoP key into any debug log. Only routing facts render; the secrets are named,
 /// never shown.
 impl std::fmt::Debug for AccountSession {
