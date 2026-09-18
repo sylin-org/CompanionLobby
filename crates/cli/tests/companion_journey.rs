@@ -13,30 +13,30 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use common::FakeServer;
-use tangent_connector::adapters::experience::UreqExperience;
-use tangent_connector::adapters::store::StateStore;
-use tangent_connector::application::bus::EventBus;
-use tangent_connector::application::hub::ConnectorHub;
-use tangent_connector::application::ports::ExperiencePort;
-use tangent_connector::domain::companion::CallerId;
-use tangent_connector::domain::intake::IntakeChannel;
+use adapter_service_tangent::experience::UreqExperience;
+use companion_lobby::adapters::store::StateStore;
+use companion_lobby::application::bus::EventBus;
+use companion_lobby::application::hub::ConnectorHub;
+use companion_core::domain::companion::CallerId;
+use companion_core::domain::intake::IntakeChannel;
 
 fn workspace(label: &str, caller: CallerId) -> Arc<ConnectorHub> {
     // Test sessions are synthetic.
-    let dir = std::env::temp_dir().join(format!("tangent-connector-companion-{}-{}", label, std::process::id()));
+    let dir = std::env::temp_dir().join(format!("companion-lobby-companion-{}-{}", label, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
     let events = Arc::new(EventBus::new());
-    let port: Arc<dyn ExperiencePort> = Arc::new(UreqExperience::new());
     let store = StateStore::open(&dir).expect("store");
-    Arc::new(ConnectorHub::new(port, store, events, caller))
+    Arc::new(ConnectorHub::new(store, events, caller)
+        .with_service(Arc::new(UreqExperience::new()))
+        .with_auth(Arc::new(adapter_auth_atproto::atproto_oauth::AtprotoOauth::new())))
 }
 
 fn mcp_workspace(label: &str, client: &str) -> Arc<ConnectorHub> {
     workspace(label, CallerId(format!("mcp:{client}")))
 }
 
-fn select(hub: &ConnectorHub, moniker: Option<&str>) -> tangent_connector::application::hub::ToolOutcome {
+fn select(hub: &ConnectorHub, moniker: Option<&str>) -> companion_lobby::application::hub::ToolOutcome {
     let mut arguments = json!({});
     if let Some(moniker) = moniker {
         arguments["moniker"] = json!(moniker);
@@ -273,7 +273,7 @@ fn the_operator_api_answers_plainly_and_the_ceremony_routes_are_gone() {
         let serving = listener.try_clone().expect("clone listener");
         std::thread::Builder::new()
             .name("operator-under-test".into())
-            .spawn(move || tangent_connector::adapters::manager::serve(serving, hub))
+            .spawn(move || companion_lobby::adapters::manager::serve(serving, hub))
             .expect("server thread");
     }
 
@@ -349,7 +349,7 @@ fn the_companion_manager_refuses_foreign_hosts_and_cross_site_writes() {
         let serving = listener.try_clone().expect("clone listener");
         std::thread::Builder::new()
             .name("operator-hardened-under-test".into())
-            .spawn(move || tangent_connector::adapters::manager::serve(serving, hub))
+            .spawn(move || companion_lobby::adapters::manager::serve(serving, hub))
             .expect("server thread");
     }
     let payload = json!({ "handle": "intruder" }).to_string();

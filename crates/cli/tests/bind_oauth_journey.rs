@@ -20,27 +20,27 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use common::FakeServer;
-use tangent_connector::adapters::atproto_oauth::AtprotoOauth;
-use tangent_connector::adapters::experience::UreqExperience;
-use tangent_connector::adapters::manager;
-use tangent_connector::adapters::store::StateStore;
-use tangent_connector::application::bus::EventBus;
-use tangent_connector::application::hub::ConnectorHub;
-use tangent_connector::application::ports::ExperiencePort;
-use tangent_connector::domain::companion::CallerId;
-use tangent_connector::domain::intake::IntakeChannel;
+use adapter_auth_atproto::atproto_oauth::AtprotoOauth;
+use adapter_service_tangent::experience::UreqExperience;
+use companion_lobby::adapters::manager;
+use companion_lobby::adapters::store::StateStore;
+use companion_lobby::application::bus::EventBus;
+use companion_lobby::application::hub::ConnectorHub;
+use companion_core::domain::companion::CallerId;
+use companion_core::domain::intake::IntakeChannel;
 
 /// A hub plus a real manager server on an ephemeral loopback port, with the OAuth
 /// resolution origins and the default authorization server pointed at the fake.
 /// Answers the server's page URL.
 fn operator_workspace(label: &str, server: &FakeServer) -> (Arc<ConnectorHub>, std::path::PathBuf, String, std::net::SocketAddr) {
-    let dir = std::env::temp_dir().join(format!("tangent-connector-bind-{}-{}", label, std::process::id()));
+    let dir = std::env::temp_dir().join(format!("companion-lobby-bind-{}-{}", label, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
     let events = Arc::new(EventBus::new());
-    let port: Arc<dyn ExperiencePort> = Arc::new(UreqExperience::new());
     let store = StateStore::open(&dir).expect("store");
-    let hub = Arc::new(ConnectorHub::new(port, store, events, CallerId("manager".into())));
+    let hub = Arc::new(ConnectorHub::new(store, events, CallerId("manager".into()))
+        .with_service(Arc::new(UreqExperience::new()))
+        .with_auth(Arc::new(AtprotoOauth::new())));
     hub.set_atproto_oauth(AtprotoOauth::with_origins(server.origin(), server.origin(), server.origin()));
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let address = listener.local_addr().expect("address");
@@ -179,7 +179,7 @@ fn the_bind_route_starts_the_flow_immediately_and_binds_the_authenticated_accoun
     let par = &requests[par_position];
     assert_eq!(
         par.body.get("client_id").and_then(Value::as_str),
-        Some(tangent_connector::adapters::atproto_oauth::bind_client_id().as_str()),
+        Some(adapter_auth_atproto::atproto_oauth::bind_client_id().as_str()),
         "the loopback client id declaring its scope set"
     );
     assert_eq!(par.body.get("response_type").and_then(Value::as_str), Some("code"));
@@ -419,7 +419,7 @@ fn an_expired_oauth_session_refreshes_silently_before_use() {
         .expect("a refresh grant ran before use");
     assert_eq!(
         refresh.body.get("client_id").and_then(Value::as_str),
-        Some(tangent_connector::adapters::atproto_oauth::bind_client_id().as_str()),
+        Some(adapter_auth_atproto::atproto_oauth::bind_client_id().as_str()),
         "the refresh presents the client id the grant lives under"
     );
 
@@ -442,7 +442,7 @@ fn an_expired_oauth_session_refreshes_silently_before_use() {
 
 #[test]
 fn the_port_discipline_is_default_then_environment_then_flag() {
-    use tangent_connector::adapters::manager::{port_from, DEFAULT_PORT};
+    use companion_lobby::adapters::manager::{port_from, DEFAULT_PORT};
     assert_eq!(port_from(None, None).unwrap(), DEFAULT_PORT);
     assert_eq!(port_from(None, Some("")).unwrap(), DEFAULT_PORT, "an empty environment value falls back");
     assert_eq!(port_from(None, Some("5321")).unwrap(), 5321);
@@ -450,23 +450,23 @@ fn the_port_discipline_is_default_then_environment_then_flag() {
     assert!(port_from(Some(0), None).is_err(), "0 would pick a random port");
     assert!(port_from(None, Some("0")).is_err(), "0 would pick a random port");
     let refused = port_from(None, Some("not-a-port")).expect_err("garbage is an honest refusal");
-    assert!(refused.contains("TANGENT_CONNECTOR_PORT"), "the message names the knob: {refused}");
+    assert!(refused.contains("COMPANION_LOBBY_PORT"), "the message names the knob: {refused}");
 }
 
 #[test]
 fn an_in_use_port_is_a_refusal_naming_the_holder() {
-    let dir = std::env::temp_dir().join(format!("tangent-connector-bind-conflict-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("companion-lobby-bind-conflict-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
     // The lockfile names the one-process holder (us, in this test).
-    let _lock = tangent_connector::adapters::lockfile::DataDirLock::acquire(&dir, false).expect("lock");
+    let _lock = companion_lobby::adapters::lockfile::DataDirLock::acquire(&dir, false).expect("lock");
     // Another listener holds the fixed port.
     let squatter = TcpListener::bind(("127.0.0.1", manager::DEFAULT_PORT)).expect("squatter binds 5219");
     let refused = manager::bind_listener(&dir, manager::DEFAULT_PORT).expect_err("the bind conflict refuses");
     drop(squatter);
     assert!(refused.contains("already listening"), "names the conflict: {refused}");
     assert!(refused.contains(&format!("pid={}", std::process::id())), "names the lockfile holder: {refused}");
-    assert!(refused.contains("TANGENT_CONNECTOR_PORT"), "offers the escape: {refused}");
+    assert!(refused.contains("COMPANION_LOBBY_PORT"), "offers the escape: {refused}");
     // With the port free again, the same call binds.
     assert!(manager::bind_listener(&dir, manager::DEFAULT_PORT).is_ok(), "the fixed port binds once free");
 }

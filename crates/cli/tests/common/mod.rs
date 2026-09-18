@@ -13,8 +13,8 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
-use tangent_connector::application::hub::ConnectorHub;
-use tangent_connector::domain::companion::{AccountSession, CallerId, Enrollment};
+use companion_lobby::application::hub::ConnectorHub;
+use companion_core::domain::companion::{AccountSession, CallerId, Enrollment};
 
 #[allow(dead_code)]
 pub const LUMEN_CREDENTIAL: &str = "ts_lumen_test_credential_000000000000000000";
@@ -158,7 +158,7 @@ const PDS_DPOP_NONCE: &str = "fake-pds-dpop-nonce-1";
 /// The scoped localhost client id the connector binds under — the fake's single
 /// source mirrors the crate's own construction, so the two can never drift.
 fn scoped_client_id() -> String {
-    tangent_connector::adapters::atproto_oauth::bind_client_id()
+    adapter_auth_atproto::atproto_oauth::bind_client_id()
 }
 
 /// A scripted experience API. Responses are synthetic and the post registry gives the
@@ -562,7 +562,7 @@ fn respond(
         ("GET", "/oauth/authorize") => {
             let client_id = query_param(path, "client_id").unwrap_or_default();
             let request_uri = query_param(path, "request_uri").unwrap_or_default();
-            if client_id != tangent_connector::adapters::atproto_oauth::bind_client_id() {
+            if client_id != adapter_auth_atproto::atproto_oauth::bind_client_id() {
                 return Script::Body(400, json!({ "error": "invalid_request", "error_description": "Unsupported client_id" }));
             }
             // Auto-approval as the provider's signed-in account: the DID document the
@@ -1146,11 +1146,11 @@ impl WithReceipt for Value {
 
 /// Collects published events for assertions.
 #[allow(dead_code)]
-pub struct EventRecorder(pub Receiver<tangent_connector::domain::events::DomainEvent>);
+pub struct EventRecorder(pub Receiver<companion_core::domain::events::DomainEvent>);
 
 impl EventRecorder {
     #[allow(dead_code)]
-    pub fn drain(&self) -> Vec<tangent_connector::domain::events::DomainEvent> {
+    pub fn drain(&self) -> Vec<companion_core::domain::events::DomainEvent> {
         let mut observed = Vec::new();
         while let Ok(event) = self.0.try_recv() {
             observed.push(event);
@@ -1443,11 +1443,11 @@ pub fn seed_atproto_session(hub: &ConnectorHub, local_id: &str, handle: &str, di
 /// that directory instead of driving the handshake in process.
 #[allow(dead_code)]
 pub fn seed_enrolled_state(home: &std::path::Path, handle: &str, origin: &str, token: &str) -> String {
-    let events = Arc::new(tangent_connector::application::bus::EventBus::new());
-    let port: Arc<dyn tangent_connector::application::ports::ExperiencePort> =
-        Arc::new(tangent_connector::adapters::experience::UreqExperience::new());
-    let store = tangent_connector::adapters::store::StateStore::open(home).expect("state store");
-    let hub = ConnectorHub::new(port, store, events, CallerId("cli".into()));
+    let events = Arc::new(companion_lobby::application::bus::EventBus::new());
+    let store = companion_lobby::adapters::store::StateStore::open(home).expect("state store");
+    let hub = ConnectorHub::new(store, events, CallerId("cli".into()))
+        .with_service(Arc::new(adapter_service_tangent::experience::UreqExperience::new()))
+        .with_auth(Arc::new(adapter_auth_atproto::atproto_oauth::AtprotoOauth::new()));
     let companion = hub.create_companion(handle, None).expect("companion");
     let enrollment_id = format!("cmp_seeded_{handle}");
     {

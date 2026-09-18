@@ -26,12 +26,12 @@ struct Peer {
 
 impl Peer {
     fn spawn(arguments: &[&str], home: &std::path::Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_tangent-connector"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_companion-lobby"))
             .args(arguments)
-            .env("TANGENT_CONNECTOR_HOME", home)
+            .env("COMPANION_LOBBY_HOME", home)
             // The spawned binary installs the platform browser; its tests never open one.
-            .env("TANGENT_CONNECTOR_NO_BROWSER", "1")
-            .env("TANGENT_CONNECTOR_PORT", NEXT_PAGE_PORT.fetch_add(1, Ordering::Relaxed).to_string())
+            .env("COMPANION_LOBBY_NO_BROWSER", "1")
+            .env("COMPANION_LOBBY_PORT", NEXT_PAGE_PORT.fetch_add(1, Ordering::Relaxed).to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -94,7 +94,7 @@ impl Drop for Peer {
 #[test]
 fn the_stdio_edge_negotiates_and_serves_the_fourteen_tools() {
     let server = FakeServer::start();
-    let home = std::env::temp_dir().join(format!("tangent-connector-stdio-{}", std::process::id()));
+    let home = std::env::temp_dir().join(format!("companion-lobby-stdio-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).expect("temp dir");
 
@@ -111,7 +111,7 @@ fn the_stdio_edge_negotiates_and_serves_the_fourteen_tools() {
     let initialize = peer.receive();
     assert_eq!(initialize["id"], json!(1));
     assert_eq!(initialize["result"]["protocolVersion"], json!("2025-06-18"));
-    assert_eq!(initialize["result"]["serverInfo"]["name"], json!("tangent-connector"));
+    assert_eq!(initialize["result"]["serverInfo"]["name"], json!("companion-lobby"));
 
     // A future revision is counteroffered with the latest supported one.
     peer.send(&json!({
@@ -193,7 +193,7 @@ fn the_stdio_edge_negotiates_and_serves_the_fourteen_tools() {
 fn authorized_scope_emits_tool_list_changed_after_the_result() {
     let server = FakeServer::start();
     let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let home = std::env::temp_dir().join(format!("tangent-connector-steward-{}-{unique}", std::process::id()));
+    let home = std::env::temp_dir().join(format!("companion-lobby-steward-{}-{unique}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
     common::seed_enrolled_state(&home, "steward", server.origin(), STEWARD_CREDENTIAL);
     let mut peer = Peer::spawn(&["serve"], &home);
@@ -235,7 +235,7 @@ fn authorized_scope_emits_tool_list_changed_after_the_result() {
 
 #[test]
 fn serve_mode_hosts_the_operator_page_with_a_clean_url_and_pure_stdout() {
-    let home = std::env::temp_dir().join(format!("tangent-connector-serve-{}", std::process::id()));
+    let home = std::env::temp_dir().join(format!("companion-lobby-serve-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).expect("temp dir");
 
@@ -336,7 +336,7 @@ fn serve_mode_hosts_the_operator_page_with_a_clean_url_and_pure_stdout() {
 #[test]
 fn serve_mode_survives_a_looping_connect_and_operator_mutations_together() {
     let server = FakeServer::start();
-    let home = std::env::temp_dir().join(format!("tangent-connector-looping-{}", std::process::id()));
+    let home = std::env::temp_dir().join(format!("companion-lobby-looping-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).expect("temp dir");
 
@@ -359,7 +359,7 @@ fn serve_mode_survives_a_looping_connect_and_operator_mutations_together() {
         "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "zcode", "version": "0" } }
     }));
     let initialized = peer.receive();
-    assert_eq!(initialized["result"]["serverInfo"]["name"], json!("tangent-connector"));
+    assert_eq!(initialized["result"]["serverInfo"]["name"], json!("companion-lobby"));
     peer.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
 
     // Operator setup through the page API this same process hosts: one companion — the
