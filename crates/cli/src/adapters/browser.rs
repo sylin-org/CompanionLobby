@@ -30,7 +30,7 @@ pub fn browser_command(url: &str) -> Command {
 }
 
 /// Headless hosts set this to `1` so the binary never opens a browser.
-pub const NO_BROWSER_ENV: &str = "TANGENT_CONNECTOR_NO_BROWSER";
+pub const NO_BROWSER_ENV: &str = "COMPANION_LOBBY_NO_BROWSER";
 
 /// Whether a browser spawn is allowed for a given value of [`NO_BROWSER_ENV`].
 pub fn spawn_allowed(flag: Option<&str>) -> bool {

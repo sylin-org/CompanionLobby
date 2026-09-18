@@ -49,7 +49,7 @@ impl DataDirLock {
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 Err(format!(
-                    "another tangent-connector process holds this state directory ({});
+                    "another companion-lobby process holds this state directory ({});
                     stop it first, or pass --force if that lock is stale",
                     describe_holder(&path)
                 ))
@@ -101,7 +101,7 @@ mod tests {
     use super::*;
 
     fn dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tangent-connector-lock-{}-{}", label, std::process::id()));
+        let dir = std::env::temp_dir().join(format!("companion-lobby-lock-{}-{}", label, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp dir");
         dir

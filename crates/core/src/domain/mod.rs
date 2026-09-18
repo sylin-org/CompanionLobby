@@ -1,4 +1,4 @@
-//! Domain vocabulary for the Tangent connector. Pure types and policies: no I/O, no adapter
+//! Domain vocabulary for the Companion Lobby connector. Pure types and policies: no I/O, no adapter
 //! knowledge, no secrets. The application hub composes these; adapters move bytes.
 
 pub mod attention;

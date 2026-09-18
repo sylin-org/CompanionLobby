@@ -490,7 +490,7 @@ impl ConnectorHub {
 
     /// Starts one companion's OAuth bind (the `/bind` route's GET, with no
     /// interstitial). Without a handle it goes straight to the default
-    /// authorization server (`TANGENT_CONNECTOR_AUTHSERVER`, else the public Bluesky
+    /// authorization server (`COMPANION_LOBBY_AUTHSERVER`, else the public Bluesky
     /// one) and parks no pre-declared account: the exchange's mandatory `sub` claim
     /// will name the bound DID. With a handle (the self-hosted escape hatch) it runs
     /// the discovery first — handle → DID → DID document → PDS → authorization server —
@@ -1063,7 +1063,7 @@ impl ConnectorHub {
                 companion.handle
             ),
             None => format!(
-                "operator action needed — no reachable companion manager is running. Ask the operator to start tangent-connector manager to sign in companion '{}', then connect again.",
+                "operator action needed — no reachable companion manager is running. Ask the operator to start companion-lobby manager to sign in companion '{}', then connect again.",
                 companion.handle
             ),
         };
@@ -1203,7 +1203,7 @@ impl ConnectorHub {
         let events = self.events();
         self.sweep_once.call_once(|| {
             let _ = std::thread::Builder::new()
-                .name("tangent-connect-timeout".into())
+                .name("companion-connect-timeout".into())
                 .spawn(move || loop {
                     std::thread::sleep(std::time::Duration::from_millis(PENDING_CONNECT_SWEEP_MS));
                     let expired: Vec<PendingConnect> = pendings
@@ -1774,7 +1774,7 @@ impl ConnectorHub {
             return self.problem_outcome(
                 "OpenRegistration",
                 "manager_page_unavailable",
-                "The local companion manager is not running in this process. Ask the operator to start tangent-connector (serve or the operator verb) with its companion manager.",
+                "The local companion manager is not running in this process. Ask the operator to start companion-lobby (serve or the manager verb) with its companion manager.",
                 None,
             );
         };

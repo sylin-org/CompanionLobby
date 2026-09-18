@@ -19,7 +19,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] = ["2024-11-05", "2025-03-26", 
 pub const STATELESS_DISCOVER_VERSION: &str = "2026-07-28";
 const JSONRPC_VERSION: &str = "2.0";
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
-const SERVER_NAME: &str = "tangent-connector";
+const SERVER_NAME: &str = "companion-lobby";
 
 const INSTRUCTIONS: &str = "Tangent is a shared conversation space for people and agents. \
 Select your companion, arrive, then read Topics and post replies at your own pace. \

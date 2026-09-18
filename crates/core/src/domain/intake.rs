@@ -14,7 +14,7 @@ pub enum IntakeChannel {
     Mcp,
     /// A local script or human, through the command line.
     Cli,
-    /// The operator web page served by the `operator` verb's loopback listener.
+    /// The operator web page served by the `manager` verb's loopback listener.
     Manager,
 }
 

@@ -1,5 +1,5 @@
 //! The operator spoke: a loopback-only web page for companion and enrollment stewardship,
-//! on a fixed port (5219 — a stable URL; `TANGENT_CONNECTOR_PORT` or `--port` names
+//! on a fixed port (5219 — a stable URL; `COMPANION_LOBBY_PORT` or `--port` names
 //! another fixed port). Hand-rolled minimal HTTP/1.1 in the house
 //! style — request line, headers and a Content-Length body under an 8 KiB header cap
 //! and a 1 MiB body cap, GET/POST only, `Connection: close`, a 30 s read timeout,
@@ -71,7 +71,7 @@ fn manager_index() -> String {
         .replace("<!-- TANGENT_ATMOSPHERE -->", &atmosphere_assets())
 }
 /// The companion manager's fixed default port: a stable URL any Connect
-/// can name. `--port` or `TANGENT_CONNECTOR_PORT` names another fixed port; there is no
+/// can name. `--port` or `COMPANION_LOBBY_PORT` names another fixed port; there is no
 /// random port.
 pub const DEFAULT_PORT: u16 = 5219;
 /// The deterministic page URL that goes with [`DEFAULT_PORT`].
@@ -79,15 +79,15 @@ pub const DEFAULT_PAGE_URL: &str = "http://127.0.0.1:5219/";
 
 /// How the companion page names itself in its discovery document. A probe matches this
 /// before treating a listener as the page, so an unrelated local service on the same
-/// port is never mistaken for it.
-pub const CONNECTOR_PRODUCT: &str = "tangent-space-connector";
+/// port is never mistaken for it. Single source with the connector's probe (core).
+pub use companion_core::traits::CONNECTOR_PRODUCT;
 /// The one bind provider this connector serves today.
 const BIND_PROVIDER_ATPROTO: &str = "atproto";
 
 /// The port the companion manager serves on: the `--port` flag wins, then
-/// `TANGENT_CONNECTOR_PORT`, then the fixed default. Port 0 is refused.
+/// `COMPANION_LOBBY_PORT`, then the fixed default. Port 0 is refused.
 pub fn resolve_manager_port(flag: Option<u16>) -> Result<u16, String> {
-    port_from(flag, std::env::var("TANGENT_CONNECTOR_PORT").ok().as_deref())
+    port_from(flag, std::env::var("COMPANION_LOBBY_PORT").ok().as_deref())
 }
 
 /// The pure decision behind [`resolve_manager_port`], so the discipline is assertable
@@ -98,11 +98,11 @@ pub fn port_from(flag: Option<u16>, environment: Option<&str>) -> Result<u16, St
         (None, None | Some("")) => DEFAULT_PORT,
         (None, Some(value)) => value
             .parse::<u16>()
-            .map_err(|_| format!("TANGENT_CONNECTOR_PORT must be a port number, not '{value}'"))?,
+            .map_err(|_| format!("COMPANION_LOBBY_PORT must be a port number, not '{value}'"))?,
     };
     if port == 0 {
         return Err("the companion manager needs a fixed port; 0 would pick a random one. \
-            Name one from 1 to 65535 with --port or TANGENT_CONNECTOR_PORT."
+            Name one from 1 to 65535 with --port or COMPANION_LOBBY_PORT."
             .to_string());
     }
     Ok(port)
@@ -116,7 +116,7 @@ pub fn bind_listener(data_dir: &std::path::Path, port: u16) -> Result<TcpListene
     match TcpListener::bind(("127.0.0.1", port)) {
         Ok(listener) => Ok(listener),
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => Err(format!(
-            "cannot host the companion manager on 127.0.0.1:{port}: another process is already listening there \n             (state lock: {}; last recorded companion manager: {}). \n             Stop whatever holds the port, or choose another with --port or TANGENT_CONNECTOR_PORT.",
+            "cannot host the companion manager on 127.0.0.1:{port}: another process is already listening there \n             (state lock: {}; last recorded companion manager: {}). \n             Stop whatever holds the port, or choose another with --port or COMPANION_LOBBY_PORT.",
             crate::adapters::lockfile::holder_of(data_dir),
             recorded_page_url(data_dir).unwrap_or_else(|| "none recorded".to_string()),
         )),
@@ -129,7 +129,7 @@ fn recorded_page_url(data_dir: &std::path::Path) -> Option<String> {
     crate::adapters::store::StateStore::open(data_dir).ok().and_then(|store| store.manager_page_url())
 }
 
-/// Entry point of the `operator` verb. Owns stdout for its banner; the MCP edge is a
+/// Entry point of the `manager` verb. Owns stdout for its banner; the MCP edge is a
 /// separate process and never runs here.
 pub fn manager(rest: &[String]) -> i32 {
     let mut port: Option<u16> = None;
@@ -187,7 +187,7 @@ pub fn manager(rest: &[String]) -> i32 {
         }
     };
     let url = format!("http://127.0.0.1:{port}/");
-    println!("Tangent connector companion manager: {url}");
+    println!("Companion Lobby connector companion manager: {url}");
     println!("The connector records this address in its state so any Connect can pop this page.");
     // The page URL is recorded in memory AND durable state: a Connect in any
     // process — the CLI one-shots included — pops this page at the sign-in anchor.
@@ -211,7 +211,7 @@ pub fn manager(rest: &[String]) -> i32 {
     let serving = listener.try_clone().expect("clone listener");
     let serve_hub = hub.clone();
     let server = std::thread::Builder::new()
-        .name("tangent-operator".into())
+        .name("companion-manager".into())
         .spawn(move || serve(serving, serve_hub))
         .expect("manager server thread");
     // The server thread owns the listener; the tray's Quit exits the process. Either
@@ -684,8 +684,8 @@ fn bind_skeleton(title: &str, body: &str) -> String {
     let atmosphere = atmosphere_assets();
     format!(r##"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#111016"><title>{title} · Tangent</title><style>{style}</style></head>
-<body class="auth-page"><header class="masthead"><a class="brand" href="/"><span aria-hidden="true">✦</span> Tangent <small>Companions</small></a><span class="local-badge">ON YOUR COMPUTER</span></header>
+<meta name="theme-color" content="#111016"><title>{title} · Companion Lobby</title><style>{style}</style></head>
+<body class="auth-page"><header class="masthead"><a class="brand" href="/"><span aria-hidden="true">✦</span> Companion <small>Lobby</small></a><span class="local-badge">ON YOUR COMPUTER</span></header>
 <main>{body}</main>{atmosphere}</body></html>"##)
 }
 

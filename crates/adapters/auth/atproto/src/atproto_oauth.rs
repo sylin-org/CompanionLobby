@@ -49,12 +49,12 @@ pub fn bind_client_id() -> String {
     format!("http://localhost?scope={}", percent_encode(SCOPE))
 }
 /// The default authorization server: public Bluesky accounts live
-/// here; `TANGENT_CONNECTOR_AUTHSERVER` overrides it for self-hosted worlds. The
+/// here; `COMPANION_LOBBY_AUTHSERVER` overrides it for self-hosted worlds. The
 /// provider's own UI handles account selection and sign-in — the connector never
 /// duplicates it.
 pub const DEFAULT_AUTHSERVER: &str = "https://bsky.social";
 /// The environment knob that overrides [`DEFAULT_AUTHSERVER`].
-pub const AUTHSERVER_ENV: &str = "TANGENT_CONNECTOR_AUTHSERVER";
+pub const AUTHSERVER_ENV: &str = "COMPANION_LOBBY_AUTHSERVER";
 /// How long a started bind stays completable: the authorization server parks pushed
 /// requests for ~5 minutes; ten minutes of operator attention is the whole budget.
 pub const FLIGHT_TTL_MS: i64 = 10 * 60 * 1000;
@@ -81,7 +81,7 @@ pub struct AtprotoOauth {
     /// server-side handle resolution that needs no session).
     handle_resolver: String,
     /// The authorization server binds use when no `?handle=` discovery names one: the
-    /// public default, or the operator's `TANGENT_CONNECTOR_AUTHSERVER` override.
+    /// public default, or the operator's `COMPANION_LOBBY_AUTHSERVER` override.
     default_authserver: String,
     /// Per-authorization-server DPoP nonces (RFC 9449 §8): the token-endpoint
     /// context only, so the retry is the exception.
@@ -132,7 +132,7 @@ pub struct OAuthTokens {
 
 impl AtprotoOauth {
     /// The production client: the public PLC directory, the public handle resolver and
-    /// the default authorization server (`TANGENT_CONNECTOR_AUTHSERVER` overrides the
+    /// the default authorization server (`COMPANION_LOBBY_AUTHSERVER` overrides the
     /// public constant; an unusable override falls back to it — a broken authorization
     /// server then surfaces honestly in the bind flow itself).
     pub fn new() -> Self {
@@ -633,7 +633,7 @@ fn normalize_handle(input: &str) -> Result<String, String> {
     Ok(handle)
 }
 
-/// The `TANGENT_CONNECTOR_AUTHSERVER` discipline: one acceptable origin, or the honest
+/// The `COMPANION_LOBBY_AUTHSERVER` discipline: one acceptable origin, or the honest
 /// refusal naming the knob. The pure decision behind [`AtprotoOauth::new`], so it is
 /// assertable without touching the process environment.
 pub fn authserver_from(environment: Option<&str>) -> Result<String, String> {

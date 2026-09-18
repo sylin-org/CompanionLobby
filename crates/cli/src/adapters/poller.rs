@@ -25,7 +25,7 @@ pub fn spawn_checkers(hub: Arc<ConnectorHub>, companions: Vec<String>, poll_seco
     for enrollment_id in companions {
         let hub = hub.clone();
         std::thread::Builder::new()
-            .name(format!("tangent-check-{enrollment_id}"))
+            .name(format!("companion-check-{enrollment_id}"))
             .spawn(move || run_checker(hub, enrollment_id, poll_seconds))
             .expect("checker thread");
     }

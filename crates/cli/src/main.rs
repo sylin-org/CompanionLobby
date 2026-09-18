@@ -61,27 +61,28 @@ fn run(arguments: &[String]) -> i32 {
 
 fn usage() {
     eprintln!(
-        "tangent-connector — the personal local MCP connector for Tangent\n\
+        "companion-lobby — the personal local MCP connector for Tangent\n\
          \n\
-         serve [--force]                MCP stdio server (the agent-facing intake);
-                                        also hosts the loopback companion manager in-process
+         serve [--force]                MCP stdio server (the agent-facing intake);\n\
+                                        also hosts the loopback companion manager in-process\n\
                                         (its URL goes to stderr, never stdout)\n\
-         operator [--port N] [--no-open] [--force]\n\
-                                        local operator web page + tray (companions,
+         manager [--port N] [--no-open] [--force]\n\
+                                        local operator web page + tray (companions,\n\
                                         atproto sign-in via the /bind route, enrollments,\n\
                                         status). Fixed default port 5219 (stable URL);\n\
-                                        crate_PORT or --port overrides\n\
+                                        COMPANION_LOBBY_PORT or --port overrides\n\
          call <tool> [json] [--view V]  invoke one participation tool through the same hub\n\
          call --stdin [--json]          read `<tool> <json>` lines from standard input\n\
          catalog [--json]               list the tool catalog\n\
          companions [--json]            list local companions\n\
-         companions [--json]            list enrollments (companions)\n\
+         enrollments [--json]           list enrollments (companion + server sessions)\n\
          check [--name N]               run one background digest check (no model)\n\
          forget --name N                remove an enrollment and its stored session\n\
          \n\
-         Environment: crate_HOME (state directory);\n\
-         crate_PORT (companion manager port; default 5219);\n\
-         crate_NO_BROWSER=1 (never open a browser)."
+         Environment: COMPANION_LOBBY_HOME (state directory);\n\
+         COMPANION_LOBBY_PORT (companion manager port; default 5219);\n\
+         COMPANION_LOBBY_NO_BROWSER=1 (never open a browser);\n\
+         COMPANION_LOBBY_AUTHSERVER (atproto authorization server; default bsky.social)."
     );
 }
 
@@ -103,8 +104,8 @@ fn serve(rest: &[String]) -> i32 {
             return EXIT_FAILED;
         }
     };
-    // The SAME loopback manager server the operator verb hosts, in-process — on the
-    // same fixed port (5219, or the one crate_PORT names).
+    // The SAME loopback manager server the manager verb hosts, in-process — on the
+    // same fixed port (5219, or the one COMPANION_LOBBY_PORT names).
     // Its URL goes to stderr and the diagnostics journal — NEVER stdout, which is
     // protocol-owned JSON-RPC and nothing else.
     let port = match companion_lobby::adapters::manager::resolve_manager_port(None) {
@@ -122,7 +123,7 @@ fn serve(rest: &[String]) -> i32 {
         }
     };
     let url = format!("http://127.0.0.1:{port}/");
-    eprintln!("Tangent connector companion manager: {url}");
+    eprintln!("Companion Lobby connector companion manager: {url}");
     eprintln!("The connector records it in its state so any Connect can pop this page.");
     // The hub is constructed when the initialize request names the connecting client;
     // clientInfo.name becomes the caller (attribution + feed labeling, never a domain
@@ -138,7 +139,7 @@ fn serve(rest: &[String]) -> i32 {
         hub.announce_manager_page(&url);
         let manager_hub = hub.clone();
         std::thread::Builder::new()
-            .name("tangent-operator".into())
+            .name("companion-manager".into())
             .spawn(move || manager::serve(listener, manager_hub))
             .expect("manager server thread");
         let (auto, poll_seconds) = {
@@ -317,7 +318,7 @@ fn companions(rest: &[String]) -> i32 {
         println!("{}", serde_json::to_string_pretty(&plain).unwrap_or_default());
     } else {
         if entries.is_empty() {
-            println!("No companions exist yet. Create one in the companion manager (tangent-connector manager).");
+            println!("No companions exist yet. Create one in the companion manager (companion-lobby manager).");
         }
         for (companion, count) in &entries {
             println!(
@@ -363,7 +364,7 @@ fn enrollments(rest: &[String]) -> i32 {
         println!("{}", serde_json::to_string_pretty(&companions).unwrap_or_default());
     } else {
         if companions.is_empty() {
-            println!("No companions are enrolled. Use enroll or the companion manager first.");
+            println!("No companions are enrolled. Use Connect (or the companion manager) to enroll one.");
         }
         for entry in &companions {
             println!(

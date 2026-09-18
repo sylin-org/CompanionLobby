@@ -16,7 +16,7 @@ const ROTATE_BYTES: u64 = 1024 * 1024;
 pub fn spawn(events: &EventBus, data_dir: std::path::PathBuf) {
     let receiver = events.subscribe();
     std::thread::Builder::new()
-        .name("tangent-diagnostics".into())
+        .name("companion-diagnostics".into())
         .spawn(move || journal_loop(receiver, data_dir))
         .expect("diagnostics thread");
 }
@@ -26,7 +26,7 @@ fn journal_loop(receiver: Receiver<DomainEvent>, data_dir: PathBuf) {
     while let Ok(event) = receiver.recv() {
         let line = serde_json::to_string(&event).unwrap_or_else(|_| "{\"kind\":\"unserializable\"}".to_string());
         if let Err(error) = append(&path, &line) {
-            eprintln!("tangent-connector: diagnostics journal failed: {error}");
+            eprintln!("companion-lobby: diagnostics journal failed: {error}");
             return;
         }
         rotate_if_large(&path);

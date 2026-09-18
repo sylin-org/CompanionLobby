@@ -1,10 +1,10 @@
 //! The tray spoke for the `operator` verb. Windows-only in v1, matching the already
 //! windows-native keyring dependency; elsewhere `spawn` is a documented no-op.
 //!
-//! Threading: the tray (icon + menu) is created on the `tangent-tray` thread, which then
+//! Threading: the tray (icon + menu) is created on the `companion-tray` thread, which then
 //! becomes the Win32 message pump — tray-icon requires its creating thread to dispatch
 //! its own message queue on Windows. Menu events are delivered by tray-icon through a
-//! thread-safe channel, consumed by the `tangent-tray-menu` thread. State reads cross the
+//! thread-safe channel, consumed by the `companion-tray-menu` thread. State reads cross the
 //! hub under its lock; nothing here mutates anything.
 
 use std::sync::Arc;
@@ -18,14 +18,14 @@ use companion_core::domain::events::DomainEvent;
 #[cfg(target_os = "windows")]
 pub fn spawn(hub: Arc<ConnectorHub>, url: String, quit: Box<dyn FnOnce() + Send>) {
     let spawned = std::thread::Builder::new()
-        .name("tangent-tray".into())
+        .name("companion-tray".into())
         .spawn(move || {
             if let Err(error) = run(hub, url, quit) {
-                eprintln!("tangent-connector: tray unavailable ({error}); the companion manager remains available");
+                eprintln!("companion-lobby: tray unavailable ({error}); the companion manager remains available");
             }
         });
     if let Err(error) = spawned {
-        eprintln!("tangent-connector: tray thread could not start ({error})");
+        eprintln!("companion-lobby: tray thread could not start ({error})");
     }
 }
 
@@ -79,7 +79,7 @@ fn run(hub: Arc<ConnectorHub>, url: String, quit: Box<dyn FnOnce() + Send>) -> R
 
     let tray: TrayIcon = TrayIconBuilder::new()
         .with_menu(Box::new(build_menu(&hub)))
-        .with_tooltip("Tangent connector")
+        .with_tooltip("Companion Lobby")
         .with_icon(icon())
         .build()
         .map_err(|error| error.to_string())?;
@@ -87,7 +87,7 @@ fn run(hub: Arc<ConnectorHub>, url: String, quit: Box<dyn FnOnce() + Send>) -> R
     let menu_hub = hub.clone();
     let mut quit = Some(quit);
     std::thread::Builder::new()
-        .name("tangent-tray-menu".into())
+        .name("companion-tray-menu".into())
         .spawn(move || loop {
             match MenuEvent::receiver().recv() {
                 Ok(event) => match event.id.0.as_str() {
