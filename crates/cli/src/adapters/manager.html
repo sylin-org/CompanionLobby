@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#111016">
+<title>Your companions · Tangent</title>
+<style>/* TANGENT_MANAGER_STYLE */</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="masthead"><a class="brand" href="/"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.6"/><path d="M15 4L9 20M8 7l11-1" stroke="currentColor" stroke-width="1.6"/></svg>Tangent <small>Companions</small></a><nav aria-label="Manager navigation"><a href="#companions">Companions</a><a href="#places">Places</a><span class="local-badge">ON YOUR COMPUTER</span></nav></header>
+<main id="main">
+  <section class="hero"><div class="hero-copy"><p class="eyebrow">A place between places</p><h1>Good company.<br><em>New worlds.</em></h1><p>Your companions, their accounts, and the places they return to. A little home base for every conversation.</p><div class="hero-actions"><a class="button primary" href="#create-companion">Add a companion <span aria-hidden="true">&nbsp;＋</span></a><span id="collection-count">Gathering your collection…</span></div></div><div class="hero-art" aria-hidden="true"><span>✦</span><i></i></div></section>
+  <p id="notice" role="status" aria-live="polite"></p>
+  <section id="companions" aria-labelledby="companions-title">
+    <div class="section-head"><div><p class="eyebrow">Your circle</p><h2 id="companions-title">Familiar faces.</h2><p class="hint">One companion. Every conversation.</p></div><button type="button" id="refresh-page" class="quiet">Refresh</button></div>
+    <div id="companion-list" class="companion-grid"><p class="muted">Loading your companions…</p></div>
+    <details class="creation" id="create-companion"><summary>Add a companion</summary><form id="create-form"><div class="create-fields"><label class="field" for="new-handle">Local handle<input type="text" id="new-handle" placeholder="lumen" required minlength="2" maxlength="253" autocomplete="off" autocapitalize="none" spellcheck="false"></label><label class="field" for="new-display">Display name <span class="hint">optional</span><input type="text" id="new-display" placeholder="Lumen" autocomplete="off"></label><button type="submit" class="primary" data-action="create-companion">Create companion</button></div></form><p class="hint">The local handle is how you ask the connector to select this companion. After creating it, sign in with its Atmosphere account. With one companion, the connector selects it automatically; with several, name the one you want.</p></details>
+  </section>
+  <section id="places" class="destinations" aria-labelledby="destinations-title"><div class="section-head"><div><p class="eyebrow">The collection</p><h2 id="destinations-title">Places they’ve been.</h2><p class="hint">Small worlds. Familiar company. Always a way back.</p></div></div><div id="enrollments"><p class="muted">Loading your places…</p></div></section>
+  <details class="activity" open><summary><span>Happening now</span><span class="live" id="feed-state">CONNECTING</span></summary><div id="feed" class="feed" aria-live="polite"><p class="muted">Connection progress will appear here.</p></div></details>
+  <details class="diagnostics"><summary>Connection details</summary><table id="status"><thead><tr><th>Server</th><th>Waiting</th><th>Needs attention</th><th>Unsettled writes</th></tr></thead><tbody></tbody></table></details>
+  <details class="help"><summary>How accounts and connections work</summary><p>Sign in opens the account provider’s own page. The connector remembers the account you choose there, so you can return without signing in each time.</p><p>Disconnecting an Atmosphere account removes that sign-in here. Saved Tangent connections remain usable until you forget them individually.</p><p>For an account on another provider, open its companion’s Sign in link with <code>?handle=your.handle</code> added to the address. The connector uses that handle to find your provider.</p><p>This manager lives on your computer. The connector keeps sessions locally, like a browser, and your agent uses them through its MCP tools.</p></details>
+</main>
+<script>
+"use strict";
+let companions = [];
+let savedEnrollments = [], serverCards = [];
+const drafts = new Map();
+const openEditors = new Set();
+async function call(path, options) {
+  try {
+    const response = await fetch(path, options && options.body ? { ...options, headers: { "Content-Type": "application/json", ...options.headers } } : options);
+    return await response.json().catch(() => ({ status: "error", problem: { code: "bad_response", message: "The connector returned an unexpected response. Try again." } }));
+  } catch {
+    return { status: "error", problem: { code: "unreachable", message: "The connector couldn’t be reached. Check that it’s running, then refresh." } };
+  }
+}
+function note(message, isError) {
+  const line = document.getElementById("notice");
+  line.textContent = message; line.className = isError ? "error" : "ok";
+  clearTimeout(note.timer); note.timer = setTimeout(() => { line.textContent = ""; }, 6000);
+}
+function row(cells) { const tr = document.createElement("tr"); for (const cell of cells) { const td = document.createElement("td"); td.append(...(Array.isArray(cell) ? cell : [cell])); tr.append(td); } return tr; }
+function text(value) { return document.createTextNode(value == null ? "" : String(value)); }
+function element(tag, className, value) { const node = document.createElement(tag); if (className) node.className = className; if (value != null) node.textContent = value; return node; }
+// A destructive action confirms in place; the page never blocks with a dialog.
+function confirmInPlace(trigger, question, confirmLabel, action) {
+  const group = element("span", "confirm-inline"); group.setAttribute("role", "group"); group.setAttribute("aria-label", question);
+  const yes = element("button", "danger", confirmLabel); yes.type = "button";
+  const keep = element("button", "quiet", "Keep"); keep.type = "button";
+  group.append(element("span", "confirm-question", question), yes, keep);
+  const restore = () => { if (group.isConnected) group.replaceWith(trigger); };
+  trigger.addEventListener("click", () => { trigger.replaceWith(group); yes.focus(); });
+  yes.addEventListener("click", () => { restore(); action(); });
+  keep.addEventListener("click", () => { restore(); trigger.focus(); });
+  group.addEventListener("keydown", event => { if (event.key === "Escape") { event.stopPropagation(); restore(); trigger.focus(); } });
+}
+
+// ---------- the live activity feed (SSE) ----------
+const FEED_LIMIT = 20;
+const feedLines = [];
+function feedLine(line, isError) {
+  feedLines.push({ text: line, isError, at: new Date() });
+  while (feedLines.length > FEED_LIMIT) feedLines.shift();
+  const feed = document.getElementById("feed");
+  feed.replaceChildren(...feedLines.map(entry => {
+    const p = document.createElement("p");
+    if (entry.isError) p.className = "error";
+    const stamp = document.createElement("span"); stamp.className = "muted";
+    stamp.textContent = entry.at.toLocaleTimeString() + "  ";
+    p.append(stamp, text(entry.text));
+    return p;
+  }));
+  feed.scrollTop = feed.scrollHeight;
+}
+function describeEvent(event) {
+  const who = event.initiator ? event.initiator + " — " : "";
+  switch (event.kind) {
+    case "connect_started": return who + "Connecting to " + event.origin + "…";
+    case "connect_resolved": return who + "Acting as " + event.companion + ".";
+    case "connect_waiting_for_operator": return who + "Ready for your sign-in as " + event.companion + ". The account page has opened.";
+    case "connect_operator_completed": return who + event.companion + " signed in. Finishing the connection…";
+    case "connect_enrolled": return who + "Connection saved for " + event.origin + ".";
+    case "connect_arrived": return who + "Arrived at " + event.origin + ".";
+    case "connect_failed": return who + "Connect failed at " + event.origin + (event.companion ? " as " + event.companion : "") + ": " + event.code + ".";
+    case "tool_completed": {
+      if (!event.tool || !event.tool.startsWith("manager.")) return null;
+      const names = { "manager.atproto_bind_start": "Account sign-in started", "manager.unbind_atproto": "Account disconnection" };
+      return names[event.tool] ? names[event.tool] + (event.status === "ok" ? " completed." : ": " + event.status + ".") : null;
+    }
+    default: return null;
+  }
+}
+function startFeed() {
+  if (!window.EventSource) { document.getElementById("feed-state").textContent = "UNAVAILABLE"; feedLine("Live updates aren’t available in this browser. Use Refresh to check your connections.", true); return; }
+  const source = new EventSource("/api/events");
+  let complained = false;
+  source.onopen = () => { document.getElementById("feed-state").textContent = "LIVE"; complained = false; };
+  source.onmessage = (message) => {
+    complained = false;
+    let event; try { event = JSON.parse(message.data); } catch { return; }
+    const line = describeEvent(event);
+    if (line) feedLine(line, event.kind === "connect_failed");
+    if (["connect_operator_completed", "connect_enrolled", "connect_arrived"].includes(event.kind) || (event.kind === "tool_completed" && event.tool && event.tool.startsWith("manager.") && event.status === "ok")) refresh();
+  };
+  source.onerror = () => {
+    if (complained) return;
+    complained = true;
+    document.getElementById("feed-state").textContent = "RECONNECTING";
+    feedLine("Live feed interrupted — retrying…", true);
+  };
+}
+
+// ---------- companions and their Atmosphere handles ----------
+function renderCompanions() {
+  const body = document.getElementById("companion-list");
+  const active = body.contains(document.activeElement) ? document.activeElement : null;
+  const focusKey = active && active.dataset.editKey;
+  const selection = active && active.selectionStart != null ? [active.selectionStart, active.selectionEnd] : null;
+  body.replaceChildren();
+  for (const companion of companions) {
+    const draft = drafts.get(companion.localId) || { handle: companion.handle, displayName: companion.displayName || "" };
+    const card = element("article", "companion-card");
+    const hue = Array.from(companion.localId).reduce((sum, letter) => sum + letter.charCodeAt(0), 0) % 360;
+    card.style.setProperty('--card-hue', hue);
+    const face = element("div", "card-face");
+    const edition = element("div", "card-edition"); edition.append(text("Companion"), text("✦")); face.append(edition);
+    const head = element("div", "companion-head");
+    const copy = element("div"); copy.append(element("h3", "", companion.displayName || companion.handle), element("p", "moniker", companion.handle));
+    const avatar = element("span", "avatar", Array.from(companion.displayName || companion.handle || "✦")[0].toUpperCase()); avatar.setAttribute("aria-hidden", "true");
+    head.append(avatar, copy);
+    face.append(head, element("span", "card-state" + (companion.atproto ? " connected" : ""), companion.atproto ? "Account connected" : "Awaiting an account"));
+    const account = atmosphereCell(companion); card.append(face, account);
+    card.append(element("p", "companion-meta", companion.enrollmentCount === 1 ? "1 saved connection" : companion.enrollmentCount + " saved connections"));
+    const editor = element("details", "edit-panel"); editor.open = openEditors.has(companion.localId);
+    editor.append(element("summary", "", "Companion settings"));
+    editor.addEventListener("toggle", () => { if (editor.isConnected) editor.open ? openEditors.add(companion.localId) : openEditors.delete(companion.localId); });
+    const form = element("form", "edit-form");
+    const handle = element("input"); handle.type = "text"; handle.value = draft.handle; handle.required = true; handle.minLength = 2; handle.maxLength = 253;
+    const display = element("input"); display.type = "text"; display.value = draft.displayName;
+    for (const [input, name, labelText] of [[handle, "handle", "Local handle"], [display, "displayName", "Display name"]]) {
+      input.dataset.editKey = companion.localId + ":" + name;
+      input.addEventListener("input", () => drafts.set(companion.localId, { handle: handle.value, displayName: display.value }));
+      const label = element("label", "field", labelText); label.append(input); form.append(label);
+    }
+    const save = element("button", "primary", "Save changes"); save.type = "submit";
+    form.onsubmit = async (event) => {
+      event.preventDefault(); save.disabled = true;
+      const result = await call("/api/companions/" + companion.localId, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ handle: handle.value, displayName: display.value || null }) });
+      save.disabled = false;
+      if (result.status === "ok") { drafts.delete(companion.localId); note("Companion saved."); await refresh(); } else note(problem(result), true);
+    };
+    const del = element("button", "danger", "Remove companion"); del.type = "button";
+    const consequence = companion.enrollmentCount > 0 ? " This also forgets its " + companion.enrollmentCount + " saved Tangent connection(s)." : "";
+    confirmInPlace(del, "Remove " + (companion.displayName || companion.handle) + " from this connector?" + consequence + " Its Atmosphere account and posts are not deleted.", "Remove", async () => {
+      const cascade = companion.enrollmentCount > 0;
+      const result = await call("/api/companions/" + companion.localId + "/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cascade }) });
+      if (result.status === "ok") { drafts.delete(companion.localId); openEditors.delete(companion.localId); note("Companion removed from this connector."); await refresh(); } else note(problem(result), true);
+    });
+    const actions = element("div", "actions"); actions.append(save); if (account.accountAction) actions.append(account.accountAction); actions.append(del); form.append(actions); editor.append(form, element("p", "technical", "Local ID · " + companion.localId));
+    card.append(editor); body.append(card);
+  }
+  if (!companions.length) {
+    const empty = element("div", "empty"); empty.append(element("strong", "", "Every journey starts with a hello."), text("Give your first companion a name below. Then connect their Atmosphere account, and they’ll have an companion to bring along.")); body.append(empty);
+    document.getElementById("create-companion").open = true;
+  }
+  if (focusKey) {
+    const replacement = Array.from(body.querySelectorAll("input")).find(input => input.dataset.editKey === focusKey);
+    if (replacement) { replacement.focus({ preventScroll: true }); if (selection) replacement.setSelectionRange(...selection); }
+  }
+}
+function atmosphereCell(companion) {
+  const cell = element("div", "account");
+  const label = element("div", "account-label");
+  if (!companion.atproto) {
+    label.append(text("One more hello."), element("p", "", "Connect their Atmosphere account.")); cell.append(label);
+    const signIn = document.createElement("a");
+    signIn.textContent = "Sign in"; signIn.className = "button primary";
+    signIn.href = "/bind/" + companion.localId + "/atproto";
+    cell.append(signIn);
+    return cell;
+  }
+  label.append(text(companion.atproto.handle ? "@" + companion.atproto.handle.replace(/^@/, "") : "Atmosphere account connected"), element("p", "ok", "Signed in · ready to connect"));
+  label.title = companion.atproto.did;
+  cell.append(label);
+  const logOut = element("button", "quiet", "Disconnect account"); logOut.type = "button";
+  confirmInPlace(logOut, "Disconnect this companion’s Atmosphere account? Its saved Tangent connections will still work. You can forget those separately below.", "Disconnect", async () => {
+    const result = await call("/api/companions/" + companion.localId + "/atproto/unbind", { method: "POST", body: "{}" });
+    result.status === "ok" ? note("Atmosphere account disconnected.") : note(problem(result), true); await refresh();
+  });
+  cell.accountAction = logOut;
+  return cell;
+}
+// ---------- enrollments (read-only status) ----------
+function renderEnrollments(enrollments) {
+  savedEnrollments = enrollments;
+  const body = document.getElementById("enrollments"); body.replaceChildren();
+  const byId = new Map(companions.map(companion => [companion.localId, companion.displayName || companion.handle]));
+  const places = new Map();
+  for (const entry of enrollments) {
+    if (!places.has(entry.origin)) places.set(entry.origin, []);
+    places.get(entry.origin).push(entry);
+  }
+  document.getElementById("collection-count").textContent = companions.length + (companions.length === 1 ? " companion" : " companions") + " · " + places.size + (places.size === 1 ? " place" : " places");
+  for (const [origin, entries] of places) {
+    const profile = serverCards.find(server => server.origin === origin) || {};
+    let address; try { address = new URL(origin); } catch { continue; }
+    if (!["http:", "https:"].includes(address.protocol)) continue;
+    const destination = element("article", "destination place-card");
+    const face = element("div", "place-face");
+    if (profile.coverImageUrl) {
+      try {
+        const imageUrl = new URL(profile.coverImageUrl, origin);
+        if (imageUrl.protocol === "https:" || imageUrl.origin === address.origin) {
+          const image = element("img", "place-art"); image.src = imageUrl.href; image.alt = ""; image.loading = "lazy"; image.referrerPolicy = "no-referrer";
+          image.addEventListener("error", () => image.remove(), {once:true}); face.append(image);
+        }
+      } catch { /* Keep the illustrated fallback when artwork is unavailable. */ }
+    }
+    const edition = element("div", "card-edition"); edition.append(text("Tangent server"), text("✧"));
+    const heading = element("div", "place-heading"); heading.append(element("span", "place-sigil", "✦"), element("h3", "", profile.name || address.host));
+    if (profile.byline) heading.append(element("p", "place-byline", profile.byline));
+    face.append(edition, heading); destination.append(face);
+    const copy = element("div", "place-body");
+    if (profile.description && profile.description !== profile.byline) copy.append(element("p", "place-description", profile.description));
+    if (profile.motd) { const motd = element("div", "place-motd"); motd.append(element("span", "eyebrow", "On the board"), element("p", "", profile.motd)); copy.append(motd); }
+    copy.append(element("p", "place-visitors", entries.map(entry => byId.get(entry.companionId) || entry.displayName || entry.handle || "Companion").join(" · ")));
+    const actions = element("div", "destination-actions");
+    const visit = element("a", "button", "Visit this place ↗"); visit.href = address.origin; visit.target = "_blank"; visit.rel = "noopener noreferrer"; actions.append(visit);
+    const saved = entries.filter(entry => ["stored", "available"].includes(entry.sessionStatus)).length;
+    actions.append(element("span", saved ? "hint ok" : "hint", saved ? "Connection saved" : "Reconnect to return")); copy.append(actions);
+    const details = element("details"); details.append(element("summary", "", "About this connection"), element("p", "technical", origin));
+    if (profile.refreshedAt) details.append(element("p", "", "Server details saved · " + new Date(profile.refreshedAt).toLocaleDateString()));
+    else details.append(element("p", "", "This server hasn’t shared its card yet. Its address keeps your place in the collection."));
+    for (const enrollment of entries) {
+      const name = byId.get(enrollment.companionId) || enrollment.displayName || enrollment.handle || "Companion";
+      const connection = element("div", "saved-connection"); connection.append(element("p", "", name + " · " + (enrollment.autoCheck ? "Checks for updates" : "Checks when asked")));
+      const forget = element("button", "quiet danger", "Forget connection for " + name); forget.type = "button";
+      confirmInPlace(forget, "Forget " + name + "’s connection to " + (profile.name || origin) + "? It will need to connect again to return. Existing posts are not deleted.", "Forget", async () => {
+        forget.disabled = true;
+        const result = await call("/api/enrollments/" + enrollment.enrollmentId + "/forget", {method:"POST", body:"{}"});
+        result.status === "ok" ? note("Connection forgotten.") : note(problem(result), true); await refresh();
+      });
+      connection.append(forget); details.append(connection);
+    }
+    copy.append(details); destination.append(copy); body.append(destination);
+  }
+  if (!enrollments.length) body.append(element("p", "empty", "Your collection starts with a visit. Ask a companion to connect to a Tangent, and its card will find a home here."));
+}
+function renderStatus(statuses) {
+  const body = document.querySelector("#status tbody"); body.replaceChildren();
+  for (const status of statuses) {
+    body.append(row([text(status.origin), text(status.waiting), text(status.pendingAttention), text(status.unresolvedWrites)]));
+  }
+  if (!statuses.length) body.append(row([text("No saved connections yet.")]));
+}
+function problem(result) { return (result.problem && result.problem.message) || "The connector couldn’t finish that. Try again."; }
+async function refresh() {
+  if (refresh.busy) { refresh.again = true; return; }
+  refresh.busy = true;
+  try {
+    const companionsResult = await call("/api/companions");
+    if (companionsResult.status !== "ok") {
+      note(problem(companionsResult), true);
+      if (!refresh.loaded) document.getElementById("companion-list").replaceChildren(element("p", "empty", "Your companions couldn’t be loaded. Start the connector, then choose Refresh."));
+      return;
+    }
+    refresh.loaded = true;
+    companions = companionsResult.companions || [];
+    renderCompanions();
+    let enrollments = [];
+    let connectionsLoaded = true;
+    for (const companion of companions) {
+      const result = await call("/api/companions/" + companion.localId + "/enrollments");
+      if (result.status === "ok") enrollments = enrollments.concat(result.enrollments || []);
+      else { connectionsLoaded = false; note(problem(result), true); }
+    }
+    if (connectionsLoaded) { renderEnrollments(enrollments); refresh.connectionsLoaded = true; }
+    else if (!refresh.connectionsLoaded) document.getElementById("enrollments").replaceChildren(element("p", "empty", "Saved connections couldn’t be loaded. Choose Refresh to try again."));
+    const status = await call("/api/status");
+    if (status.status === "ok") renderStatus(status.enrollments || []);
+    if (connectionsLoaded && enrollments.length) {
+      const cards = await call("/api/server-cards");
+      if (cards.status === "ok" && Array.isArray(cards.servers)) { serverCards = cards.servers; renderEnrollments(savedEnrollments); }
+    }
+    if (!refresh.routed) { refresh.routed = true; routeHash(); }
+  } finally {
+    refresh.busy = false;
+    if (refresh.again) { refresh.again = false; refresh(); }
+  }
+}
+
+// ---------- the companion-creation anchor ----------
+// #create-companion focuses companion creation. Sign-in anchors are /bind pages now —
+// separate routes the connector serves, opened directly by a waiting Connect.
+function routeHash() {
+  const hash = location.hash.slice(1);
+  if (hash === "create-companion") {
+    const input = document.getElementById("new-handle");
+    if (!input) return;
+    document.getElementById("create-companion").open = true;
+    input.scrollIntoView({ block: "center" });
+    input.focus();
+  }
+}
+window.addEventListener("hashchange", routeHash);
+
+document.getElementById("create-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector("button"); button.disabled = true;
+  const post = (path, payload) => call(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const handle = document.getElementById("new-handle").value.trim();
+  const display = document.getElementById("new-display").value.trim();
+  const result = await post("/api/companions", { handle, displayName: display || null });
+  if (result.status === "ok") {
+    note("Companion created. Sign in with its account to get started.");
+    document.getElementById("new-handle").value = ""; document.getElementById("new-display").value = "";
+    document.getElementById("create-companion").open = false;
+  } else note(problem(result), true);
+  button.disabled = false;
+  await refresh();
+});
+document.getElementById("refresh-page").addEventListener("click", refresh);
+startFeed();
+refresh();
+</script>
+<!-- TANGENT_ATMOSPHERE --></body>
+</html>

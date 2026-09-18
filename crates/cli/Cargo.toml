@@ -1,0 +1,48 @@
+[package]
+name = "companion-lobby"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+publish = false
+
+[dependencies]
+companion-core = { path = "../core" }
+adapter-auth-atproto = { path = "../adapters/auth/atproto" }
+adapter-service-tangent = { path = "../adapters/service/tangent" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ureq = "2"
+uuid = { version = "1", features = ["v4", "v7"] }
+# atproto OAuth (the /bind flow): pure-Rust cryptography, no new unsafe anywhere.
+# p256: ES256 signing/verification for DPoP proofs and the test fake's proof checks —
+#   ECDSA cannot be hand-rolled in the house style.
+# sha2: SHA-256 for the PKCE S256 challenge (p256's ECDSA already depends on it).
+# rand_core + getrandom: cryptographic randomness for DPoP keys, PKCE verifiers and
+#   OAuth state (the getrandom 0.2 entropy source uuid v4 already ships).
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "arithmetic"] }
+sha2 = "0.10"
+rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
+
+# Operator-verb only, Windows-gated tray icon. windows-sys is already a transitive
+# dependency of tray-icon; it is named directly for the single audited message-pump module
+# (PeekMessageW/DispatchMessageW) that tray-icon requires on its creating thread.
+[target.'cfg(target_os = "windows")'.dependencies]
+tray-icon = { version = "0.25", default-features = false }
+windows-sys = { version = "0.60", default-features = false, features = ["Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+# The fake authorization server in tests verifies DPoP proofs for real (ES256) and
+# checks PKCE challenges, so the journey tests exercise actual signatures and hashes
+# (same crates as the main dependencies — no extra fetch).
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "arithmetic"] }
+sha2 = "0.10"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
+
+
