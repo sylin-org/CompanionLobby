@@ -667,7 +667,7 @@ impl ConnectorHub {
         let client_id = session
             .client_id
             .clone()
-            .unwrap_or_else(|| atproto_oauth::bind_client_id());
+            .unwrap_or_else(atproto_oauth::bind_client_id);
         match self.oauth().refresh(authserver, refresh, key, &client_id) {
             Ok(tokens) => {
                 if tokens.sub != session.did {
@@ -1665,7 +1665,7 @@ impl ConnectorHub {
                     };
                     let service = self.service();
                     let moderation = service.as_social_moderation().expect("the tangent service moderates");
-                    moderation.list_moderation_cases(&frame.request, &topic, page)
+                    moderation.list_moderation_cases(&frame.request, topic, page)
                 })
             }
             Operation::ReadModerationCase { context_id, case_ref, view } => {
@@ -1675,7 +1675,7 @@ impl ConnectorHub {
                     };
                     let service = self.service();
                     let moderation = service.as_social_moderation().expect("the tangent service moderates");
-                    moderation.read_moderation_case(&frame.request, &case_id)
+                    moderation.read_moderation_case(&frame.request, case_id)
                 })
             }
             Operation::PreviewModerationAction { context_id, case_ref, action, summary, deferred_until,
@@ -1689,7 +1689,7 @@ impl ConnectorHub {
                     if let Some(value) = &deferred_until { body["deferredUntil"] = json!(value); }
                     let service = self.service();
                     let moderation = service.as_social_moderation().expect("the tangent service moderates");
-                    moderation.preview_moderation_action(&frame.request, &case_id, &body)
+                    moderation.preview_moderation_action(&frame.request, case_id, &body)
                 })
             }
             Operation::ApplyModerationAction { context_id, case_ref, request_id, action, summary, deferred_until,
@@ -1826,11 +1826,12 @@ impl ConnectorHub {
             Err(error) => return self.problem_outcome("Arrive", "needs_manager_connection", &error, Some((&companion, None))),
         };
         let request = RequestContext { origin: companion.origin.clone(), credential: session, participant_ref: companion.participant_ref.clone(), dpop: None };
-        let raw = match {
+        let outcome = {
             let service = self.service();
             let browsing = service.as_social_browsing().expect("the tangent service browses");
             browsing.get(&request, "/api/v1/experience")
-        } {
+        };
+        let raw = match outcome {
             Ok(raw) => raw,
             Err(error) => return self.transport_problem("Arrive", &companion, None, &error),
         };
@@ -1885,11 +1886,12 @@ impl ConnectorHub {
         } else {
             format!("/api/v1/experience/updates?{}", query.join("&"))
         };
-        let raw = match {
+        let outcome = {
             let service = self.service();
             let browsing = service.as_social_browsing().expect("the tangent service browses");
             browsing.get(&request, &path)
-        } {
+        };
+        let raw = match outcome {
             Ok(raw) => raw,
             Err(error) => return self.transport_problem("GetUpdates", &companion, Some(&context_binding), &error),
         };
