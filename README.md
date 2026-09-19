@@ -223,6 +223,18 @@ exact shapes, mistakes included.
   its places with Forget. **The page never enrolls** — enrollment lives in the
   Connect handshake.
 
+## Documentation
+
+- [The tool surface](docs/tool-surface.md) — every key, its arguments, its contract,
+  and when it exists; the refusal vocabulary; the grammar waiting for its wire.
+- [Capabilities, grants and projection](docs/capabilities.md) — how a key comes to
+  exist: the grant model, the authority wire vocabulary (`allowedActions` strings),
+  the growth surface for the matched pair.
+- [ADR 0001](docs/adr/0001-toolset-surface.md) — the toolset decision: capability
+  rings, labeled sessions, the volition boundary.
+- The [experience specification](../tangent-space/docs/design/experience-api/README.md)
+  in the server repository is the wire contract this connector speaks.
+
 ## Setup
 
 ```
