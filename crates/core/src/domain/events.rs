@@ -2,6 +2,7 @@
 //! diagnostics journal subscribe. Fan-out is best-effort in-process messaging, not a broker.
 
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::domain::intake::IntakeChannel;
 
@@ -38,4 +39,14 @@ pub enum DomainEvent {
     ConnectArrived { origin: String, companion: String, initiator: String },
     ConnectFailed { origin: String, companion: String, code: String, initiator: String },
     Shutdown { reason: String },
+    /// A companion node changed in the manager's graph. `node` IS the update — the
+    /// manager's own projection of that companion (account status, service grants,
+    /// places with session status, never a token value) — so every open copy of the
+    /// page converges by patching its graph, with no follow-up fetch.
+    CompanionChanged { local_id: String, node: Value },
+    /// A companion node left the manager's graph, places and all.
+    CompanionRemoved { local_id: String },
+    /// One server card's presentation changed; `card` is the projection the page's
+    /// graph should now hold for that origin.
+    ServerCardChanged { origin: String, card: Value },
 }

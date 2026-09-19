@@ -518,7 +518,7 @@ fn a_duplicate_signin_routes_to_the_existing_companion() {
     let callback_path = callback.strip_prefix(&format!("http://{address}")).unwrap_or(&callback);
     let page = get(address, callback_path);
     assert!(page.contains("This account already has a companion."), "the duplicate is friendly: {page}");
-    assert!(page.contains("href=\"/companion/lumen\""), "the page routes to the companion: {page}");
+    assert!(page.contains(&format!("href=\"/companion/{}\"", companion.local_id)), "the page routes to the companion: {page}");
     assert_eq!(hub.companions().len(), 1, "no second companion appeared");
     assert_eq!(hub.companions()[0].handle, "lumen", "the existing companion is untouched");
 }
@@ -547,4 +547,32 @@ fn a_rebind_replaces_the_session_and_carries_the_grants() {
     assert_ne!(second.access_jwt, "stale", "the re-bind replaced the poisoned session");
     assert!(second.services.is_empty(), "the operator's grants carried forward");
     assert_eq!(hub.companions().len(), 1, "a re-bind creates nothing");
+}
+
+/// Sign-in pendings are per companion: two tabs can handle two companions'
+/// sign-ins without the second pop erasing the first. The most recent pop wins
+/// the OpenRegistration anchor, and a completed sign-in clears only its own.
+#[test]
+fn signin_pendings_are_per_companion_and_cleared_by_completion() {
+    let server = FakeServer::start();
+    server.add_account("lumen.bsky.example", "unused-password", "did:plc:lumen");
+    let (hub, _dir, _page, address) = operator_workspace("pendings", &server);
+    let first = hub.create_companion("lumen", None).expect("first");
+    let second = hub.create_companion("ox_omega", None).expect("second");
+
+    let waiting = |companion: &str| {
+        hub.invoke(IntakeChannel::Mcp, "Connect", &serde_json::json!({ "serverUrl": server.origin(), "companion": companion }))
+    };
+    assert_eq!(waiting("lumen").structured.pointer("/problem/code").and_then(Value::as_str), Some("operator_action_needed"));
+    assert_eq!(waiting("ox_omega").structured.pointer("/problem/code").and_then(Value::as_str), Some("operator_action_needed"));
+
+    let target = hub.registration_target_url().expect("target");
+    assert!(target.contains(&format!("bind/{}/atproto", second.local_id)), "the latest pop wins: {target}");
+
+    // Completing the FIRST companion's sign-in clears only its own pending; the
+    // second companion's sign-in stays routed.
+    drive_bind(address, &server, &first.local_id, None);
+    let target = hub.registration_target_url().expect("target after completion");
+    assert!(target.contains(&format!("bind/{}/atproto", second.local_id)), "the other pending survives: {target}");
+    assert!(!target.contains(&format!("bind/{}/atproto", first.local_id)), "the completed one is cleared: {target}");
 }

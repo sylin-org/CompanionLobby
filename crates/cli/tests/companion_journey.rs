@@ -538,3 +538,63 @@ fn the_manager_serves_routes_from_one_shell() {
     );
     assert!(head.starts_with("HTTP/1.1 404"), "posts outside the API never serve the shell: {head}");
 }
+
+// ---------- the manager's graph: node-carrying events ----------
+
+/// Every mutating surface announces the node itself: an event per change, carrying
+/// the exact projection a page copy's graph should hold, so copies converge with no
+/// follow-up fetch.
+#[test]
+fn mutations_announce_the_changed_node_on_the_event_bus() {
+    let hub = workspace("graph-events", CallerId("manager".into()));
+    let companion = hub.create_companion("lumen", None).expect("companion");
+    let events = hub.events().subscribe();
+
+    hub.update_companion(&companion.local_id, None, Some(Some("Lumen"))).expect("rename");
+    // The grants surface belongs to a signed-in companion; seed the credential the
+    // sign-in would leave behind.
+    common::seed_atproto_session(&hub, &companion.local_id, "lumen.bsky.example", "did:plc:lumen", "https://pds.example");
+    hub.set_companion_services(&companion.local_id, &["tangent".to_string()]).expect("grants");
+    hub.unbind_atproto(&companion.local_id).expect("unbind");
+    hub.delete_companion(&companion.local_id, false).expect("delete");
+
+    let mut kinds: Vec<String> = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        kinds.push(serde_json::to_value(&event).unwrap_or_default()["kind"]
+            .as_str().unwrap_or_default().to_string());
+        if let companion_core::domain::events::DomainEvent::CompanionChanged { local_id, node } = &event {
+            assert_eq!(local_id, &companion.local_id);
+            assert_eq!(node["localId"], json!(companion.local_id), "the event carries the node itself");
+            assert!(node.get("atproto").is_some(), "the node carries the account projection");
+            assert!(node.get("enrollments").is_some(), "the node carries the places");
+        }
+    }
+    for expected in ["companion_changed", "companion_removed"] {
+        assert!(kinds.iter().any(|kind| kind == expected), "{expected} was announced: {kinds:?}");
+    }
+    assert_eq!(kinds.iter().filter(|kind| *kind == "companion_changed").count(), 3,
+        "rename, grants and unbind each announced the node: {kinds:?}");
+}
+
+/// Forgetting a place changes its companion's node — the event carries the place's
+/// new absence, keyed to the right companion.
+#[test]
+fn forgetting_a_place_announces_the_companion_node() {
+    let server = FakeServer::start();
+    let hub = workspace("graph-forget", CallerId("manager".into()));
+    let (local_id, enrollment_id) = enrolled(&hub, &server, "lumen");
+    let events = hub.events().subscribe();
+
+    hub.forget_enrollment(&enrollment_id).expect("forget");
+
+    let mut saw_node = false;
+    while let Ok(event) = events.try_recv() {
+        if let companion_core::domain::events::DomainEvent::CompanionChanged { local_id: changed, node } = &event {
+            assert_eq!(changed, &local_id, "the node event names the companion");
+            assert_eq!(node["enrollments"], json!([]), "the forgotten place is gone from the node");
+            assert_eq!(node["enrollmentCount"], json!(0));
+            saw_node = true;
+        }
+    }
+    assert!(saw_node, "the forget announced the companion node");
+}

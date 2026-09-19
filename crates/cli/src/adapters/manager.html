@@ -52,33 +52,37 @@ function confirmInPlace(trigger, question, confirmLabel, action) {
   group.addEventListener("keydown", event => { if (event.key === "Escape") { event.stopPropagation(); restore(); trigger.focus(); } });
 }
 
-// ---------- data (one batched read; no request per companion) ----------
+// ---------- the graph: one in-memory model, patched by events ----------
 
-let companions = [];
-let serviceCatalog = [];
+// The manager's graph, as this copy of the page holds it. The server owns the truth;
+// node-change events on the live feed carry the updated node itself, so every copy
+// converges without refetching. `loadAll` fills the graph once, here at the start.
+const graph = { companions: new Map(), cards: new Map(), services: [] };
 let providers = [];
-let serverCards = [];
 const drafts = new Map();
 
 async function loadAll() {
   const companionsResult = await call("/api/companions");
-  if (companionsResult.status !== "ok") { note(problem(companionsResult), true); return; }
-  companions = companionsResult.companions || [];
+  if (companionsResult.status !== "ok") { note(problem(companionsResult), true); return false; }
+  const companions = new Map();
+  for (const companion of companionsResult.companions || []) companions.set(companion.localId, companion);
+  graph.companions = companions;
   const servicesResult = await call("/api/services");
-  serviceCatalog = servicesResult.status === "ok" ? servicesResult.services || [] : [];
+  graph.services = servicesResult.status === "ok" ? servicesResult.services || [] : [];
   const providersResult = await call("/api/providers");
   providers = providersResult.status === "ok" ? providersResult.providers || [] : [];
-  const anyEnrollment = companions.some(companion => companion.enrollments && companion.enrollments.length);
-  if (anyEnrollment) {
-    const cards = await call("/api/server-cards");
-    if (cards.status === "ok" && Array.isArray(cards.servers)) serverCards = cards.servers;
-  } else serverCards = [];
+  const cards = new Map();
+  if (companions.size && [...companions.values()].some(companion => companion.enrollments && companion.enrollments.length)) {
+    const cardsResult = await call("/api/server-cards");
+    if (cardsResult.status === "ok") for (const server of cardsResult.servers || []) cards.set(server.origin, server);
+  }
+  graph.cards = cards;
+  return true;
 }
 
-const refresh = (() => {
-  let running = null;
-  return () => running || (running = loadAll().finally(() => { running = null; }));
-})();
+function patchNode(localId, node) { if (localId && node) { graph.companions.set(localId, node); } }
+function removeNode(localId) { if (localId) { graph.companions.delete(localId); } }
+function companionList() { return [...graph.companions.values()]; }
 
 // ---------- the router: every application state is a route ----------
 
@@ -86,7 +90,7 @@ let currentView = () => {};
 
 function navigate(path) { history.pushState({}, "", path); route(); }
 
-async function route() {
+function route() {
   const segments = decodeURIComponent(location.pathname).split("/").filter(Boolean).map(decodeURIComponent);
   if (location.hash === "#create-companion") { history.replaceState({}, "", "/add"); return route(); }
   let view;
@@ -95,7 +99,6 @@ async function route() {
   else if (segments[0] === "companion" && segments[1]) view = () => renderCompanion(segments[1]);
   else { note("That page isn’t here."); history.replaceState({}, "", "/"); view = renderOverview; }
   currentView = view;
-  await refresh();
   view();
   const anchor = location.hash && document.querySelector(location.hash);
   if (anchor) anchor.scrollIntoView();
@@ -113,14 +116,13 @@ window.addEventListener("popstate", route);
 
 const cardHue = localId => Array.from(localId).reduce((sum, letter) => sum + letter.charCodeAt(0), 0) % 360;
 const companionName = companion => companion.displayName || companion.handle;
-const companionPage = companion => "/companion/" + encodeURIComponent(companion.handle);
+const companionPage = companion => "/companion/" + encodeURIComponent(companion.localId);
 
 function companionFace(companion) {
   const card = element("article", "companion-card");
   card.style.setProperty('--card-hue', cardHue(companion.localId));
   const face = element("div", "card-face");
   const edition = element("div", "card-edition"); edition.append(text("Companion"), text("✦")); face.append(edition);
-
   const head = element("div", "companion-head");
   const copy = element("div"); copy.append(element("h3", "", companionName(companion)), element("p", "moniker", companion.handle));
   const avatar = element("span", "avatar", Array.from(companionName(companion) || "✦")[0].toUpperCase()); avatar.setAttribute("aria-hidden", "true");
@@ -149,7 +151,8 @@ function accountCell(companion, after) {
   const logOut = element("button", "quiet", "Disconnect account"); logOut.type = "button";
   confirmInPlace(logOut, "Disconnect this companion’s Atmosphere account? Every connection it opened stops working immediately; those places stay in the collection and reconnect after the next sign-in.", "Disconnect", async () => {
     const result = await call("/api/companions/" + companion.localId + "/atproto/unbind", { method: "POST", body: "{}" });
-    result.status === "ok" ? note("Atmosphere account disconnected.") : note(problem(result), true); await refresh(); after();
+    if (result.status === "ok") { patchNode(companion.localId, result.node); note("Atmosphere account disconnected."); render(); }
+    else note(problem(result), true);
   });
   cell.append(logOut);
   return cell;
@@ -162,7 +165,7 @@ function servicesCell(companion, after) {
   cell.append(element("div", "account-label", text("Where this credential may go")));
   if (!companion.atproto) { cell.append(element("p", "", "Connect an account first — access follows the sign-in.")); return cell; }
   const granted = companion.atproto.services || [];
-  for (const service of serviceCatalog) {
+  for (const service of graph.services) {
     const allowed = granted.includes(service.id);
     const line = element("div", "saved-connection");
     line.append(element("span", "", service.label + " · " + (allowed ? "Allowed" : service.available ? "Not allowed" : "Not available yet")));
@@ -171,8 +174,13 @@ function servicesCell(companion, after) {
       toggle.addEventListener("click", async () => {
         const next = allowed ? granted.filter(id => id !== service.id) : granted.concat(service.id);
         const result = await call("/api/companions/" + companion.localId + "/services", { method: "POST", body: JSON.stringify({ services: next }) });
-        if (result.status === "ok") { note(service.label + (allowed ? " disallowed. New connections to it are refused." : " allowed.")); await refresh(); after(); }
-        else note(problem(result), true);
+        if (result.status === "ok") {
+          // The node-change event will also carry this update; patching here keeps
+          // this copy honest even while its feed is down.
+          patchNode(companion.localId, result.node);
+          note(service.label + (allowed ? " disallowed. New connections to it are refused." : " allowed."));
+          render();
+        } else note(problem(result), true);
       });
       line.append(toggle);
     }
@@ -199,17 +207,15 @@ function settingsPanel(companion, after) {
     const result = await call("/api/companions/" + companion.localId, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ handle: handle.value.trim(), displayName: display.value.trim() || null }) });
     save.disabled = false;
     if (result.status === "ok") {
-      drafts.delete(companion.localId); note("Companion saved."); await refresh();
-      const next = handle.value.trim();
-      if (next.toLowerCase() !== companion.handle.toLowerCase()) navigate("/companion/" + encodeURIComponent(next));
-      else after();
+      drafts.delete(companion.localId); note("Companion saved.");
+      patchNode(companion.localId, result.node); render();
     } else note(problem(result), true);
   };
   const del = element("button", "danger", "Remove companion"); del.type = "button";
   const consequence = companion.enrollmentCount > 0 ? " This also forgets its " + companion.enrollmentCount + " saved connection(s)." : "";
   confirmInPlace(del, "Remove " + companionName(companion) + " from this connector?" + consequence + " Its Atmosphere account and posts are not deleted.", "Remove", async () => {
     const result = await call("/api/companions/" + companion.localId + "/delete", { method: "POST", body: JSON.stringify({ cascade: companion.enrollmentCount > 0 }) });
-    if (result.status === "ok") { note("Companion removed from this connector."); await refresh(); navigate("/"); }
+    if (result.status === "ok") { removeNode(companion.localId); note("Companion removed from this connector."); navigate("/"); }
     else note(problem(result), true);
   });
   const actions = element("div", "actions"); actions.append(save, del); form.append(actions);
@@ -225,15 +231,15 @@ function placesSection(container) {
   head.append(element("div", null, element("p", "eyebrow", "The collection"), element("h2", "", "Places they’ve been.")));
   section.append(head);
   const body = element("div", null); body.id = "enrollments";
-  const byId = new Map(companions.map(companion => [companion.localId, companionName(companion)]));
   const places = new Map();
-  for (const companion of companions) for (const enrollment of companion.enrollments || []) {
+  for (const companion of companionList()) for (const enrollment of companion.enrollments || []) {
     if (!places.has(enrollment.origin)) places.set(enrollment.origin, []);
     places.get(enrollment.origin).push({ companion, enrollment });
   }
-  document.getElementById("collection-count").textContent = companions.length + (companions.length === 1 ? " companion" : " companions") + " · " + places.size + (places.size === 1 ? " place" : " places");
+  const count = document.getElementById("collection-count");
+  if (count) count.textContent = graph.companions.size + (graph.companions.size === 1 ? " companion" : " companions") + " · " + places.size + (places.size === 1 ? " place" : " places");
   for (const [origin, visits] of places) {
-    const profile = serverCards.find(server => server.origin === origin) || {};
+    const profile = graph.cards.get(origin) || {};
     let address; try { address = new URL(origin); } catch { continue; }
     if (!["http:", "https:"].includes(address.protocol)) continue;
     const destination = element("article", "destination place-card");
@@ -254,20 +260,21 @@ function placesSection(container) {
     const copy = element("div", "place-body");
     if (profile.description && profile.description !== profile.byline) copy.append(element("p", "place-description", profile.description));
     if (profile.motd) { const motd = element("div", "place-motd"); motd.append(element("span", "eyebrow", "On the board"), element("p", "", profile.motd)); copy.append(motd); }
-    copy.append(element("p", "place-visitors", visits.map(visit => byId.get(visit.companion.localId) || "Companion").join(" · ")));
+    copy.append(element("p", "place-visitors", visits.map(visit => companionName(visit.companion)).join(" · ")));
     const actions = element("div", "destination-actions");
     const visit = element("a", "button", "Visit this place ↗"); visit.href = address.origin; visit.target = "_blank"; visit.rel = "noopener noreferrer"; actions.append(visit);
     const saved = visits.filter(visit => visit.enrollment.sessionStatus === "stored").length;
     actions.append(element("span", saved ? "hint ok" : "hint", saved ? "Connection saved" : "Reconnect to return")); copy.append(actions);
     const details = element("details"); details.append(element("summary", "", "About this connection"), element("p", "technical", origin));
     for (const { companion, enrollment } of visits) {
-      const name = byId.get(companion.localId) || "Companion";
+      const name = companionName(companion);
       const connection = element("div", "saved-connection"); connection.append(element("p", "", name + " · " + (enrollment.autoCheck ? "Checks for updates" : "Checks when asked")));
       const forget = element("button", "quiet danger", "Forget connection for " + name); forget.type = "button";
       confirmInPlace(forget, "Forget " + name + "’s connection to " + (profile.name || origin) + "? It will need to connect again to return. Existing posts are not deleted.", "Forget", async () => {
         forget.disabled = true;
         const result = await call("/api/enrollments/" + enrollment.enrollmentId + "/forget", {method:"POST", body:"{}"});
-        result.status === "ok" ? note("Connection forgotten.") : note(problem(result), true); await refresh(); currentView();
+        if (result.status === "ok") { patchNode(enrollment.companionId, result.node); note("Connection forgotten."); render(); }
+        else { forget.disabled = false; note(problem(result), true); }
       });
       connection.append(forget); details.append(connection);
     }
@@ -313,17 +320,19 @@ function renderOverview() {
 
   const section = element("section"); section.id = "companions";
   const head = element("div", "section-head");
-  head.append(element("div", null, element("p", "eyebrow", "Your circle"), element("h2", "", "Familiar faces.")), (() => { const button = element("button", "quiet", "Refresh"); button.type = "button"; button.addEventListener("click", async () => { await refresh(); currentView(); }); return button; })());
+  const refreshButton = element("button", "quiet", "Refresh"); refreshButton.type = "button";
+  refreshButton.addEventListener("click", async () => { await loadAll(); render(); });
+  head.append(element("div", null, element("p", "eyebrow", "Your circle"), element("h2", "", "Familiar faces.")), refreshButton);
   section.append(head);
   const grid = element("div", "companion-grid");
-  for (const companion of companions) {
+  for (const companion of companionList()) {
     const card = companionFace(companion);
     card.append(element("p", "companion-meta", companion.enrollmentCount === 1 ? "1 saved connection" : companion.enrollmentCount + " saved connections"));
     const whole = link(companionPage(companion), null); whole.style.textDecoration = "none"; whole.style.color = "inherit";
     whole.append(card);
     grid.append(whole);
   }
-  if (!companions.length) {
+  if (!graph.companions.size) {
     const empty = element("div", "empty");
     empty.append(element("strong", "", "Every journey starts with a hello."), text("Add a companion by signing in with an account — the sign-in is what creates it."));
     grid.append(empty);
@@ -351,13 +360,13 @@ function renderAdd() {
   head.append(element("div", null, element("p", "eyebrow", "Add a companion"), element("h2", "", "Sign in, and it exists."), element("p", "hint", "One account makes one companion, named after the account and yours to rename.")));
   section.append(head);
   const grid = element("div", "companion-grid");
-  for (const provider of providers) {
+  for (const provider of providers.length ? providers : [{ id: "atproto", label: "Bluesky" }]) {
     const card = element("article", "companion-card");
     card.style.setProperty('--card-hue', 210);
     const face = element("div", "card-face");
     const edition = element("div", "card-edition"); edition.append(text("Account"), text("✦")); face.append(edition);
     const head2 = element("div", "companion-head");
-    head2.append(element("span", "avatar", "✦"), element("div", null, element("h3", "", provider.label), element("p", "moniker", "atproto account")));
+    head2.append(element("span", "avatar", "✦"), element("div", null, element("h3", "", provider.label), element("p", "moniker", provider.id + " account")));
     face.append(head2, element("span", "card-state connected", "The provider’s own page handles the sign-in"));
     const begin = element("a", "button primary", "Continue with " + provider.label);
     begin.href = "/bind/new/" + provider.id;
@@ -374,12 +383,18 @@ function renderAdd() {
   view.append(section);
 }
 
-function renderCompanion(handle) {
+function renderCompanion(idOrHandle) {
   const view = document.getElementById("view");
   view.replaceChildren();
-  const companion = companions.find(entry => entry.handle.toLowerCase() === handle.toLowerCase());
+  // Routes name the immutable id; an old handle-shaped URL finds its companion once
+  // and settles on the id route.
+  let companion = graph.companions.get(idOrHandle);
+  if (!companion) {
+    const match = companionList().find(entry => entry.handle.toLowerCase() === idOrHandle.toLowerCase());
+    if (match) { history.replaceState({}, "", "/companion/" + encodeURIComponent(match.localId)); companion = match; }
+  }
   if (!companion) { note("That companion isn’t here anymore."); return navigate("/"); }
-  const rerender = () => renderCompanion(handle);
+  const rerender = () => renderCompanion(companion.localId);
   const section = element("section");
   section.append(element("p", "muted", link("/", null, "← All companions")));
   const card = companionFace(companion);
@@ -396,7 +411,7 @@ function renderCompanion(handle) {
     places.append(element("p", "empty", "No places yet — ask your agent to connect somewhere."));
   } else {
     for (const enrollment of companion.enrollments) {
-      const profile = serverCards.find(server => server.origin === enrollment.origin) || {};
+      const profile = graph.cards.get(enrollment.origin) || {};
       const name = profile.name || enrollment.origin;
       const connection = element("div", "saved-connection");
       connection.append(element("p", "", name + " · " + (enrollment.sessionStatus === "stored" ? "Checks for updates" : "Reconnect to return")));
@@ -404,7 +419,8 @@ function renderCompanion(handle) {
       confirmInPlace(forget, "Forget " + companionName(companion) + "’s connection to " + name + "? It will need to connect again to return. Existing posts are not deleted.", "Forget", async () => {
         forget.disabled = true;
         const result = await call("/api/enrollments/" + enrollment.enrollmentId + "/forget", {method:"POST", body:"{}"});
-        result.status === "ok" ? note("Connection forgotten.") : note(problem(result), true); await refresh(); rerender();
+        if (result.status === "ok") { patchNode(companion.localId, result.node); note("Connection forgotten."); render(); }
+        else { forget.disabled = false; note(problem(result), true); }
       });
       connection.append(forget);
       places.append(connection);
@@ -414,7 +430,7 @@ function renderCompanion(handle) {
   view.append(section);
 }
 
-// ---------- the live activity feed (SSE) ----------
+// ---------- the live activity feed (SSE): narration plus graph convergence ----------
 
 const FEED_LIMIT = 20;
 const feedLines = [];
@@ -458,9 +474,12 @@ function startFeed() {
   source.onmessage = (message) => {
     complained = false;
     let event; try { event = JSON.parse(message.data); } catch { return; }
+    // Graph convergence first: the event carries the node itself.
+    if (event.kind === "companion_changed") { patchNode(event.local_id, event.node); render(); }
+    else if (event.kind === "companion_removed") { removeNode(event.local_id); render(); }
+    else if (event.kind === "server_card_changed" && event.card) { graph.cards.set(event.origin, event.card); render(); }
     const line = describeEvent(event);
     if (line) feedLine(line, event.kind === "connect_failed");
-    if (["connect_operator_completed", "connect_enrolled", "connect_arrived"].includes(event.kind) || (event.kind === "tool_completed" && event.tool && event.tool.startsWith("manager.") && event.status === "ok")) refresh().then(() => currentView());
   };
   source.onerror = () => {
     if (complained) return;
@@ -471,7 +490,7 @@ function startFeed() {
 }
 
 startFeed();
-route();
+loadAll().then(route);
 </script>
 <!-- TANGENT_ATMOSPHERE --></body>
 </html>

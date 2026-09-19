@@ -143,7 +143,7 @@ pub struct ConnectorHub {
     manager_page_url: Mutex<Option<String>>,
     /// The companion whose sign-in a `Connect` popped last: routes the next
     /// `OpenRegistration` to that companion's bind anchor instead of companion creation.
-    pending_bind: Mutex<Option<String>>,
+    pending_bind: Mutex<Vec<String>>,
     /// Browser targets already opened by this process: a looping model must not
     /// spawn one tab per retry. Keyed by the full target URL, so distinct anchors stay
     /// distinct.
@@ -185,7 +185,7 @@ impl ConnectorHub {
             events,
             caller,
             manager_page_url: Mutex::new(None),
-            pending_bind: Mutex::new(None),
+            pending_bind: Mutex::new(Vec::new()),
             opened_pages: Mutex::new(HashSet::new()),
             pages: browser::silent(),
             default_page: DEFAULT_PAGE_URL.to_string(),
@@ -349,7 +349,9 @@ impl ConnectorHub {
     /// default companion-creation view.
     pub fn registration_target_url(&self) -> Option<String> {
         let page = self.manager_page_url.lock().ok()?.clone()?;
-        let pending = self.pending_bind.lock().ok().and_then(|slot| slot.clone());
+        // The most recently popped sign-in wins the anchor; several companions can
+        // have pendings at once (one per tab, one per Connect).
+        let pending = self.pending_bind.lock().ok().and_then(|slot| slot.last().cloned());
         let anchor = match pending.as_deref() {
             Some(local_id) => bind_anchor(local_id),
             None => "add".to_string(),
@@ -384,14 +386,18 @@ impl ConnectorHub {
     }
 
     /// Removes one enrollment and its stored session. Enrollment state (attention,
-    /// checkpoints, contexts) cascades; the server side is untouched.
-    pub fn forget_enrollment(&self, enrollment_id: &str) -> Result<(), String> {
+    /// checkpoints, contexts) cascades; the server side is untouched. Answers the
+    /// companion whose graph node changed.
+    pub fn forget_enrollment(&self, enrollment_id: &str) -> Result<String, String> {
         self.attributed("manager.forget_enrollment", || {
             let mut store = self.lock_store()?;
-            store.enrollment(enrollment_id).ok_or_else(|| "no enrollment matches that id".to_string())?;
+            let entry = store.enrollment(enrollment_id).ok_or_else(|| "no enrollment matches that id".to_string())?;
+            let local_id = entry.local_id.clone();
             store.remove_enrollment(enrollment_id);
             store.save()?;
-            Ok(())
+            drop(store);
+            self.publish_node(&local_id);
+            Ok(local_id)
         })
     }
 
@@ -425,6 +431,8 @@ impl ConnectorHub {
             store.remove_atproto_session(local_id);
             store.flush_enrollment_sessions(local_id);
             store.save()?;
+            drop(store);
+            self.publish_node(local_id);
             Ok(companion)
         })
     }
@@ -567,6 +575,7 @@ impl ConnectorHub {
             match flight.target {
                 BindTarget::Existing(local_id) => {
                     self.store_atproto_session(&local_id, session)?;
+                    self.publish_node(&local_id);
                     Ok(BindOutcome::Bound { local_id, handle, created: false })
                 }
                 BindTarget::New => {
@@ -586,6 +595,8 @@ impl ConnectorHub {
                     store.upsert_companion(companion)?;
                     store.set_atproto_session(&local_id, session);
                     store.save()?;
+                    drop(store);
+                    self.publish_node(&local_id);
                     Ok(BindOutcome::Bound { local_id, handle: companion_handle, created: true })
                 }
             }
@@ -730,6 +741,8 @@ impl ConnectorHub {
             }
             store.set_granted_services(local_id, services.to_vec());
             store.save()?;
+            drop(store);
+            self.publish_node(local_id);
             Ok(services.to_vec())
         })
     }
@@ -739,22 +752,66 @@ impl ConnectorHub {
     /// This is the ONLY shape the page should read companions through — a caller that
     /// instead walks the store directly and then asks per-companion questions re-enters
     /// the store lock and deadlocks the whole hub (the live popped-page freeze).
-    pub fn companion_inventory(&self) -> Vec<(companion_core::domain::companion::Companion, Option<AtprotoBinding>, usize)> {
+    /// The manager's projection of one companion: the companion, its account status
+    /// (never a token value), its service grants, and its places with session STATUS.
+    /// One builder feeds the list view, mutation responses and the node-change events,
+    /// so every surface shows the same shape.
+    pub fn companion_node(&self, local_id: &str) -> Option<serde_json::Value> {
+        let store = self.lock_store().ok()?;
+        let companion = store.companion(local_id)?;
+        Some(Self::node_of(&store, &companion))
+    }
+
+    /// Every companion as its node projection, in one store guard — the same
+    /// one-guard discipline the page's list fetch has always relied on.
+    pub fn companion_nodes(&self) -> Vec<serde_json::Value> {
         let store = self.lock_store().expect("state lock");
-        store
-            .companions()
+        store.companions().iter().map(|companion| Self::node_of(&store, companion)).collect()
+    }
+
+    fn node_of(store: &StateStore, companion: &companion_core::domain::companion::Companion) -> serde_json::Value {
+        let binding = store.atproto_session(&companion.local_id);
+        let enrollments: Vec<serde_json::Value> = store
+            .enrollments_of(&companion.local_id)
             .iter()
-            .map(|companion| {
-                let binding = store.atproto_session(&companion.local_id).map(|session| AtprotoBinding {
-                    services: session.services,
-                    did: session.did,
-                    handle: session.handle,
-                    pds: session.pds,
-                    obtained_at: session.obtained_at,
-                });
-                (companion.clone(), binding, store.enrollments_of(&companion.local_id).len())
+            .map(|entry| {
+                json!({
+                    "enrollmentId": entry.enrollment_id,
+                    "companionId": entry.local_id,
+                    "origin": entry.origin,
+                    "participantRef": entry.participant_ref,
+                    "did": entry.did,
+                    "handle": entry.handle,
+                    "displayName": entry.display_name,
+                    "autoCheck": entry.auto_check,
+                    "sessionStatus": if store.session(&entry.enrollment_id).is_some() { "stored" } else { "missing" },
+                })
             })
-            .collect()
+            .collect();
+        json!({
+            "localId": companion.local_id,
+            "handle": companion.handle,
+            "displayName": companion.display_name,
+            "boundDid": companion.bound_did,
+            "createdAt": companion.created_at,
+            "atproto": binding.map(|session| json!({
+                "did": session.did,
+                "handle": session.handle,
+                "pds": session.pds,
+                "obtainedAt": session.obtained_at,
+                "services": session.services,
+            })),
+            "enrollmentCount": enrollments.len(),
+            "enrollments": enrollments,
+        })
+    }
+
+    /// Publishes the node-change event every open manager copy converges on: the
+    /// event carries the node itself, so no copy ever refetches to catch up.
+    fn publish_node(&self, local_id: &str) {
+        if let Some(node) = self.companion_node(local_id) {
+            self.events.publish(DomainEvent::CompanionChanged { local_id: local_id.to_string(), node });
+        }
     }
 
     /// Shared discovery step of the bound handshake: reads the server's own
@@ -919,6 +976,7 @@ impl ConnectorHub {
             store.set_session(&entry.enrollment_id, &exchanged.token);
             store.save()?;
             drop(store);
+            self.publish_node(&entry.local_id);
             self.events.publish(DomainEvent::CompanionSelected { enrollment_id: entry.enrollment_id.clone() });
             Ok(entry)
         })
@@ -1033,10 +1091,8 @@ impl ConnectorHub {
     }
 
     fn clear_pending_bind(&self, local_id: &str) {
-        if let Ok(mut slot) = self.pending_bind.lock() {
-            if slot.as_deref() == Some(local_id) {
-                *slot = None;
-            }
+        if let Ok(mut pendings) = self.pending_bind.lock() {
+            pendings.retain(|id| id != local_id);
         }
     }
 
@@ -1076,8 +1132,9 @@ impl ConnectorHub {
     /// effect happens on this branch. `repeated` means an identical pending is
     /// already narrated: the pending refreshes but the feed stays quiet.
     fn pop_sign_in(&self, companion: &Companion, canonical: &str, repeated: bool, initiator: &str) -> ToolOutcome {
-        if let Ok(mut slot) = self.pending_bind.lock() {
-            *slot = Some(companion.local_id.clone());
+        if let Ok(mut pendings) = self.pending_bind.lock() {
+            pendings.retain(|id| id != &companion.local_id);
+            pendings.push(companion.local_id.clone());
         }
         if !repeated {
             self.record_pending_connect(companion, canonical, initiator);
@@ -1347,6 +1404,8 @@ impl ConnectorHub {
             let mut store = self.lock_store()?;
             store.upsert_companion(companion.clone())?;
             store.save()?;
+            drop(store);
+            self.publish_node(&companion.local_id);
             Ok(companion)
         })
     }
@@ -1373,6 +1432,8 @@ impl ConnectorHub {
             }
             store.upsert_companion(companion.clone())?;
             store.save()?;
+            drop(store);
+            self.publish_node(local_id);
             Ok(companion)
         })
     }
@@ -1396,6 +1457,8 @@ impl ConnectorHub {
             }
             store.remove_companion(local_id);
             store.save()?;
+            drop(store);
+            self.events.publish(DomainEvent::CompanionRemoved { local_id: local_id.to_string() });
             Ok(())
         })
     }
@@ -1496,8 +1559,13 @@ impl ConnectorHub {
         let mut store = self.lock_store().expect("state lock");
         // A forgotten enrollment must not be resurrected by an in-flight request.
         if store.enrollments().iter().any(|entry| entry.origin == origin) {
-            store.set_server_card(card);
+            store.set_server_card(card.clone());
             let _ = store.save();
+            drop(store);
+            self.events.publish(DomainEvent::ServerCardChanged {
+                origin: origin.to_string(),
+                card: serde_json::to_value(card).unwrap_or_default(),
+            });
         }
     }
 

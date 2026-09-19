@@ -561,7 +561,9 @@ fn route(hub: &ConnectorHub, method: &str, target: &str, body: &RequestBody, roo
             let Some(services) = services else {
                 return ApiResponse(400, problem_json("bad_request", "services must be an array of service ids"), None);
             };
-            finish(hub.set_companion_services(local_id, &services), |services| ok_json(json!({ "services": services })))
+            finish(hub.set_companion_services(local_id, &services), |services| {
+                ok_json(json!({ "services": services, "node": hub.companion_node(local_id) }))
+            })
         }
         ("POST", ["companions", local_id]) => {
             let handle = body.get("handle").and_then(Value::as_str);
@@ -570,23 +572,13 @@ fn route(hub: &ConnectorHub, method: &str, target: &str, body: &RequestBody, roo
                 Some(Value::String(value)) => Some(Some(value.as_str())),
                 Some(_) => return ApiResponse(400, problem_json("bad_request", "displayName must be a string or null"), None),
             };
-            finish(hub.update_companion(local_id, handle, display), |companion| ok_json(json!({ "companion": companion_json(&companion) })))
+            finish(hub.update_companion(local_id, handle, display), |_| {
+                ok_json(json!({ "node": hub.companion_node(local_id) }))
+            })
         }
         ("POST", ["companions", local_id, "delete"]) => {
             let cascade = body.get("cascade").and_then(Value::as_bool).unwrap_or(false);
             finish(hub.delete_companion(local_id, cascade), |_| ok_json(json!({ "deleted": local_id })))
-        }
-        ("GET", ["companions", local_id, "enrollments"]) => {
-            if hub.companion(local_id).is_none() {
-                return ApiResponse(200, blocked_json("unknown_companion", "no companion matches that id"), None);
-            }
-            let enrollments: Vec<Value> = hub
-                .enrollment_inventory()
-                .into_iter()
-                .filter(|(entry, _)| entry.local_id == *local_id)
-                .map(|(entry, available)| enrollment_json(&entry, available))
-                .collect();
-            ApiResponse(200, ok_json(json!({ "enrollments": enrollments })), None)
         }
         // Enrollment deliberately has no route here: it is a consequence of
         // connecting (the Connect handshake) or an explicit hub/CLI action — the disarm
@@ -595,12 +587,14 @@ fn route(hub: &ConnectorHub, method: &str, target: &str, body: &RequestBody, roo
         // Binding happens on the /bind route over OAuth, and nowhere else: there is no
         // password path on the page, in the hub or in the CLI.
         ("POST", ["companions", local_id, "atproto", "unbind"]) => {
-            finish(hub.unbind_atproto(local_id), |companion| {
-                ok_json(json!({ "companion": companion_with_atproto(&companion, hub.atproto_binding(&companion.local_id)) }))
+            finish(hub.unbind_atproto(local_id), |_| {
+                ok_json(json!({ "node": hub.companion_node(local_id) }))
             })
         }
         ("POST", ["enrollments", enrollment_id, "forget"]) => {
-            finish(hub.forget_enrollment(enrollment_id), |_| ok_json(json!({ "forgotten": enrollment_id })))
+            finish(hub.forget_enrollment(enrollment_id), |local_id| {
+                ok_json(json!({ "forgotten": enrollment_id, "node": hub.companion_node(&local_id) }))
+            })
         }
         ("GET", ["server-cards"]) => ApiResponse(200, ok_json(json!({ "servers": hub.refresh_server_cards() })), None),
         ("GET", ["status"]) => {
@@ -716,8 +710,8 @@ fn bind_callback(hub: &ConnectorHub, parameters: &[(String, String)], root_url: 
         return bind_result_page_failed("invalid_callback: the callback carried no state");
     }
     match hub.complete_atproto_bind(state, code, parameter("iss"), root_url) {
-        Ok(BindOutcome::Bound { handle, created, .. }) => bind_result_page(&handle, created),
-        Ok(BindOutcome::AlreadyCompanion { handle, .. }) => bind_already_page(&handle),
+        Ok(BindOutcome::Bound { local_id, handle, created }) => bind_result_page(&local_id, &handle, created),
+        Ok(BindOutcome::AlreadyCompanion { local_id, handle }) => bind_already_page(&local_id, &handle),
         Err(problem) => bind_result_page_failed(&problem),
     }
 }
@@ -746,14 +740,15 @@ fn bind_skeleton(title: &str, body: &str) -> String {
 
 /// The callback's success page: names the companion (created by this sign-in, or the
 /// one that just re-signed) and frees the tab.
-fn bind_result_page(handle: &str, created: bool) -> ApiResponse {
+fn bind_result_page(local_id: &str, handle: &str, created: bool) -> ApiResponse {
     let escaped = html_escape(handle);
+    let page = html_escape(local_id);
     let title = if created { "Companion created" } else { "Account connected" };
     let body = if created {
         format!(
             "<p class=\"eyebrow\">A new face arrives</p><h1>{escaped} is here.</h1>\n\
              <p class=\"muted\">This companion was created from your sign-in and named after your account. Rename it any time on its page.</p>\n\
-             <a class=\"button\" href=\"/companion/{escaped}\">Visit {escaped}’s page</a>\n\
+             <a class=\"button\" href=\"/companion/{page}\">Visit {escaped}’s page</a>\n\
              <a class=\"muted\" href=\"/\">Back to your companions</a>\n\
              <p class=\"muted\">You can also close this tab and return to your agent app.</p>\n"
         )
@@ -762,7 +757,7 @@ fn bind_result_page(handle: &str, created: bool) -> ApiResponse {
             "<p class=\"eyebrow\">A familiar face, ready to return</p><h1>You’re connected.</h1>\n\
              <p class=\"account\">Signed in as <strong>{escaped}</strong></p>\n\
              <p class=\"muted\">Your companion’s account is ready. The connector remembers this sign-in for future visits and continues any waiting connection.</p>\n\
-             <a class=\"button\" href=\"/companion/{escaped}\">Visit {escaped}’s page</a>\n\
+             <a class=\"button\" href=\"/companion/{page}\">Visit {escaped}’s page</a>\n\
              <a class=\"muted\" href=\"/\">Back to your companions</a>\n\
              <p class=\"muted\">You can also close this tab and return to your agent app.</p>\n"
         )
@@ -772,12 +767,13 @@ fn bind_result_page(handle: &str, created: bool) -> ApiResponse {
 
 /// The friendly duplicate: the account already belongs to a companion, so the sign-in
 /// created nothing — the operator is routed to that companion instead.
-fn bind_already_page(handle: &str) -> ApiResponse {
+fn bind_already_page(local_id: &str, handle: &str) -> ApiResponse {
     let escaped = html_escape(handle);
+    let page = html_escape(local_id);
     let body = format!(
         "<p class=\"eyebrow\">One account, one companion</p><h1>This account already has a companion.</h1>\n\
          <p class=\"muted\">The account you signed in with belongs to <strong>{escaped}</strong>, so no new companion was created.</p>\n\
-         <a class=\"button\" href=\"/companion/{escaped}\">Go to {escaped}’s page</a>\n\
+         <a class=\"button\" href=\"/companion/{page}\">Go to {escaped}’s page</a>\n\
          <a class=\"muted\" href=\"/\">Back to your companions</a>\n"
     );
     ApiResponse(200, Value::String(bind_skeleton("Already a companion", &body)), None)
@@ -867,83 +863,10 @@ fn percent_decode_form(value: &str) -> String {
 }
 
 fn companion_list(hub: &ConnectorHub) -> Vec<Value> {
-    // One batched hub read (one store guard inside it), then pure JSON assembly. This
-    // route once walked the store under its own guard and asked the hub per companion —
-    // `atproto_binding` re-locked the same non-reentrant mutex on the same thread and
-    // froze the entire hub (store held forever): every Connect, every operator
-    // mutation, the page itself. Never re-enter the store from under a store guard.
-    let inventory = hub.companion_inventory();
-    // One batched read for every enrollment too: the page fetches companions once and
-    // renders places from the same payload — never one request per companion.
-    let mut enrollments: std::collections::HashMap<String, Vec<Value>> = std::collections::HashMap::new();
-    for (entry, available) in hub.enrollment_inventory() {
-        enrollments
-            .entry(entry.local_id.clone())
-            .or_default()
-            .push(enrollment_json(&entry, available));
-    }
-    inventory
-        .into_iter()
-        .map(|(companion, atproto, count)| {
-            let local_id = companion.local_id.clone();
-            let mut value = companion_with_atproto(&companion, atproto);
-            value["enrollmentCount"] = json!(count);
-            // Every one of this companion's enrollment sessions is stored (vacuously
-            // true with none — nothing is waiting on a reconnect).
-            value["sessionsAvailable"] = json!(enrollments
-                .get(&local_id)
-                .map(|list| list.iter().all(|entry| entry["sessionStatus"] == "stored"))
-                .unwrap_or(true));
-            value["enrollments"] = json!(enrollments.get(&local_id).cloned().unwrap_or_default());
-            value
-        })
-        .collect()
-}
-
-fn companion_json(companion: &companion_core::domain::companion::Companion) -> Value {
-    json!({
-        "localId": companion.local_id,
-        "handle": companion.handle,
-        "displayName": companion.display_name,
-        "boundDid": companion.bound_did,
-        "createdAt": companion.created_at,
-    })
-}
-
-/// The companion view plus its atproto binding status: what is bound, where, and how old
-/// the session is — never the access token. Pure rendering: the
-/// binding is fetched by the caller, so no store guard is ever held here.
-fn companion_with_atproto(
-    companion: &companion_core::domain::companion::Companion,
-    atproto: Option<crate::application::hub::AtprotoBinding>,
-) -> Value {
-    let mut value = companion_json(companion);
-    value["atproto"] = match atproto {
-        Some(binding) => json!({
-            "did": binding.did,
-            "handle": binding.handle,
-            "pds": binding.pds,
-            "obtainedAt": binding.obtained_at,
-            "services": binding.services,
-        }),
-        None => Value::Null,
-    };
-    value
-}
-
-/// Session STATUS only: whether the enrollment holds one — never the token value.
-fn enrollment_json(entry: &companion_core::domain::companion::Enrollment, available: bool) -> Value {
-    json!({
-        "enrollmentId": entry.enrollment_id,
-        "companionId": entry.local_id,
-        "origin": entry.origin,
-        "participantRef": entry.participant_ref,
-        "did": entry.did,
-        "handle": entry.handle,
-        "displayName": entry.display_name,
-        "autoCheck": entry.auto_check,
-        "sessionStatus": if available { "stored" } else { "missing" },
-    })
+    // One batched hub read: every companion as its node projection (account status,
+    // grants, places with session status), plus pure JSON assembly. Never re-enter
+    // the store from under a store guard.
+    hub.companion_nodes()
 }
 
 fn finish<T>(result: Result<T, String>, render: impl FnOnce(T) -> Value) -> ApiResponse {

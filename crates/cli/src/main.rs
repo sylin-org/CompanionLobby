@@ -449,21 +449,25 @@ fn forget(rest: &[String]) -> i32 {
             return EXIT_FAILED;
         }
     };
-    let mut store = hub.store().lock().expect("state lock");
-    let Some(entry) = store.find_enrollment(&name) else {
-        eprintln!("no companion matches '{name}'");
-        return EXIT_USAGE;
+    // The same hub path every intake forgets through: journaled, attributed, and
+    // announced on the event bus like any other mutation.
+    let enrollment_id = {
+        let store = hub.store().lock().expect("state lock");
+        match store.find_enrollment(&name) {
+            Some(entry) => entry.enrollment_id.clone(),
+            None => {
+                eprintln!("no companion matches '{name}'");
+                return EXIT_USAGE;
+            }
+        }
     };
-    store.remove_companion(&entry.enrollment_id);
-    let result = store.save();
-    drop(store);
-    match result {
-        Ok(()) => {
-            println!("Removed {} and its stored session.", entry.name);
+    match hub.forget_enrollment(&enrollment_id) {
+        Ok(_) => {
+            println!("Forgot the connection and its stored session.");
             EXIT_OK
         }
         Err(error) => {
-            eprintln!("state could not be saved: {error}");
+            eprintln!("{error}");
             EXIT_FAILED
         }
     }
