@@ -73,19 +73,24 @@ CLI exit codes never report an uncertain outcome as success
 
 ## Companions and enrollments
 
-The connector holds 1..N local **companions**: a connector-minted GUIDv7 `localId`
+The connector holds 0..N local **companions**: a connector-minted GUIDv7 `localId`
 (immutable, never formatted as a DID), a unique handle (2..253 chars), an optional
-display name, and — once the operator binds an atproto account — the account's DID as
-`bound_did` plus the companion's atproto session (see below). An **enrollment** is the
-session + server binding for one companion at one origin; selection
-(`SelectCompanion`) resolves a companion first, then one of its enrollments.
+display name, and exactly one credential — the bound atproto account. **One account,
+one companion:** companions are born only from a completed sign-in (the add screen
+lists the registered providers and nothing else), the account's DID is the uniqueness
+key, and a companion is named after its account by default (a unique fallback when
+that handle is taken; moniker and display name are the operator's to change later). A
+sign-in for an account that already has a companion creates nothing — it routes the
+operator to that companion. An **enrollment** is the session + server binding for one
+companion at one origin; selection (`SelectCompanion`) resolves a companion first,
+then one of its enrollments.
 
 **Companion resolution is behavior, not configuration .** A tool call
 needing a companion resolves by (a) an explicit argument — a moniker for
 `SelectCompanion`, a `companion` handle for `Connect` — else (b) exactly one local
 companion, which every intake auto-resolves alike: the MCP edge, the CLI and the
 manager page observe the same outcome (CLI/MCP parity is the rule, never
-second-class). With zero companions the honest answer points at creation; with several,
+second-class). With zero companions the honest answer points at the add screen; with several,
 the honest `companion_selection_required` question lists the handles and names the
 explicit path. Never a guess, never machine-wide.
 
@@ -98,19 +103,31 @@ arguments, response text, logs, the diagnostics journal or the companion manager
 manager API reports session *status* (stored/missing), never the value. A missing
 session for a live enrollment is an honest "re-enroll" state.
 
-**Atproto binding.** One companion may hold one **atproto session** — a second state
-map (`atproto_sessions`, keyed by the companion's local id) with the same cookie-jar
-posture: the PDS-issued `accessJwt` is session state, not a vault secret. The operator
-binds it on the companion page through atproto **OAuth**: the `/bind` route starts the
-flow, the provider's own UI handles account selection and sign-in, and the callback
-records `{did, handle, access_jwt, refresh_jwt, pds, dpop_key, obtained_at}`, setting
-the companion's `bound_did`. No password ever reaches the connector. The PDS defaults
-to `https://bsky.social` (the public default; the DID document's `#atproto_pds`
-serviceEndpoint replaces it when reported), and an explicit origin covers other PDSs
-(`COMPANION_LOBBY_AUTHSERVER` names a self-hosted authorization server). Re-binding
-replaces the session — the documented path when the PDS session expires — and
-unbinding clears it plus the `bound_did`; in both cases existing enrollments keep
-their own Tangent sessions.
+**The credential.** The companion's atproto session — a state map
+(`atproto_sessions`, keyed by the companion's local id) with the same cookie-jar
+posture: the PDS-issued `accessJwt` is session state, not a vault secret. Sign-in runs
+through atproto **OAuth**: the `/bind` route starts the flow (for a new companion at
+`/bind/new/atproto`, for a re-bind at `/bind/{id}/atproto`), the provider's own UI
+handles account selection and sign-in, and the callback records
+`{did, handle, access_jwt, refresh_jwt, pds, dpop_key, services, obtained_at}`,
+setting the companion's `bound_did`. No password ever reaches the connector. The PDS
+defaults to `https://bsky.social` (the public default; the DID document's
+`#atproto_pds` serviceEndpoint replaces it when reported), and an explicit origin
+covers other PDSs (`COMPANION_LOBBY_AUTHSERVER` names a self-hosted authorization
+server). Re-binding replaces the session and carries the operator's service grants
+forward — the documented path when the PDS session expires.
+
+**Service grants gate establishment.** A credential carries the operator's grant:
+which service classes may establish sessions with it (Tangent today; Bluesky is
+listed honestly as unavailable until its adapter exists). A Connect without the grant
+is an honest `service_not_allowed` refusal — the agent never receives a session
+identifier for a service it may not use. The gate is establishment only; it never
+touches a session that already exists.
+
+**Disconnecting is a flush.** Unbinding removes the credential and, with it,
+immediately every session that credential established: the next request needing one
+fails honestly instead of limping on issued tokens. The enrollment records stay as
+places-visited memories; a re-bind reconnects them with a fresh exchange.
 
 **The on-the-fly handshake .** Enrollment is a consequence of
 connecting, not a ceremony: the model calls `Connect { serverUrl, companion? }` — or
@@ -176,30 +193,31 @@ JSON-RPC and carries nothing else. The server thread joins when the MCP `initial
 request builds the hub, which is also the first moment any tool (including
 `OpenRegistration` and `Connect`) can run.
 
-The page's sections:
+The page is a **single-page app: every application state is a route** (`/` the
+overview, `/add` the sign-in screen, `/companion/{handle}` one companion's page),
+served from one shell; unknown GETs hand the path to the client router, while the
+server-owned surfaces — the `/bind` routes, the `/api/*` JSON surface — keep their
+exact shapes, mistakes included.
 
-- **Live activity** — the SSE feed (`GET /api/events`, plain): the handshake's progress
+- **`/` (overview)** — the companions (each linking to its page), the places
+  they've been (grouped by server, from the cached server cards), connection status,
+  and the live activity feed (`GET /api/events`, plain): the handshake's progress
   narrated live, each line saying who initiated it — "model (via {client})" for MCP
   tool calls, "operator (CLI)" for command-line connects, "companion manager" for
-  page-driven actions and the auto-resume. Connecting, companion resolved,
-  waiting-for-operator (which companion, what is needed), operator completed,
-  enrolled, arrived, failures with their honest codes — plus the bind/unbind actions.
-  Bounded to the last ~20 lines; at most 4 concurrent feed clients, refused honestly
-  beyond that. The feed never carries a password, proof or session value.
-- **Companions** — create/update/delete (handle uniqueness enforced; delete refuses
-  while enrollments exist unless a confirmed cascade forgets them and their sessions).
-  The **Atmosphere handle** column is the binding surface: companions with no bound
-  account show "not registered" with an inline **Sign In** button (routes to the
-  `/bind` route for that companion via its `#bind-{localId}` anchor); bound ones show
-  the atproto handle with an inline **Log Out** button (= unbind: clears the binding,
-  leaves server enrollment sessions untouched).
-- **Atmosphere sign-in** — the `/bind` route the anchors open: it starts the atproto
-  OAuth flow immediately, and the provider's own UI takes the sign-in from there.
-- **Servers/enrollments** — a read-only status view (origin, participant reference,
-  session stored/missing, auto-check) plus Forget. **The page never enrolls** —
-  enrollment lives in the Connect handshake.
-- **Status** — read-only attention/pending-write state per enrollment, reusing hub
-  state.
+  page-driven actions and the auto-resume. Bounded to the last ~20 lines; at most 4
+  concurrent feed clients, refused honestly beyond that. The feed never carries a
+  password, proof or session value.
+- **`/add`** — the registered auth providers and nothing else: one entry per
+  provider (`GET /api/providers` is the auth registry), each starting the OAuth
+  sign-in that creates the companion.
+- **`/companion/{handle}`** — one companion's page: the Atmosphere account (sign-in
+  state, or sign-in for an unbound legacy companion; **Disconnect** flushes the
+  credential and every session it established), the **service grants** (which
+  classes may establish sessions with this credential; unavailable services are
+  listed, not enableable), renaming (handle/display name), removal (refuses while
+  enrollments exist unless a confirmed cascade forgets them and their sessions), and
+  its places with Forget. **The page never enrolls** — enrollment lives in the
+  Connect handshake.
 
 ## Setup
 
@@ -272,7 +290,7 @@ several-companion case. `OpenRegistration` takes no arguments: it browser-opens 
 companion manager for the human operator — attention, not execution (nothing signs
 in or enrolls without the operator). The anchor is routed: after a
 `Connect` popped sign-in for one companion, `OpenRegistration` opens that companion's
-sign-in anchor; the default is companion creation. It opens once per process — a
+sign-in anchor; the default is the add screen. It opens once per process — a
 looping model's repeated call answers the honest "already open" instead of spawning
 another tab. The page URL is constructed internally and never rendered into the tool
 response; without an in-process manager the tool answers an honest
