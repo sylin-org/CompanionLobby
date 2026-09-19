@@ -1,6 +1,6 @@
 @echo off
-rem Starts the Companion Lobby connector's companion manager (loopback page + tray).
-rem The manager opens your browser by itself once it is up.
+rem Starts (or restarts) the Companion Lobby connector's companion manager:
+rem any previous instance is stopped first, then a fresh one launches.
 setlocal
 set "ROOT=%~dp0"
 set "BINARY=%ROOT%target\release\companion-lobby.exe"
@@ -15,23 +15,18 @@ if not exist "%BINARY%" (
     exit /b 1
 )
 
-tasklist /FI "IMAGENAME eq companion-lobby.exe" | findstr /I "companion-lobby.exe" >nul
-if %errorlevel%==0 (
-    echo The companion manager is already running at http://127.0.0.1:%PORT%/
-    exit /b 0
+rem Any previous instance goes first: one data directory, one process. stop.bat
+rem also clears the lock a firm stop leaves behind.
+call "%~dp0stop.bat" >nul 2>&1
+if errorlevel 1 (
+    echo The previous instance could not be stopped; nothing was relaunched.
+    exit /b 1
 )
 
-rem With no process running, a leftover lock is stale debris from an unclean stop.
-set "STALE="
-if exist "%HOME_DIR%\lock" set "STALE=1"
+rem Nothing runs, so any leftover lock is stale by definition; --force clears it.
 set "OUT=%TEMP%\companion-lobby-manager.out.log"
 set "ERR=%TEMP%\companion-lobby-manager.err.log"
-if defined STALE (
-    echo Cleared a stale data-directory lock left by an unclean stop.
-    powershell -NoProfile -Command "Start-Process -FilePath '%BINARY%' -ArgumentList 'manager','--force' -WindowStyle Hidden -RedirectStandardOutput '%OUT%' -RedirectStandardError '%ERR%'" >nul 2>&1
-) else (
-    powershell -NoProfile -Command "Start-Process -FilePath '%BINARY%' -ArgumentList 'manager' -WindowStyle Hidden -RedirectStandardOutput '%OUT%' -RedirectStandardError '%ERR%'" >nul 2>&1
-)
+powershell -NoProfile -Command "Start-Process -FilePath '%BINARY%' -ArgumentList 'manager','--force' -WindowStyle Hidden -RedirectStandardOutput '%OUT%' -RedirectStandardError '%ERR%'" >nul 2>&1
 
 rem Wait (up to ten seconds) for the page to answer.
 set /a TRIES=0

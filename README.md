@@ -165,9 +165,11 @@ lock and are expected to be operator-driven, not concurrent.
 companion-lobby manager [--port N] [--no-open] [--force]
 ```
 
-On Windows, `start.bat` and `stop.bat` in the repository root start and stop the
-companion manager (a missing binary is named honestly with its build command; an
-unclean stop's stale lock is cleared; a failed start prints the process's last words).
+On Windows, `start.bat` and `stop.bat` in the repository root restart and stop the
+companion manager: start.bat stops any previous instance first, then launches a fresh
+one and waits for the page to answer (a missing binary is named honestly with its
+build command; a failed launch prints the process's last words); stop.bat stops the
+process and clears the lock a firm stop leaves behind.
 
 A long-running local web server (loopback `127.0.0.1` only, on the fixed port 5219
 unless `--port` or `COMPANION_LOBBY_PORT` names another; port 0 is refused; `--force`
