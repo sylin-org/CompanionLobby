@@ -585,5 +585,5 @@ fn signin_pendings_are_per_companion_and_cleared_by_completion() {
     let callback = start_bind(address, &server, &second.local_id, Some("oxomega.bsky.example"));
     assert_eq!(waiting("ox_omega").structured.pointer("/problem/code").and_then(Value::as_str), Some("operator_action_needed"));
     let callback_path = callback.strip_prefix(&format!("http://{address}")).unwrap_or(&callback);
-    let page = get(address, callback_path);
+    get(address, callback_path);
 }
