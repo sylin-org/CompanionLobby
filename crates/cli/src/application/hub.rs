@@ -23,7 +23,6 @@ use companion_core::domain::events::DomainEvent;
 use companion_core::domain::companion::{valid_handle, AccountSession, CallerId, Enrollment, Companion, Context};
 use companion_core::domain::intake::IntakeChannel;
 use companion_core::domain::refs;
-use companion_core::domain::writes::Receipt;
 use companion_core::domain::{attention::AttentionState, now_millis};
 use crate::presentation::perspective::Perspective;
 use crate::presentation::{render, RenderInput};
@@ -89,7 +88,6 @@ pub struct EnrollmentStatus {
     pub origin: String,
     pub waiting: i64,
     pub pending_attention: usize,
-    pub unresolved_writes: usize,
 }
 
 /// Read-only atproto binding status for the companion manager: what is bound and how old
@@ -108,6 +106,9 @@ pub struct ServiceClass {
     pub id: &'static str,
     pub label: &'static str,
     pub available: bool,
+    /// Whether connecting names a place: forums are many servers; a single-instance
+    /// service carries no address at all.
+    pub needs_address: bool,
 }
 
 impl ToolOutcome {
@@ -256,6 +257,41 @@ impl ConnectorHub {
         (self.pages)(url);
     }
 
+    /// The Forum keys the tangent experience wire honestly carries today. A key
+    /// whose server counterpart does not exist yet stays absent from the catalog
+    /// (ADR 0001) — the grammar exists, the ring says otherwise.
+    pub fn forum_support(&self) -> &'static [&'static str] {
+        &[
+            "Forum_List_Spaces",
+            "Forum_List_Threads",
+            "Forum_Read_Thread",
+            "Forum_Post",
+            "Forum_Join_Space",
+            "Forum_Leave_Space",
+            "Forum_Mark_Read",
+            "Forum_Watch",
+            "Forum_Open_Case",
+        ]
+    }
+
+    /// The service monikers any companion's credential grants — which rings may
+    /// appear in the catalog at all.
+    pub fn granted_service_monikers(&self) -> BTreeSet<String> {
+        let store = self.lock_store().expect("state lock");
+        store.companions().iter()
+            .filter_map(|companion| store.granted_services(&companion.local_id))
+            .flatten()
+            .collect()
+    }
+
+    /// The stewardship facts one live context has reported: case-tool names and
+    /// `manage:`-prefixed user-management rungs, exactly as the envelope offered them.
+    pub fn context_optional_tools(&self, context_id: &str) -> BTreeSet<String> {
+        self.optional_tools.lock().ok()
+            .and_then(|contexts| contexts.get(context_id).cloned())
+            .unwrap_or_default()
+    }
+
     pub fn optional_tool_names(&self) -> BTreeSet<String> {
         self.optional_tools.lock().map(|contexts| contexts.values()
             .flat_map(|names| names.iter().cloned()).collect()).unwrap_or_default()
@@ -263,16 +299,24 @@ impl ConnectorHub {
 
     fn observe_optional_tools(&self, context_id: &str, experience: &ExperienceDto) {
         let Some(capabilities) = experience.capabilities.as_ref() else { return; };
-        let known = |name: &str| match name {
-            "list_moderation_cases" => Some("ListModerationCases"),
-            "read_moderation_case" => Some("ReadModerationCase"),
-            "preview_moderation_action" => Some("PreviewModerationAction"),
-            "apply_moderation_action" => Some("ApplyModerationAction"),
-            _ => None,
+        let known = |name: &str| -> Option<Vec<String>> {
+            match name {
+                "list_moderation_cases" => Some(vec!["Forum_List_Cases".to_string()]),
+                "read_moderation_case" => Some(vec!["Forum_Read_Case".to_string()]),
+                "preview_moderation_action" => Some(vec!["Forum_Preview_Action".to_string()]),
+                "apply_moderation_action" => Some(vec!["Forum_Escalate_Case".to_string()]),
+                "warn_user" => Some(vec!["manage:warn".to_string()]),
+                "timeout_user" => Some(vec!["manage:timeout".to_string()]),
+                "suspend_user" => Some(vec!["manage:suspend".to_string()]),
+                "ban_user" => Some(vec!["manage:ban".to_string()]),
+                // One wire string covers both role rungs.
+                "assign_roles" => Some(vec!["manage:add_role".to_string(), "manage:remove_role".to_string()]),
+                _ => None,
+            }
         };
         let offered = experience.place.allowed_actions.iter().map(String::as_str)
             .chain(experience.actions.iter().map(|action| action.name.as_str()))
-            .filter_map(known).map(str::to_string).collect::<BTreeSet<_>>();
+            .filter_map(known).flatten().collect::<BTreeSet<_>>();
         if let Ok(mut contexts) = self.optional_tools.lock() {
             if capabilities.stewardship && !offered.is_empty() {
                 contexts.insert(context_id.to_string(), offered);
@@ -341,22 +385,6 @@ impl ConnectorHub {
             store.clear_manager_page_url();
             let _ = store.save();
         }
-    }
-
-    /// The browser target `OpenRegistration` opens. Never rendered into a view, a tool
-    /// response or the journal; this accessor exists for the internal open and tests.
-    /// The anchor is routed: a pending sign-in popped by `Connect` wins over the
-    /// default companion-creation view.
-    pub fn registration_target_url(&self) -> Option<String> {
-        let page = self.manager_page_url.lock().ok()?.clone()?;
-        // The most recently popped sign-in wins the anchor; several companions can
-        // have pendings at once (one per tab, one per Connect).
-        let pending = self.pending_bind.lock().ok().and_then(|slot| slot.last().cloned());
-        let anchor = match pending.as_deref() {
-            Some(local_id) => bind_anchor(local_id),
-            None => "add".to_string(),
-        };
-        Some(registration_target(&page, &anchor))
     }
 
     /// The browser target a sign-in pop for this companion would open (this process's
@@ -712,8 +740,8 @@ impl ConnectorHub {
     pub fn service_catalog(&self) -> Vec<ServiceClass> {
         let installed = |name: &str| self.services.read().map(|registry| registry.contains_key(name)).unwrap_or(false);
         vec![
-            ServiceClass { id: "tangent", label: "Tangent servers", available: installed("tangent") },
-            ServiceClass { id: "bluesky", label: "Bluesky", available: installed("bluesky") },
+            ServiceClass { id: "tangent", label: "Tangent servers", available: installed("tangent"), needs_address: true },
+            ServiceClass { id: "bluesky", label: "Bluesky", available: installed("bluesky"), needs_address: false },
         ]
     }
 
@@ -995,26 +1023,83 @@ impl ConnectorHub {
     /// enrollment/session exists for the origin, and the handshake exits through
     /// `Arrive`'s orientation view led by the "You are … — session …" line.
     /// `SelectCompanion` + `Arrive` stay the explicit path.
-    fn connect(&self, server_url: &str, companion_arg: Option<&str>, initiator: &str) -> ToolOutcome {
-        let Some(canonical) = refs::acceptable_origin(server_url) else {
+    /// The front door: connect to a service as a persona, always explicitly named.
+    /// The persona is resolved exactly (an honest miss lists what exists), the
+    /// per-credential grant gates session establishment, a forum names its place, and
+    /// the answer mints the labeled session with the full briefing.
+    fn connect(&self, service_name: &str, persona: &str, address: Option<&str>, initiator: &str) -> ToolOutcome {
+        let catalog = self.service_catalog();
+        let Some(class) = catalog.iter().find(|class| class.id == service_name) else {
+            let known: Vec<&str> = catalog.iter().map(|class| class.id).collect();
             return self.problem_outcome(
                 "Connect",
-                "invalid_arguments",
-                "Use one HTTPS server origin, or explicit loopback HTTP for development.",
+                "unknown_service",
+                &format!("no '{service_name}' service exists in this connector. The services are: {}.", known.join(", ")),
                 None,
             );
         };
-        let companion = match self.resolve_connect_companion(companion_arg) {
+        if !class.available {
+            return self.problem_outcome(
+                "Connect",
+                "service_unavailable",
+                &format!("the '{}' service is not available in this connector yet", class.id),
+                None,
+            );
+        }
+        // A forum is many places; the address names which one. Single-instance
+        // services carry no address at all.
+        let canonical = if class.needs_address {
+            let Some(address) = address else {
+                return self.problem_outcome(
+                    "Connect",
+                    "address_required",
+                    &format!("the '{}' service is many places; name one with its address (an https origin)", class.id),
+                    None,
+                );
+            };
+            let Some(canonical) = refs::acceptable_origin(address) else {
+                return self.problem_outcome(
+                    "Connect",
+                    "invalid_arguments",
+                    "Use one HTTPS server origin, or explicit loopback HTTP for development.",
+                    None,
+                );
+            };
+            canonical
+        } else {
+            String::new()
+        };
+        // The persona is always explicit; an honest miss lists what exists.
+        let companion = match self.resolve_persona(persona) {
             Ok(companion) => companion,
             Err(reason) => {
-                self.connect_failed(&canonical, "", "companion_selection_required", initiator);
-                return self.companion_question(&reason);
+                self.connect_failed(&canonical, "", "persona_unknown", initiator);
+                return self.persona_question(&reason);
             }
         };
-        // P5a coalescing: a live pending for this (companion, origin) means the waiting
+        // No credential yet is a different honest answer than a missing grant: the
+        // waiting-for-operator flow, which pops the sign-in and finishes by itself.
+        if !self.usable_binding(&companion.local_id) {
+            return self.pop_sign_in(&companion, &canonical, false, initiator);
+        }
+        // The per-credential grant gates session establishment: without it, no session
+        // identifier is ever minted for this service.
+        {
+            let store = self.lock_store().expect("state lock");
+            let granted = store.granted_services(&companion.local_id)
+                .is_some_and(|services| services.iter().any(|service| service == service_name));
+            if !granted {
+                return self.problem_outcome(
+                    "Connect",
+                    "service_not_allowed",
+                    &format!("the '{service_name}' service is not allowed for {}'s credential; the operator can allow it on the companion's page", companion.handle),
+                    None,
+                );
+            }
+        }
+        // Coalescing: a live pending for this (companion, origin) means the waiting
         // state is already narrated on the feed — a looping caller's repeated Connects
-        // refresh the pending but stay silent until state changes (sign-in, age-out, a
-        // different companion or origin).
+        // refresh the pending but stay quiet until state changes.
         let repeated = self.touch_pending_connect(&companion.local_id, &canonical);
         if !repeated {
             self.events.publish(DomainEvent::ConnectStarted { origin: canonical.clone(), initiator: initiator.to_string() });
@@ -1031,51 +1116,125 @@ impl ConnectorHub {
             self.connect_failed(&canonical, &companion.handle, &problem_code_of(&outcome), initiator);
             return outcome;
         }
-        if !self.usable_binding(&companion.local_id) {
-            return self.pop_sign_in(&companion, &canonical, repeated, initiator);
-        }
         self.clear_pending_bind(&companion.local_id);
-        // The wait (if any) is over: this connect finishes model-side, so its pending
-        // must not linger into a duplicate auto-resume.
         self.drop_pending_connect(&companion.local_id, &canonical);
         self.connect_finish(&companion, &canonical, initiator)
     }
 
-    /// Companion resolution is behavior, not configuration: an explicit
-    /// argument resolves exactly (handle or local id) with an honest miss; otherwise
-    /// exactly one local companion resolves automatically for every intake — the MCP
-    /// edge, the CLI and the manager channel alike — while zero or several resolve
-    /// nothing, honestly, even when a choice would seem obvious.
-    fn resolve_connect_companion(&self, companion_arg: Option<&str>) -> Result<Companion, String> {
+    /// Persona resolution is exact: the moniker names one companion, or the honest
+    /// miss says so and lists what exists.
+    fn resolve_persona(&self, persona: &str) -> Result<Companion, String> {
         let store = self.lock_store().expect("state lock");
-        if let Some(argument) = companion_arg {
-            return store
-                .companion_by_moniker(argument)
-                .ok_or_else(|| format!("No local companion matches '{argument}'"));
-        }
-        let companions = store.companions();
-        match companions.len() {
-            0 => Err("No local companion exists yet".to_string()),
-            1 => Ok(companions[0].clone()),
-            _ => Err("Multiple local companions exist".to_string()),
-        }
+        store.companion_by_moniker(persona).ok_or_else(|| format!("No companion matches '{persona}'"))
     }
 
-    /// The honest unresolvable-companion answer: why resolution failed, which companions
-    /// exist, and the explicit way forward. Never a guess, never machine-wide.
-    fn companion_question(&self, reason: &str) -> ToolOutcome {
+    /// The honest unknown-persona answer: why it failed, which companions exist, and
+    /// the way forward. Never a guess, never machine-wide.
+    fn persona_question(&self, reason: &str) -> ToolOutcome {
         let handles: Vec<String> = self.companions().iter().map(|companion| companion.handle.clone()).collect();
         let message = if handles.is_empty() {
-            format!(
-                "{reason}. Ask the operator to create one (OpenRegistration opens the companion manager), then connect again."
-            )
+            format!("{reason}. No companions exist yet; ask the operator to sign one in (the manager's add screen), then connect again.")
         } else {
-            format!(
-                "{reason}. Available companions: {}. Ask which one is yours, then connect again with companion set to one of them.",
-                handles.join(" · ")
-            )
+            format!("{reason}. Available companions: {}. ListCompanions names them; connect again with persona set to one of them.", handles.join(" · "))
         };
-        self.problem_outcome("Connect", "companion_selection_required", &message, None)
+        self.problem_outcome("Connect", "persona_unknown", &message, None)
+    }
+
+    /// Who exists and what each may reach: the persona monikers and their granted
+    /// services — facts, so a caller learns what is connectable in the same breath.
+    fn list_companions_view(&self) -> ToolOutcome {
+        let entries: Vec<(String, Option<String>, Vec<String>)> = {
+            let store = self.lock_store().expect("state lock");
+            store.companions()
+                .iter()
+                .map(|companion| {
+                    (
+                        companion.handle.clone(),
+                        companion.display_name.clone(),
+                        store.granted_services(&companion.local_id).unwrap_or_default(),
+                    )
+                })
+                .collect()
+        };
+        let mut text = String::from("Companions:");
+        for (handle, display, services) in &entries {
+            let name = display.clone().unwrap_or_else(|| handle.clone());
+            let services = if services.is_empty() { "no services granted".to_string() } else { services.join(", ") };
+            text.push_str(&format!("\n{name} ({handle}) — may reach: {services}"));
+        }
+        if entries.is_empty() {
+            text.push_str(" none yet. Ask the operator to sign one in (the manager's add screen).");
+        }
+        let structured = json!({
+            "experience": null,
+            "problem": null,
+            "connector": {
+                "view": "compact",
+                "deliveryMode": DELIVERY_MODE,
+                "companions": entries.iter().map(|(handle, display, services)| json!({
+                    "persona": handle,
+                    "displayName": display,
+                    "services": services,
+                })).collect::<Vec<_>>(),
+            }
+        });
+        ToolOutcome { is_error: false, status: "ok".into(), text, structured }
+    }
+
+    /// The anchor: identity facts and the live capability readout for one session.
+    /// Facts only — the ring as of now, never advice.
+    fn who_am_i(&self, session: &str) -> ToolOutcome {
+        let binding = {
+            let store = self.lock_store().expect("state lock");
+            store.context(session)
+        };
+        let Some(binding) = binding else { return self.context_expired("WhoAmI") };
+        let Some(enrollment) = self.companion_of(&binding.enrollment_id) else {
+            return self.context_expired("WhoAmI");
+        };
+        if !binding.belongs_to(&self.caller, &enrollment.enrollment_id) || binding.origin != enrollment.origin {
+            return self.context_expired("WhoAmI");
+        }
+        let (persona, display) = {
+            let store = self.lock_store().expect("state lock");
+            match store.companion(&enrollment.local_id) {
+                Some(companion) => (companion.handle, companion.display_name),
+                None => (enrollment.handle.clone().unwrap_or_default(), enrollment.display_name.clone()),
+            }
+        };
+        // The capability readout: this ring's keys as the service supports them, plus
+        // the stewardship authority the live context has reported.
+        let ring: Vec<&str> = self.forum_support().to_vec();
+        let steward = self.context_optional_tools(&binding.context_id);
+        let manage: Vec<String> = steward.iter().filter(|name| name.starts_with("manage:")).map(|name| name[7..].to_string()).collect();
+        let case_tools: Vec<&str> = ring.iter().copied().chain(steward.iter().map(String::as_str)).collect();
+        let mut text = format!(
+            "You are {persona}{} — session {}",
+            display.as_deref().map(|name| format!(" ({name})")).unwrap_or_default(),
+            binding.context_id
+        );
+        text.push_str(&format!("\nService: {} · {}", binding.service, enrollment.origin));
+        text.push_str(&format!("\nYou may: {}", case_tools.join(", ")));
+        if !manage.is_empty() {
+            text.push_str(&format!("\nStewardship: {}", manage.join(", ")));
+        }
+        text.push_str(&format!("\nSession minted {}.", millisecond_stamp(binding.created_at)));
+        let structured = json!({
+            "experience": null,
+            "problem": null,
+            "connector": {
+                "view": "compact",
+                "deliveryMode": DELIVERY_MODE,
+                "session": binding.context_id,
+                "persona": persona,
+                "displayName": display,
+                "service": binding.service,
+                "place": enrollment.origin,
+                "capabilities": { "tools": case_tools, "manageUser": manage },
+                "mintedAt": binding.created_at,
+            }
+        });
+        ToolOutcome { is_error: false, status: "ok".into(), text, structured }
     }
 
     /// Whether the companion holds an atproto binding usable for the proof exchange: a
@@ -1484,10 +1643,9 @@ impl ConnectorHub {
         store.enrollments().iter().map(|entry| (entry.clone(), store.has_session(&entry.enrollment_id))).collect()
     }
 
-    /// Read-only attention/pending-write state per enrollment, for the companion manager.
+    /// Read-only attention state per enrollment, for the companion manager.
     pub fn enrollment_statuses(&self) -> Vec<EnrollmentStatus> {
         let store = self.lock_store().expect("state lock");
-        let unsettled = store.unsettled_writes();
         store
             .enrollments()
             .iter()
@@ -1501,7 +1659,6 @@ impl ConnectorHub {
                     .iter()
                     .filter(|record| record.state != AttentionState::Delivered)
                     .count(),
-                unresolved_writes: unsettled.iter().filter(|write| write.enrollment_id == entry.enrollment_id).count(),
             })
             .collect()
     }
@@ -1646,12 +1803,12 @@ impl ConnectorHub {
 
     fn dispatch(&self, operation: Operation, initiator: &str) -> ToolOutcome {
         match operation {
-            Operation::SelectCompanion { moniker } => self.select_companion(moniker.as_deref()),
-            Operation::OpenRegistration => self.open_registration(),
-            Operation::Connect { server_url, companion } => self.connect(&server_url, companion.as_deref(), initiator),
-            Operation::Arrive { enrollment_id, server_url } => self.arrive(&enrollment_id, &server_url),
-            Operation::ListTangents { context_id, cursor } => {
-                self.with_context("ListTangents", &context_id, ViewMode::Compact, |frame| {
+            Operation::ListCompanions => self.list_companions_view(),
+            Operation::Connect { service, persona, address } => self.connect(&service, &persona, address.as_deref(), initiator),
+            Operation::WhoAmI { session } => self.who_am_i(&session),
+            Operation::CatchUp { session, view, cursor } => self.catch_up(&session, view, cursor),
+            Operation::ForumListSpaces { session, cursor } => {
+                self.with_context("Forum_List_Spaces", &session, ViewMode::Compact, |frame| {
                     let path = match &cursor {
                         Some(value) => format!("/api/v1/experience/tangents?cursor={}", encode(value)),
                         None => "/api/v1/experience/tangents".to_string(),
@@ -1661,26 +1818,26 @@ impl ConnectorHub {
                     browsing.get(&frame.request, &path)
                 })
             }
-            Operation::ListTopics { context_id, tangent_ref, cursor } => {
-                self.with_context("ListTopics", &context_id, ViewMode::Compact, |frame| {
-                    let Some(tangent) = refs::tangent_key(&frame.request.origin, &tangent_ref) else {
-                        return Err(invalid_ref("Tangent"));
+            Operation::ForumListThreads { session, space_ref, cursor } => {
+                self.with_context("Forum_List_Threads", &session, ViewMode::Compact, |frame| {
+                    let Some(space) = refs::tangent_key(&frame.request.origin, &space_ref) else {
+                        return Err(invalid_ref("Space"));
                     };
                     let path = match &cursor {
-                        Some(value) => format!("/api/v1/experience/tangents/{tangent}/topics?cursor={}", encode(value)),
-                        None => format!("/api/v1/experience/tangents/{tangent}/topics"),
+                        Some(value) => format!("/api/v1/experience/tangents/{space}/topics?cursor={}", encode(value)),
+                        None => format!("/api/v1/experience/tangents/{space}/topics"),
                     };
                     let service = self.service();
                     let browsing = service.as_social_browsing().expect("the tangent service browses");
                     browsing.get(&frame.request, &path)
                 })
             }
-            Operation::ReadTopic { context_id, topic_ref, cursor, around_post_ref, view, limit } => {
-                self.with_context("ReadTopic", &context_id, view, |frame| {
-                    let Some((_tangent, topic)) = refs::topic_keys(&frame.request.origin, &topic_ref) else {
-                        return Err(invalid_ref("Topic"));
+            Operation::ForumReadThread { session, thread_ref, cursor, around_post_ref, view, limit } => {
+                self.with_context("Forum_Read_Thread", &session, view, |frame| {
+                    let Some((_space, thread)) = refs::topic_keys(&frame.request.origin, &thread_ref) else {
+                        return Err(invalid_ref("Thread"));
                     };
-                    let mut path = format!("/api/v1/experience/topics/{topic}");
+                    let mut path = format!("/api/v1/experience/topics/{thread}");
                     let mut query = Vec::new();
                     if let Some(value) = &cursor {
                         query.push(format!("cursor={}", encode(value)));
@@ -1700,104 +1857,130 @@ impl ConnectorHub {
                     browsing.get(&frame.request, &path)
                 })
             }
-            Operation::CreatePost { context_id, topic_ref, request_id, text, reply_to, view } => {
-                self.with_context("CreatePost", &context_id, view, |frame| {
-                    let Some((_tangent, topic)) = refs::topic_keys(&frame.request.origin, &topic_ref) else {
-                        return Err(invalid_ref("Topic"));
+            Operation::ForumStartThread { session, space_ref, title, text, request_id, view } => {
+                self.with_context("Forum_Start_Thread", &session, view, |frame| {
+                    let Some(space) = refs::tangent_key(&frame.request.origin, &space_ref) else {
+                        return Err(invalid_ref("Space"));
+                    };
+                    let body = json!({ "requestId": request_id, "title": title, "text": text });
+                    self.send_route(frame, Route::TopicStarts(space.to_string()), &body)
+                })
+            }
+            Operation::ForumPost { session, thread_ref, request_id, text, reply_to, view } => {
+                self.with_context("Forum_Post", &session, view, |frame| {
+                    let Some((_space, thread)) = refs::topic_keys(&frame.request.origin, &thread_ref) else {
+                        return Err(invalid_ref("Thread"));
                     };
                     let mut body = json!({ "requestId": request_id, "text": text });
                     if let Some(reference) = &reply_to {
                         body["replyTo"] = json!(reference);
                     }
-                    self.journaled_send(frame, "CreatePost", &topic_ref, &request_id, Route::TopicPosts(topic.to_string()), &body)
+                    self.send_route(frame, Route::TopicPosts(thread.to_string()), &body)
                 })
             }
-            Operation::GetUpdates { context_id, view, cursor, scope_ref } => {
-                self.get_updates(&context_id, view, cursor, scope_ref)
-            }
-            Operation::MarkRead { context_id, topic_ref, read_cursor, request_id, view } => {
-                self.with_context("MarkRead", &context_id, view, |frame| {
-                    let Some((_tangent, topic)) = refs::topic_keys(&frame.request.origin, &topic_ref) else {
-                        return Err(invalid_ref("Topic"));
+            Operation::ForumEditPost { session, post_ref, text, view } => {
+                self.with_context("Forum_Edit_Post", &session, view, |frame| {
+                    let Some((_space, _thread, post)) = refs::post_keys(&frame.request.origin, &post_ref) else {
+                        return Err(invalid_ref("Post"));
                     };
-                    let request_id = request_id.unwrap_or_else(|| format!("mark-{}", crate::adapters::store::short_uuid()));
-                    let body = json!({ "requestId": request_id, "readCursor": read_cursor });
-                    self.journaled_send(frame, "MarkRead", &topic_ref, &request_id, Route::TopicReadPosition(topic.to_string()), &body)
+                    let body = json!({ "text": text });
+                    self.send_route(frame, Route::PostEdits(post.to_string()), &body)
                 })
             }
-            Operation::JoinTangent { context_id, tangent_ref, request_id, invite_ref, view } => {
-                self.with_context("JoinTangent", &context_id, view, |frame| {
-                    let Some(tangent) = refs::tangent_key(&frame.request.origin, &tangent_ref) else {
-                        return Err(invalid_ref("Tangent"));
+            Operation::ForumDeletePost { session, post_ref, view } => {
+                self.with_context("Forum_Delete_Post", &session, view, |frame| {
+                    let Some((_space, _thread, post)) = refs::post_keys(&frame.request.origin, &post_ref) else {
+                        return Err(invalid_ref("Post"));
+                    };
+                    self.send_route(frame, Route::PostDeletes(post.to_string()), &Value::Null)
+                })
+            }
+            Operation::ForumJoinSpace { session, space_ref, request_id, invite_ref, view } => {
+                self.with_context("Forum_Join_Space", &session, view, |frame| {
+                    let Some(space) = refs::tangent_key(&frame.request.origin, &space_ref) else {
+                        return Err(invalid_ref("Space"));
                     };
                     let mut body = json!({ "requestId": request_id });
                     if let Some(reference) = &invite_ref {
                         body["inviteRef"] = json!(reference);
                     }
-                    self.journaled_send(frame, "JoinTangent", &tangent_ref, &request_id, Route::Membership(tangent.to_string()), &body)
+                    self.send_route(frame, Route::Membership(space.to_string()), &body)
                 })
             }
-            Operation::LeaveTangent { context_id, tangent_ref, request_id, view } => {
-                self.with_context("LeaveTangent", &context_id, view, |frame| {
-                    let Some(tangent) = refs::tangent_key(&frame.request.origin, &tangent_ref) else {
-                        return Err(invalid_ref("Tangent"));
+            Operation::ForumLeaveSpace { session, space_ref, request_id, view } => {
+                self.with_context("Forum_Leave_Space", &session, view, |frame| {
+                    let Some(space) = refs::tangent_key(&frame.request.origin, &space_ref) else {
+                        return Err(invalid_ref("Space"));
                     };
-                    self.journaled_send(
-                        frame,
-                        "LeaveTangent",
-                        &tangent_ref,
-                        &request_id,
-                        Route::Leave(tangent.to_string(), request_id.clone()),
-                        &Value::Null,
-                    )
+                    self.send_route(frame, Route::Leave(space.to_string(), request_id.clone()), &Value::Null)
                 })
             }
-            Operation::SetWatch { context_id, scope_ref, mode, request_id, view } => {
-                self.with_context("SetWatch", &context_id, view, |frame| {
+            Operation::ForumMarkRead { session, thread_ref, read_cursor, request_id, view } => {
+                self.with_context("Forum_Mark_Read", &session, view, |frame| {
+                    let Some((_space, thread)) = refs::topic_keys(&frame.request.origin, &thread_ref) else {
+                        return Err(invalid_ref("Thread"));
+                    };
+                    let request_id = request_id.unwrap_or_else(|| format!("mark-{}", crate::adapters::store::short_uuid()));
+                    let body = json!({ "requestId": request_id, "readCursor": read_cursor });
+                    self.send_route(frame, Route::TopicReadPosition(thread.to_string()), &body)
+                })
+            }
+            Operation::ForumWatch { session, scope_ref, on, view } => {
+                self.with_context("Forum_Watch", &session, view, |frame| {
                     if refs::tangent_key(&frame.request.origin, &scope_ref).is_none()
                         && refs::topic_keys(&frame.request.origin, &scope_ref).is_none()
                     {
-                        return Err(invalid_ref("Topic or Tangent"));
+                        return Err(invalid_ref("Thread or Space"));
                     }
-                    let request_id = request_id.unwrap_or_else(|| format!("watch-{}", crate::adapters::store::short_uuid()));
-                    let body = json!({ "requestId": request_id, "scopeRef": scope_ref, "mode": mode });
-                    self.journaled_send(frame, "SetWatch", &scope_ref, &request_id, Route::Watches, &body)
+                    let request_id = format!("watch-{}", crate::adapters::store::short_uuid());
+                    let body = json!({ "requestId": request_id, "scopeRef": scope_ref, "mode": if on { "on" } else { "off" } });
+                    self.send_route(frame, Route::Watches, &body)
                 })
             }
-            Operation::GetOperation { context_id, request_id, view } => {
-                self.with_context("GetOperation", &context_id, view, |frame| {
+            Operation::ForumReadUser { session, user_ref } => {
+                self.with_context("Forum_Read_User", &session, ViewMode::Compact, |frame| {
                     let service = self.service();
                     let browsing = service.as_social_browsing().expect("the tangent service browses");
-                    browsing.get(&frame.request, &format!("/api/v1/experience/operations/{}", encode(&request_id)))
+                    browsing.get(&frame.request, &format!("/api/v1/experience/participants/{}", encode(&user_ref)))
                 })
             }
-            Operation::ListModerationCases { context_id, topic_ref, page, view } => {
-                self.with_context("ListModerationCases", &context_id, view, |frame| {
-                    let Some((_tangent, topic)) = refs::topic_keys(&frame.request.origin, &topic_ref) else {
-                        return Err(invalid_ref("Topic"));
+            Operation::ForumOpenCase { session, thread_ref, subject_ref, reason, view } => {
+                self.with_context("Forum_Open_Case", &session, view, |frame| {
+                    let Some((_space, thread)) = refs::topic_keys(&frame.request.origin, &thread_ref) else {
+                        return Err(invalid_ref("Thread"));
+                    };
+                    let request_id = format!("case-{}", crate::adapters::store::short_uuid());
+                    let body = json!({ "requestId": request_id, "subjectRef": subject_ref, "reason": reason });
+                    self.send_route(frame, Route::TopicReports(thread.to_string()), &body)
+                })
+            }
+            Operation::ForumListCases { session, thread_ref, page, view } => {
+                self.with_context("Forum_List_Cases", &session, view, |frame| {
+                    let Some((_space, thread)) = refs::topic_keys(&frame.request.origin, &thread_ref) else {
+                        return Err(invalid_ref("Thread"));
                     };
                     let service = self.service();
                     let moderation = service.as_social_moderation().expect("the tangent service moderates");
-                    moderation.list_moderation_cases(&frame.request, topic, page)
+                    moderation.list_moderation_cases(&frame.request, thread, page)
                 })
             }
-            Operation::ReadModerationCase { context_id, case_ref, view } => {
-                self.with_context("ReadModerationCase", &context_id, view, |frame| {
-                    let Some((_tangent, _topic, case_id)) = refs::case_keys(&frame.request.origin, &case_ref) else {
-                        return Err(invalid_ref("moderation case"));
+            Operation::ForumReadCase { session, case_ref, view } => {
+                self.with_context("Forum_Read_Case", &session, view, |frame| {
+                    let Some((_space, _thread, case_id)) = refs::case_keys(&frame.request.origin, &case_ref) else {
+                        return Err(invalid_ref("case"));
                     };
                     let service = self.service();
                     let moderation = service.as_social_moderation().expect("the tangent service moderates");
                     moderation.read_moderation_case(&frame.request, case_id)
                 })
             }
-            Operation::PreviewModerationAction { context_id, case_ref, action, summary, deferred_until,
+            Operation::ForumPreviewAction { session, case_ref, action, summary, deferred_until,
                 expected_case_revision, expected_subject_revision, view } => {
-                self.with_context("PreviewModerationAction", &context_id, view, |frame| {
-                    let Some((_tangent, _topic, case_id)) = refs::case_keys(&frame.request.origin, &case_ref) else {
-                        return Err(invalid_ref("moderation case"));
+                self.with_context("Forum_Preview_Action", &session, view, |frame| {
+                    let Some((_space, _thread, case_id)) = refs::case_keys(&frame.request.origin, &case_ref) else {
+                        return Err(invalid_ref("case"));
                     };
-                    let mut body = json!({ "action": action, "summary": summary,
+                    let mut body = json!({ "action": action.as_str(), "summary": summary,
                         "expectedCaseRevision": expected_case_revision, "expectedSubjectRevision": expected_subject_revision });
                     if let Some(value) = &deferred_until { body["deferredUntil"] = json!(value); }
                     let service = self.service();
@@ -1805,119 +1988,32 @@ impl ConnectorHub {
                     moderation.preview_moderation_action(&frame.request, case_id, &body)
                 })
             }
-            Operation::ApplyModerationAction { context_id, case_ref, request_id, action, summary, deferred_until,
+            Operation::ForumEscalateCase { session, case_ref, request_id, summary, deferred_until,
                 expected_case_revision, expected_subject_revision, view } => {
-                self.with_context("ApplyModerationAction", &context_id, view, |frame| {
-                    let Some((_tangent, _topic, case_id)) = refs::case_keys(&frame.request.origin, &case_ref) else {
-                        return Err(invalid_ref("moderation case"));
+                self.with_context("Forum_Escalate_Case", &session, view, |frame| {
+                    let Some((_space, _thread, case_id)) = refs::case_keys(&frame.request.origin, &case_ref) else {
+                        return Err(invalid_ref("case"));
                     };
-                    let mut body = json!({ "requestId": request_id, "action": action, "summary": summary,
+                    let mut body = json!({ "requestId": request_id, "action": "escalate", "summary": summary,
                         "expectedCaseRevision": expected_case_revision, "expectedSubjectRevision": expected_subject_revision });
                     if let Some(value) = &deferred_until { body["deferredUntil"] = json!(value); }
-                    self.journaled_send(frame, "ApplyModerationAction", &case_ref, &request_id, Route::ModerationAction(case_id.to_string()), &body)
+                    self.send_route(frame, Route::ModerationAction(case_id.to_string()), &body)
+                })
+            }
+            Operation::ForumManageUser { session, user_ref, action, reason, duration_seconds, role, case_ref, view } => {
+                self.with_context("Forum_Manage_User", &session, view, |frame| {
+                    let mut body = json!({ "action": action.as_str(), "reason": reason });
+                    if let Some(seconds) = duration_seconds { body["durationSeconds"] = json!(seconds); }
+                    if let Some(role) = &role { body["role"] = json!(role); }
+                    if let Some(case_ref) = &case_ref { body["caseRef"] = json!(case_ref); }
+                    self.send_route(frame, Route::UserManagement(user_ref.clone()), &body)
                 })
             }
         }
     }
 
-    /// Selection resolves an companion first, then one of its enrollments. Without a
-    /// moniker the acting companion resolves by behavior — exactly one local companion is
-    /// used (every intake alike); zero or several resolve nothing, honestly, and the
-    /// answer is a question — never a guess, never machine-wide.
-    fn select_companion(&self, moniker: Option<&str>) -> ToolOutcome {
-        let store = self.lock_store().expect("state lock");
-        match moniker {
-            Some(moniker) => {
-                if let Some(companion) = store.companion_by_moniker(moniker) {
-                    return self.select_enrollment_of(&store, &companion);
-                }
-                match store.find_enrollment(moniker) {
-                    Some(companion) => selected_outcome(&companion),
-                    None => self.problem_outcome("SelectCompanion", "companion_unavailable",
-                        "No enrolled companion or companion matches that moniker. Ask the operator to enroll one.", None),
-                }
-            }
-            None => {
-                let instruction = |detail: String| {
-                    self.problem_outcome("SelectCompanion", "companion_selection_required", &detail, None)
-                };
-                let companions = store.companions();
-                match companions.len() {
-                    0 => instruction(
-                        "No local companion exists yet. Ask the operator to create one (the companion manager), or pass a moniker."
-                            .to_string(),
-                    ),
-                    1 => self.select_enrollment_of(&store, &companions[0]),
-                    _ => instruction(format!(
-                        "Multiple local companions exist: {}. Ask which one is yours, or pass a moniker (an companion handle).",
-                        companions.iter().map(|companion| companion.handle.clone()).collect::<Vec<_>>().join(" · ")
-                    )),
-                }
-            }
-        }
-    }
-
-    fn select_enrollment_of(&self, store: &StateStore, companion: &companion_core::domain::companion::Companion) -> ToolOutcome {
-        let enrollments = store.enrollments_of(&companion.local_id);
-        match enrollments.len() {
-            1 => selected_outcome(&enrollments[0]),
-            0 => self.problem_outcome("SelectCompanion", "companion_unavailable",
-                &format!("Companion '{}' has no enrollment yet. Ask the operator to enroll it on a server first.", companion.handle), None),
-            _ => self.problem_outcome("SelectCompanion", "companion_selection_needed",
-                &format!(
-                    "Companion '{}' is enrolled at {} servers. Select one explicitly with its companion id: {}",
-                    companion.handle,
-                    enrollments.len(),
-                    enrollments.iter().map(|entry| format!("{} ({})", entry.enrollment_id, entry.origin)).collect::<Vec<_>>().join(", ")
-                ), None),
-        }
-    }
-
-    /// Attention, not execution (a standing rule): browser-open the companion manager
-    /// so the human operator can create an companion or complete a pending sign-in. The
-    /// anchor is routed: after a `Connect` popped sign-in for one companion, this
-    /// opens that companion's bind anchor; the default is the companion-creation view.
-    /// The URL is constructed internally; it never renders into the tool response or
-    /// any view. Nothing auto-runs: signing in and enrolling remain operator actions on
-    /// that page.
-    /// Once per process: a second call answers honestly instead of spawning
-    /// another tab for a looping model.
-    fn open_registration(&self) -> ToolOutcome {
-        let Some(target) = self.registration_target_url() else {
-            return self.problem_outcome(
-                "OpenRegistration",
-                "manager_page_unavailable",
-                "The local companion manager is not running in this process. Ask the operator to start companion-lobby (serve or the manager verb) with its companion manager.",
-                None,
-            );
-        };
-        let (text, registration) = if self.open_page_once(&target) {
-            (
-                "Opened the local companion manager for the operator to create or bind an companion; ask the operator when done.",
-                "operator_page",
-            )
-        } else {
-            (
-                "The companion manager is already open for the operator to create or bind an companion; ask the operator when done.",
-                "operator_page_already_open",
-            )
-        };
-        ToolOutcome {
-            is_error: false,
-            status: "ok".into(),
-            text: text.into(),
-            structured: json!({
-                "experience": null,
-                "problem": null,
-                "connector": {
-                    "view": "compact",
-                    "deliveryMode": DELIVERY_MODE,
-                    "registration": registration,
-                }
-            }),
-        }
-    }
-
+    /// Arrival is internal now — Connect is the only front door — but the flow is
+    /// unchanged: fetch the envelope, bind the labeled session, brief.
     fn arrive(&self, enrollment_id: &str, server_url: &str) -> ToolOutcome {
         let (companion, canonical_check) = {
             let store = self.lock_store().expect("state lock");
@@ -1954,32 +2050,35 @@ impl ConnectorHub {
         };
         let bound = {
             let mut store = self.lock_store().expect("state lock");
-            let bound = store.bind_context(&self.caller, &companion, now_millis());
+            let label = self.service().name().to_string();
+            let bound = store.bind_context(&self.caller, &companion, now_millis(), &label);
             self.sync_attention(&mut store, &companion.enrollment_id, &parsed);
             let _ = store.save();
             bound
         };
         self.events.publish(DomainEvent::ContextArrived { context_id: bound.context_id.clone(), origin: companion.origin.clone() });
         self.refresh_server_card(&companion.origin);
-        self.finish("Arrive", &companion, Some(&bound), ViewMode::Orientation, raw, parsed, false)
+        self.finish("Connect", &companion, Some(&bound), ViewMode::Orientation, raw, parsed, false)
     }
 
-    fn get_updates(&self, context_id: &str, view: ViewMode, cursor: Option<String>, scope_ref: Option<String>) -> ToolOutcome {
+    /// One inbox: mentions, watched activity, and settlements, cursor'd from the
+    /// last checkpoint. The session token is the labeled context id.
+    fn catch_up(&self, session: &str, view: ViewMode, cursor: Option<String>) -> ToolOutcome {
         let binding = {
             let store = self.lock_store().expect("state lock");
-            store.context(context_id)
+            store.context(session)
         };
         let Some(context_binding) = binding else {
-            return self.context_expired("GetUpdates");
+            return self.context_expired("CatchUp");
         };
         let Some(companion) = self.companion_of(&context_binding.enrollment_id) else {
-            return self.context_expired("GetUpdates");
+            return self.context_expired("CatchUp");
         };
-        let session = match self.session_of(&companion) {
-            Ok(session) => session,
-            Err(error) => return self.problem_outcome("GetUpdates", "needs_manager_connection", &error, Some((&companion, Some(&context_binding)))),
+        let session_token = match self.session_of(&companion) {
+            Ok(session_token) => session_token,
+            Err(error) => return self.problem_outcome("CatchUp", "needs_manager_connection", &error, Some((&companion, Some(&context_binding)))),
         };
-        let request = RequestContext { origin: companion.origin.clone(), credential: session, participant_ref: companion.participant_ref.clone(), dpop: None };
+        let request = RequestContext { origin: companion.origin.clone(), credential: session_token, participant_ref: companion.participant_ref.clone(), dpop: None };
         let mut query = Vec::new();
         match &cursor {
             // A supplied cursor continues the previous page sequence.
@@ -1990,9 +2089,6 @@ impl ConnectorHub {
                     query.push(format!("checkpoint={}", encode(&checkpoint)));
                 }
             }
-        }
-        if let Some(scope) = &scope_ref {
-            query.push(format!("scopeRef={}", encode(scope)));
         }
         let path = if query.is_empty() {
             "/api/v1/experience/updates".to_string()
@@ -2006,11 +2102,11 @@ impl ConnectorHub {
         };
         let raw = match outcome {
             Ok(raw) => raw,
-            Err(error) => return self.transport_problem("GetUpdates", &companion, Some(&context_binding), &error),
+            Err(error) => return self.transport_problem("CatchUp", &companion, Some(&context_binding), &error),
         };
         let parsed = match contract::parse(&raw) {
             Ok(parsed) => parsed,
-            Err(error) => return self.problem_outcome("GetUpdates", "unreachable", &error, Some((&companion, Some(&context_binding)))),
+            Err(error) => return self.problem_outcome("CatchUp", "unreachable", &error, Some((&companion, Some(&context_binding)))),
         };
         let unchanged = {
             let mut store = self.lock_store().expect("state lock");
@@ -2026,7 +2122,7 @@ impl ConnectorHub {
             let _ = store.save();
             unchanged
         };
-        self.finish("GetUpdates", &companion, Some(&context_binding), view, raw, parsed, unchanged)
+        self.finish("CatchUp", &companion, Some(&context_binding), view, raw, parsed, unchanged)
     }
 
     /// Shared path for every context-scoped operation: resolve and validate the binding,
@@ -2086,87 +2182,14 @@ impl ConnectorHub {
 
     /// Mutation path: the full tuple is journaled before the request leaves, and settled from
     /// the returned receipt. A lost response keeps the entry unsettled for reconciliation.
-    fn journaled_send(
-        &self,
-        frame: &CallFrame,
-        operation: &str,
-        target_ref: &str,
-        request_id: &str,
-        route: Route,
-        body: &Value,
-    ) -> Result<Value, ExperienceError> {
-        let write = Receipt {
-            request_id: request_id.to_string(),
-            context_id: frame.context_id.clone(),
-            enrollment_id: frame.companion.enrollment_id.clone(),
-            origin: frame.request.origin.clone(),
-            operation: operation.to_string(),
-            target_ref: target_ref.to_string(),
-            payload: body.clone(),
-            registered_at: now_millis(),
-            settled: false,
-            state: None,
-        };
-        if let Ok(store) = self.lock_store() {
-            let _ = store.journal_register(&write);
-        }
-        self.events.publish(DomainEvent::WriteRegistered {
-            request_id: request_id.to_string(),
-            operation: operation.to_string(),
-        });
+    /// One mutation, straight to the service: the response is the receipt, a
+    /// request-id conflict is the honest "already done", and guarantees belong to
+    /// the service. The connector routes intent and reports what came back.
+    fn send_route(&self, frame: &CallFrame, route: Route, body: &Value) -> Result<Value, ExperienceError> {
         let (method, path) = route.build();
         let service = self.service();
         let browsing = service.as_social_browsing().expect("the tangent service browses");
-        let result = browsing.send(&frame.request, method, &path, body);
-        // A policy denial is a definitive non-write, not an uncertain transport outcome.
-        // Settle the local journal and let with_context invalidate this context's schemas.
-        if matches!(&result, Err(ExperienceError::Application { code, .. }) if code == "permission_denied") {
-            if let Ok(store) = self.lock_store() { let _ = store.journal_settle(request_id, "denied"); }
-            self.events.publish(DomainEvent::WriteSettled {
-                request_id: request_id.into(), state: "denied".into(),
-            });
-            return result;
-        }
-        // A lost or failed response has an unknown outcome: the journaled tuple is the
-        // recovery path, so the request id stays visible to the caller.
-        if let Err(error) = &result {
-            if !matches!(error, ExperienceError::Application { code, .. } if code == "request_conflict") {
-                let reason = match error {
-                    ExperienceError::Unreachable => "the server could not be reached".to_string(),
-                    ExperienceError::Unauthorized | ExperienceError::DpopChallenge { .. } => {
-                        "authentication was rejected".to_string()
-                    }
-                    ExperienceError::Application { message, .. } => message.clone(),
-                    ExperienceError::Transport(detail) => detail.clone(),
-                };
-                return Err(ExperienceError::Transport(format!(
-                    "The request did not complete ({reason}). Keep the request id {request_id}: retrying with the same id and payload reconciles safely, or recover it with GetOperation."
-                )));
-            }
-        }
-        match &result {
-            Ok(raw) => {
-                if let Ok(experience) = contract::parse(raw) {
-                    let state = experience
-                        .result
-                        .receipt
-                        .as_ref()
-                        .map(|receipt| receipt.state.clone())
-                        .unwrap_or_else(|| experience.status.clone());
-                    if let Ok(store) = self.lock_store() {
-                        let _ = store.journal_settle(request_id, &state);
-                    }
-                    self.events.publish(DomainEvent::WriteSettled { request_id: request_id.into(), state });
-                }
-            }
-            Err(ExperienceError::Application { code, .. }) if code == "request_conflict" => {
-                if let Ok(store) = self.lock_store() {
-                    let _ = store.journal_settle(request_id, "conflict");
-                }
-            }
-            _ => {}
-        }
-        result
+        browsing.send(&frame.request, method, &path, body)
     }
 
     fn finish(
@@ -2180,7 +2203,7 @@ impl ConnectorHub {
         unchanged: bool,
     ) -> ToolOutcome {
         if let Some(binding) = binding { self.observe_optional_tools(&binding.context_id, &parsed); }
-        let (text, delivered_ids, unresolved) = {
+        let (text, delivered_ids) = {
             let mut store = self.lock_store().expect("state lock");
             let context_id = binding.map(|binding| binding.context_id.clone()).unwrap_or_default();
             let perspective = Perspective {
@@ -2207,7 +2230,6 @@ impl ConnectorHub {
                 .filter(|record| record.state != AttentionState::Delivered)
                 .cloned()
                 .collect();
-            let unresolved = store.unsettled_writes();
             let input = RenderInput {
                 experience: Some(&parsed),
                 mode: view,
@@ -2217,20 +2239,13 @@ impl ConnectorHub {
                 waiting_known: Some(store.waiting_count(&companion.enrollment_id)),
                 unchanged,
             };
-            let mut text = render(&input);
-            if view == ViewMode::Orientation && !unresolved.is_empty() {
-                let ids = unresolved.iter().map(|write| write.request_id.as_str()).take(3).collect::<Vec<_>>().join(", ");
-                text.push_str(&format!(
-                    "\n{} saved action(s) awaiting reconciliation ({ids}); use GetOperation with the request id.",
-                    unresolved.len()
-                ));
-            }
+            let text = render(&input);
             // Delivery for tool-response-only hosts happens now: these previews are in the
             // response. Persist the delivery before returning.
             let delivered: Vec<String> = pending_undelivered.iter().map(|record| record.id.clone()).take(5).collect();
             store.mark_attention_delivered(&companion.enrollment_id, &delivered);
             let _ = store.save();
-            (text, delivered, unresolved)
+            (text, delivered)
         };
         if !delivered_ids.is_empty() {
             self.events.publish(DomainEvent::AttentionDelivered {
@@ -2265,7 +2280,6 @@ impl ConnectorHub {
                     "view": view.as_str(),
                     "deliveryMode": DELIVERY_MODE,
                     "aliases": aliases_exposed,
-                    "unresolvedWrites": unresolved.iter().map(|write| write.request_id.clone()).take(10).collect::<Vec<_>>(),
                 }
             }),
         }
@@ -2317,36 +2331,6 @@ impl ConnectorHub {
             waiting: parsed.attention.waiting_count.value.unwrap_or(0),
             activity: parsed.attention.new_activity_count.value.unwrap_or(0),
         });
-        // Reconcile unsettled writes through receipt lookup; never re-execute.
-        let unsettled = {
-            let store = self.lock_store().map_err(|_| "state lock poisoned")?;
-            store.unsettled_writes()
-        };
-        for write in unsettled
-            .iter()
-            .filter(|write| write.enrollment_id.is_empty() || write.enrollment_id == companion.enrollment_id)
-            .take(10)
-        {
-            if let Ok(raw) = {
-                let service = self.service();
-                let browsing = service.as_social_browsing().expect("the tangent service browses");
-                browsing.get(&request, &format!("/api/v1/experience/operations/{}", encode(&write.request_id)))
-            } {
-                if let Ok(experience) = contract::parse(&raw) {
-                    if let Some(receipt) = &experience.result.receipt {
-                        if matches!(receipt.state.as_str(), "completed" | "rejected") {
-                            if let Ok(store) = self.lock_store() {
-                                let _ = store.journal_settle(&write.request_id, &receipt.state);
-                            }
-                            self.events.publish(DomainEvent::WriteSettled {
-                                request_id: write.request_id.clone(),
-                                state: receipt.state.clone(),
-                            });
-                        }
-                    }
-                }
-            }
-        }
         self.refresh_server_card(&companion.origin);
         Ok(summary)
     }
@@ -2473,11 +2457,16 @@ impl ConnectorHub {
 /// tuple (request id + body) and the wire shape can never drift apart.
 enum Route {
     TopicPosts(String),
+    TopicStarts(String),
+    TopicReports(String),
+    PostEdits(String),
+    PostDeletes(String),
     TopicReadPosition(String),
     Membership(String),
     Leave(String, String),
     Watches,
     ModerationAction(String),
+    UserManagement(String),
 }
 
 impl Route {
@@ -2489,10 +2478,36 @@ impl Route {
             Self::Leave(tangent, request_id) => {
                 ("DELETE", format!("/api/v1/experience/tangents/{tangent}/membership?requestId={}", encode(&request_id)))
             }
+            Self::TopicStarts(space) => ("POST", format!("/api/v1/experience/tangents/{space}/topics")),
+            Self::TopicReports(thread) => ("POST", format!("/api/v1/experience/topics/{thread}/reports")),
+            Self::PostEdits(post) => ("PATCH", format!("/api/v1/experience/posts/{post}")),
+            Self::PostDeletes(post) => ("DELETE", format!("/api/v1/experience/posts/{post}")),
             Self::Watches => ("PUT", "/api/v1/experience/watches".to_string()),
             Self::ModerationAction(case_id) => ("POST", format!("/api/v1/experience/moderation/cases/{case_id}/actions")),
+            Self::UserManagement(user) => ("POST", format!("/api/v1/experience/moderation/users/{user}/management")),
         }
     }
+}
+
+/// A local-time rendering of an epoch-milliseconds stamp, for the few identity
+/// facts that name a moment (WhoAmI's minted-at).
+fn millisecond_stamp(epoch_ms: i64) -> String {
+    let seconds = epoch_ms.div_euclid(1000);
+    let days = seconds.div_euclid(86_400);
+    let time_of_day = seconds.rem_euclid(86_400);
+    let (hour, minute) = (time_of_day / 3600, (time_of_day % 3600) / 60);
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02} {hour:02}:{minute:02}")
 }
 
 fn invalid_ref(kind: &str) -> ExperienceError {

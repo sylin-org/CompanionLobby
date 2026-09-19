@@ -608,7 +608,6 @@ fn route(hub: &ConnectorHub, method: &str, target: &str, body: &RequestBody, roo
                         "origin": status.origin,
                         "waiting": status.waiting,
                         "pendingAttention": status.pending_attention,
-                        "unresolvedWrites": status.unresolved_writes,
                     })
                 })
                 .collect();

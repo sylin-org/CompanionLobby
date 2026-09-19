@@ -92,7 +92,7 @@ impl Drop for Peer {
 }
 
 #[test]
-fn the_stdio_edge_negotiates_and_serves_the_fourteen_tools() {
+fn the_stdio_edge_negotiates_and_serves_the_projected_surface() {
     let server = FakeServer::start();
     let home = std::env::temp_dir().join(format!("companion-lobby-stdio-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
@@ -129,43 +129,54 @@ fn the_stdio_edge_negotiates_and_serves_the_fourteen_tools() {
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect();
-    assert_eq!(names.len(), 14);
-    assert!(names.contains(&"SelectCompanion"));
-    assert!(names.contains(&"GetOperation"));
-    assert!(names.contains(&"OpenRegistration"));
-    assert!(names.contains(&"Connect"));
+    // A member with the tangent grant: the core four plus the forum ring's member keys.
+    assert_eq!(names.len(), 13, "names were: {names:?}");
+    assert!(names.contains(&"ListCompanions") && names.contains(&"Connect") && names.contains(&"WhoAmI") && names.contains(&"CatchUp"));
+    assert!(names.contains(&"Forum_Post") && names.contains(&"Forum_Open_Case"));
+    assert!(!names.iter().any(|name| name.starts_with("Forum_Manage")), "no stewardship without reported authority");
 
     peer.send(&json!({ "jsonrpc": "2.0", "id": 4, "method": "ping" }));
     let ping = peer.receive();
     assert_eq!(ping["result"], json!({}));
 
-    // A small participation flow through tools/call.
-    peer.send(&json!({
-        "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-        "params": { "name": "SelectCompanion", "arguments": { "moniker": "lumen" } }
-    }));
-    let selected = peer.receive();
-    assert_eq!(selected["result"]["isError"], json!(false));
-    let companion = selected["result"]["structuredContent"]["connector"]["enrollmentId"].as_str().expect("companion id").to_string();
-    let server_url = selected["result"]["structuredContent"]["connector"]["serverUrl"].as_str().expect("server url").to_string();
+    // The front door: who exists, then connect as one of them.
+    peer.send(&json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+        "params": { "name": "ListCompanions", "arguments": {} } }));
+    let listed = peer.receive();
+    assert_eq!(listed["result"]["isError"], json!(false));
+    let text = listed["result"]["content"][0]["text"].as_str().expect("text");
+    assert!(text.contains("lumen") && text.contains("tangent"), "listing names persona and reach: {text}");
 
-    peer.send(&json!({
-        "jsonrpc": "2.0", "id": 6, "method": "tools/call",
-        "params": { "name": "Arrive", "arguments": { "enrollmentId": companion, "serverUrl": server_url } }
-    }));
-    let arrival = peer.receive();
-    assert_eq!(arrival["result"]["isError"], json!(false));
-    let text = arrival["result"]["content"][0]["text"].as_str().expect("text");
-    assert!(text.contains("you are participating as Lumen"), "text was: {text}");
-    let context = arrival["result"]["structuredContent"]["connector"]["contextId"].as_str().expect("context id").to_string();
+    peer.send(&json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+        "params": { "name": "Connect", "arguments": {
+            "service": "tangent", "persona": "lumen", "address": server.origin() } } }));
+    let connected = peer.receive();
+    assert_eq!(connected["result"]["isError"], json!(false));
+    let text = connected["result"]["content"][0]["text"].as_str().expect("text");
+    assert!(text.contains("You are lumen — session tangent_"), "the briefing leads with the labeled session: {text}");
+    let session = connected["result"]["structuredContent"]["connector"]["contextId"].as_str().expect("session").to_string();
+    assert!(session.starts_with("tangent_"), "labeled with its service: {session}");
 
-    peer.send(&json!({
-        "jsonrpc": "2.0", "id": 7, "method": "tools/call",
-        "params": { "name": "GetUpdates", "arguments": { "contextId": context, "view": "expanded" } }
-    }));
+    // The anchor and the inbox.
+    peer.send(&json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+        "params": { "name": "WhoAmI", "arguments": { "session": session } } }));
+    let who = peer.receive();
+    let text = who["result"]["content"][0]["text"].as_str().expect("text");
+    assert!(text.contains("You are lumen") && text.contains("Forum_Post"), "the readout names the ring: {text}");
+    assert_eq!(who["result"]["structuredContent"]["connector"]["session"], json!(session));
+
+    peer.send(&json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+        "params": { "name": "CatchUp", "arguments": { "session": session, "view": "expanded" } } }));
     let updates = peer.receive();
     let text = updates["result"]["content"][0]["text"].as_str().expect("text");
     assert!(text.contains("Leo asked you"), "text was: {text}");
+
+    // A stale handle is the honest expired answer, never another caller's session.
+    peer.send(&json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+        "params": { "name": "WhoAmI", "arguments": { "session": "tangent_00000000" } } }));
+    let expired = peer.receive();
+    assert_eq!(expired["result"]["isError"], json!(true));
+    assert_eq!(expired["result"]["structuredContent"]["problem"]["code"], json!("context_expired"));
 
     // Statelessly discoverable hosts receive the supported-version set.
     peer.send(&json!({
@@ -181,11 +192,10 @@ fn the_stdio_edge_negotiates_and_serves_the_fourteen_tools() {
     assert!(
         requests
             .iter()
-            .all(|request| request.path == "/api/server" || request.bearer.contains("Bearer")),
+            .all(|request| request.path == "/api/server" || request.path.starts_with("/.well-known/") || request.bearer.contains("Bearer")),
         "missing bearer outside the public server profile on {:?}",
         requests.iter().map(|request| request.path.clone()).collect::<Vec<_>>()
     );
-    let _ = context;
 }
 
 #[test]
@@ -201,19 +211,17 @@ fn authorized_scope_emits_tool_list_changed_after_the_result() {
     assert_eq!(peer.receive()["result"]["capabilities"]["tools"]["listChanged"], true);
     peer.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
     peer.send(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
-    assert_eq!(peer.receive()["result"]["tools"].as_array().unwrap().len(), 14);
+    assert_eq!(peer.receive()["result"]["tools"].as_array().unwrap().len(), 13);
     peer.send(&json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-        "params": { "name": "SelectCompanion", "arguments": { "moniker": "steward" } } }));
-    let selected = peer.receive();
-    let companion = selected["result"]["structuredContent"]["connector"]["enrollmentId"].as_str().unwrap().to_string();
+        "params": { "name": "Connect", "arguments": {
+            "service": "tangent", "persona": "steward", "address": server.origin() } } }));
+    let connected = peer.receive();
+    assert_eq!(connected["result"]["isError"], json!(false));
+    let session = connected["result"]["structuredContent"]["connector"]["contextId"].as_str().unwrap().to_string();
     peer.send(&json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call",
-        "params": { "name": "Arrive", "arguments": { "enrollmentId": companion, "serverUrl": server.origin() } } }));
-    let arrival = peer.receive();
-    let context = arrival["result"]["structuredContent"]["connector"]["contextId"].as_str().unwrap().to_string();
-    peer.send(&json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-        "params": { "name": "ReadTopic", "arguments": { "contextId": context,
-            "topicRef": format!("{}::home::lounge", server.origin()) } } }));
-    assert_eq!(peer.receive()["id"], 5);
+        "params": { "name": "Forum_Read_Thread", "arguments": { "session": session,
+            "threadRef": format!("{}::home::lounge", server.origin()) } } }));
+    assert_eq!(peer.receive()["id"], 4);
     let notification = peer.receive();
     assert_eq!(notification["method"], "notifications/tools/list_changed");
     assert!(notification.get("id").is_none());
@@ -221,15 +229,21 @@ fn authorized_scope_emits_tool_list_changed_after_the_result() {
     let tools = peer.receive();
     let names: Vec<_> = tools["result"]["tools"].as_array().unwrap().iter()
         .filter_map(|entry| entry["name"].as_str()).collect();
-    assert_eq!(names.len(), 15);
-    assert!(names.contains(&"ListModerationCases"));
-    assert!(!names.contains(&"ReadModerationCase"));
+    // The steward envelope offered the case keys AND the ladder rungs: 13 + 5.
+    assert_eq!(names.len(), 18, "names were: {names:?}");
+    let manage = tools["result"]["tools"].as_array().unwrap().iter()
+        .find(|entry| entry["name"] == "Forum_Manage_User").expect("the manage key projects");
+    let rungs: Vec<&str> = manage["inputSchema"]["properties"]["action"]["enum"].as_array().unwrap()
+        .iter().filter_map(Value::as_str).collect();
+    assert_eq!(rungs, vec!["add_role", "ban", "remove_role", "suspend", "timeout", "warn"],
+        "the enum carries exactly the reported authority");
     peer.send(&json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
-        "params": { "name": "GetUpdates", "arguments": { "contextId": context } } }));
+        "params": { "name": "CatchUp", "arguments": { "session": session } } }));
     assert_eq!(peer.receive()["id"], 7);
     assert_eq!(peer.receive()["method"], "notifications/tools/list_changed");
     peer.send(&json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/list" }));
-    assert_eq!(peer.receive()["result"]["tools"].as_array().unwrap().len(), 14);
+    assert_eq!(peer.receive()["result"]["tools"].as_array().unwrap().len(), 13,
+        "authority withdrawn with the envelope");
 }
 
 #[test]
@@ -272,18 +286,19 @@ fn serve_mode_hosts_the_operator_page_with_a_clean_url_and_pure_stdout() {
     peer.send(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     let tools = peer.receive();
     exchanges.push(tools.clone());
-    assert_eq!(tools["result"]["tools"].as_array().expect("tools").len(), 14);
+    // Nothing is granted in this empty home: the core four alone project.
+    assert_eq!(tools["result"]["tools"].as_array().expect("tools").len(), 4);
 
-    // OpenRegistration without a browser: ok, and the URL never renders.
+    // An unknown tool is the honest parse refusal, served on the protocol edge.
     peer.send(&json!({
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",
         "params": { "name": "OpenRegistration", "arguments": {} }
     }));
-    let opened = peer.receive();
-    exchanges.push(opened.clone());
-    assert_eq!(opened["result"]["isError"], json!(false));
-    let text = opened["result"]["content"][0]["text"].as_str().expect("text");
-    assert!(text.contains("Opened the local companion manager"), "text was: {text}");
+    let refused = peer.receive();
+    exchanges.push(refused.clone());
+    assert_eq!(refused["result"]["isError"], json!(true));
+    let text = refused["result"]["content"][0]["text"].as_str().expect("text");
+    assert!(text.contains("unknown tool"), "the old ceremony verb is gone: {text}");
     for exchange in &exchanges {
         let rendered = serde_json::to_string(exchange).unwrap_or_default();
         assert!(!rendered.contains(&url), "the page URL never reaches stdout: {rendered}");
@@ -383,7 +398,7 @@ fn serve_mode_survives_a_looping_connect_and_operator_mutations_together() {
     // Connect #1: waiting for the operator — the honest blocked return, page popped.
     peer.send(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": { "name": "Connect", "arguments": { "serverUrl": server.origin() } }
+        "params": { "name": "Connect", "arguments": { "service": "tangent", "persona": "ox_omega", "address": server.origin() } }
     }));
     let waiting = peer.receive();
     assert_eq!(waiting["result"]["isError"], json!(true));
@@ -402,7 +417,7 @@ fn serve_mode_survives_a_looping_connect_and_operator_mutations_together() {
     for id in 3..=4 {
         peer.send(&json!({
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
-            "params": { "name": "Connect", "arguments": { "serverUrl": server.origin() } }
+            "params": { "name": "Connect", "arguments": { "service": "tangent", "persona": "ox_omega", "address": server.origin() } }
         }));
         let again = peer.receive();
         assert_eq!(again["id"], json!(id));

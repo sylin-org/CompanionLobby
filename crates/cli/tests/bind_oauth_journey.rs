@@ -134,7 +134,7 @@ fn the_bind_route_starts_the_flow_immediately_and_binds_the_authenticated_accoun
     assert!(!operator_page.contains("type=\"password\"") && !operator_page.contains("appPassword"), "the companion manager has no password form: {operator_page}");
 
     // A connect waits for the operator (no binding yet) — the honest popped-page answer.
-    let waiting = hub.invoke(IntakeChannel::Mcp, "Connect", &serde_json::json!({ "serverUrl": server.origin() }));
+    let waiting = hub.invoke(IntakeChannel::Mcp, "Connect", &serde_json::json!({ "service": "tangent", "persona": "lumen", "address": server.origin() }));
     assert!(waiting.is_error);
     assert_eq!(
         waiting.structured.pointer("/problem/code").and_then(Value::as_str),
@@ -549,30 +549,45 @@ fn a_rebind_replaces_the_session_and_carries_the_grants() {
     assert_eq!(hub.companions().len(), 1, "a re-bind creates nothing");
 }
 
-/// Sign-in pendings are per companion: two tabs can handle two companions'
-/// sign-ins without the second pop erasing the first. The most recent pop wins
-/// the OpenRegistration anchor, and a completed sign-in clears only its own.
+/// Sign-in pendings are per companion: two companions can wait for their sign-ins
+/// at once, and completing one bind clears and resumes only its own.
 #[test]
 fn signin_pendings_are_per_companion_and_cleared_by_completion() {
     let server = FakeServer::start();
+    // The fake signs its default flow in as the LAST registered account, so the
+    // second account is registered only when the second sign-in is about to run.
     server.add_account("lumen.bsky.example", "unused-password", "did:plc:lumen");
     let (hub, _dir, _page, address) = operator_workspace("pendings", &server);
     let first = hub.create_companion("lumen", None).expect("first");
     let second = hub.create_companion("ox_omega", None).expect("second");
 
-    let waiting = |companion: &str| {
-        hub.invoke(IntakeChannel::Mcp, "Connect", &serde_json::json!({ "serverUrl": server.origin(), "companion": companion }))
+    let waiting = |persona: &str| {
+        hub.invoke(IntakeChannel::Mcp, "Connect", &serde_json::json!({
+            "service": "tangent", "persona": persona, "address": server.origin()
+        }))
     };
     assert_eq!(waiting("lumen").structured.pointer("/problem/code").and_then(Value::as_str), Some("operator_action_needed"));
     assert_eq!(waiting("ox_omega").structured.pointer("/problem/code").and_then(Value::as_str), Some("operator_action_needed"));
 
-    let target = hub.registration_target_url().expect("target");
-    assert!(target.contains(&format!("bind/{}/atproto", second.local_id)), "the latest pop wins: {target}");
-
-    // Completing the FIRST companion's sign-in clears only its own pending; the
-    // second companion's sign-in stays routed.
+    // Completing the FIRST companion's sign-in enrolls exactly it; the second stays
+    // waiting, its own pending untouched.
     drive_bind(address, &server, &first.local_id, None);
-    let target = hub.registration_target_url().expect("target after completion");
-    assert!(target.contains(&format!("bind/{}/atproto", second.local_id)), "the other pending survives: {target}");
-    assert!(!target.contains(&format!("bind/{}/atproto", first.local_id)), "the completed one is cleared: {target}");
+    assert_eq!(hub.enrollments_of(&first.local_id).len(), 1, "the first companion enrolled");
+    assert!(hub.enrollments_of(&second.local_id).is_empty(), "the second still waits");
+    assert_eq!(waiting("ox_omega").structured.pointer("/problem/code").and_then(Value::as_str), Some("operator_action_needed"));
+
+    server.add_account("oxomega.bsky.example", "unused-password", "did:plc:oxomega");
+    // The waiting connect must be FRESH relative to the flight: park the flight, then
+    // let the model ask again, then complete the sign-in — the real world's order.
+    // The fake signs its default flow in as the DID its resolver last served — the
+    // first bind left lumen there — so the second sign-in names its account through
+    // the ?handle= discovery path, exactly as a self-hosted operator would.
+    let callback = start_bind(address, &server, &second.local_id, Some("oxomega.bsky.example"));
+    assert_eq!(waiting("ox_omega").structured.pointer("/problem/code").and_then(Value::as_str), Some("operator_action_needed"));
+    let callback_path = callback.strip_prefix(&format!("http://{address}")).unwrap_or(&callback);
+    let page = get(address, callback_path);
+    let body = page.split_once("
+
+").map(|(_, b)| b.to_string()).unwrap_or_default();
+    assert_eq!(hub.enrollments_of(&second.local_id).len(), 1, "and then the second enrolls on its own sign-in");
 }

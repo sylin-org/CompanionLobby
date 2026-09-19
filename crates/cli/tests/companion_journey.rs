@@ -36,14 +36,6 @@ fn mcp_workspace(label: &str, client: &str) -> Arc<ConnectorHub> {
     workspace(label, CallerId(format!("mcp:{client}")))
 }
 
-fn select(hub: &ConnectorHub, moniker: Option<&str>) -> companion_lobby::application::hub::ToolOutcome {
-    let mut arguments = json!({});
-    if let Some(moniker) = moniker {
-        arguments["moniker"] = json!(moniker);
-    }
-    hub.invoke(IntakeChannel::Mcp, "SelectCompanion", &arguments)
-}
-
 /// An companion enrolled the only way a companion can be: its atproto account bound
 /// (seeded, since binding is [`bind_oauth_journey`]'s subject) and then the
 /// account-bound proof exchange.
@@ -98,56 +90,73 @@ fn delete_refuses_while_enrollments_exist_and_cascades_when_confirmed() {
     assert!(hub.store().lock().unwrap().enrollment(&enrollment_id).is_none(), "the enrollment cascades");
 }
 
-// ---------- behavior-based resolution (every intake alike) ----------
+// ---------- the front door: personas are explicit, always ----------
 
 #[test]
-fn the_one_companion_resolves_automatically_for_every_intake() {
+fn list_companions_names_personas_and_their_reach() {
     let server = FakeServer::start();
-    let hub = workspace("one-companion", CallerId("cli".into()));
-    let (local_id, enrollment_id) = enrolled(&hub, &server, "lumen");
-
-    // The CLI intake resolves exactly like the MCP intake: no moniker, one companion.
-    let outcome = hub.invoke(IntakeChannel::Cli, "SelectCompanion", &json!({}));
-    assert!(!outcome.is_error, "text: {}", outcome.text);
-    assert_eq!(
-        outcome.structured.pointer("/connector/enrollmentId").and_then(Value::as_str),
-        Some(enrollment_id.as_str())
-    );
-    // An explicit moniker still works alongside the automatic resolution.
-    let by_moniker = hub.invoke(IntakeChannel::Mcp, "SelectCompanion", &json!({ "moniker": "lumen" }));
-    assert!(!by_moniker.is_error, "text: {}", by_moniker.text);
-    let _ = local_id;
-}
-
-#[test]
-fn several_companions_resolve_nothing_without_an_explicit_choice() {
-    let server = FakeServer::start();
-    let hub = mcp_workspace("two-companions", "codex-host");
-    let _ = enrolled(&hub, &server, "alpha");
-    let beta = hub.create_companion("beta", None).expect("companion");
+    let hub = mcp_workspace("list-personas", "codex-host");
+    let _ = enrolled(&hub, &server, "lumen");
+    let beta = hub.create_companion("beta", Some("Beta")).expect("companion");
     let _ = beta;
 
-    let outcome = select(&hub, None);
-    assert!(outcome.is_error);
-    assert_eq!(
-        outcome.structured.pointer("/problem/code").and_then(Value::as_str),
-        Some("companion_selection_required")
-    );
-    assert!(outcome.text.contains("alpha") && outcome.text.contains("beta"), "both handles are listed: {}", outcome.text);
-    assert!(outcome.text.contains("moniker"), "the instruction names the explicit path: {}", outcome.text);
+    let outcome = hub.invoke(IntakeChannel::Mcp, "ListCompanions", &json!({}));
+    assert!(!outcome.is_error, "text: {}", outcome.text);
+    let listed = outcome.structured.pointer("/connector/companions").and_then(Value::as_array).cloned().unwrap_or_default();
+    let personas: Vec<&str> = listed.iter().filter_map(|entry| entry.get("persona").and_then(Value::as_str)).collect();
+    assert!(personas.contains(&"lumen") && personas.contains(&"beta"), "both personas are named: {personas:?}");
+    let lumen = listed.iter().find(|entry| entry["persona"] == "lumen").unwrap();
+    assert_eq!(lumen["services"], json!(["tangent"]), "the granted reach rides the same breath");
+    assert!(outcome.text.contains("lumen") && outcome.text.contains("tangent"), "text: {}", outcome.text);
 }
 
 #[test]
-fn no_companions_point_at_creation() {
-    let hub = mcp_workspace("zero-companions", "codex-host");
-    let outcome = select(&hub, None);
+fn an_unknown_persona_lists_what_exists() {
+    let server = FakeServer::start();
+    let hub = mcp_workspace("unknown-persona", "codex-host");
+    let _ = enrolled(&hub, &server, "lumen");
+
+    let outcome = hub.invoke(IntakeChannel::Mcp, "Connect",
+        &json!({ "service": "tangent", "persona": "nobody", "address": server.origin() }));
+    assert!(outcome.is_error, "text: {}", outcome.text);
+    assert_eq!(outcome.structured.pointer("/problem/code").and_then(Value::as_str), Some("persona_unknown"));
+    assert!(outcome.text.contains("lumen"), "the honest miss lists what exists: {}", outcome.text);
+    assert!(outcome.text.contains("ListCompanions"), "and names the way forward: {}", outcome.text);
+}
+
+#[test]
+fn zero_personas_points_at_the_add_screen() {
+    let hub = mcp_workspace("zero-personas", "codex-host");
+    let outcome = hub.invoke(IntakeChannel::Mcp, "Connect",
+        &json!({ "service": "tangent", "persona": "lumen", "address": "https://tangent.example" }));
     assert!(outcome.is_error);
-    assert_eq!(
-        outcome.structured.pointer("/problem/code").and_then(Value::as_str),
-        Some("companion_selection_required")
-    );
-    assert!(outcome.text.contains("No local companion exists yet"), "text: {}", outcome.text);
-    assert!(outcome.text.contains("operator"), "the instruction names the operator path: {}", outcome.text);
+    assert_eq!(outcome.structured.pointer("/problem/code").and_then(Value::as_str), Some("persona_unknown"));
+    assert!(outcome.text.contains("No companions exist yet"), "text: {}", outcome.text);
+    assert!(outcome.text.contains("sign one in"), "the instruction names the operator path: {}", outcome.text);
+}
+
+#[test]
+fn connect_names_its_service_and_place_and_refuses_the_unknown() {
+    let server = FakeServer::start();
+    let hub = mcp_workspace("connect-shape", "codex-host");
+    let _ = enrolled(&hub, &server, "lumen");
+
+    let unknown = hub.invoke(IntakeChannel::Mcp, "Connect",
+        &json!({ "service": "discord", "persona": "lumen", "address": server.origin() }));
+    assert_eq!(unknown.structured.pointer("/problem/code").and_then(Value::as_str), Some("unknown_service"));
+    assert!(unknown.text.contains("tangent"), "the refusal names the services that exist: {}", unknown.text);
+
+    let addressless = hub.invoke(IntakeChannel::Mcp, "Connect",
+        &json!({ "service": "tangent", "persona": "lumen" }));
+    assert_eq!(addressless.structured.pointer("/problem/code").and_then(Value::as_str), Some("address_required"),
+        "a forum is many places; the address names one: {}", addressless.text);
+
+    let connected = hub.invoke(IntakeChannel::Mcp, "Connect",
+        &json!({ "service": "tangent", "persona": "lumen", "address": server.origin() }));
+    assert!(!connected.is_error, "text: {}", connected.text);
+    assert!(connected.text.contains("You are lumen — session tangent_"), "the briefing leads with the labeled session: {}", connected.text);
+    let session = connected.structured.pointer("/connector/contextId").and_then(Value::as_str).unwrap();
+    assert!(session.starts_with("tangent_"), "the session is labeled with its service: {session}");
 }
 
 // ---------- the W2-contract enrollment exchange ----------
@@ -211,10 +220,10 @@ fn one_companion_at_two_servers_keeps_distinct_working_sessions() {
     for (entry, server, token) in [(&at_a, &server_a, &token_a), (&at_b, &server_b, &token_b)] {
         let outcome = hub.invoke(
             IntakeChannel::Cli,
-            "Arrive",
-            &json!({ "enrollmentId": entry.enrollment_id, "serverUrl": server.origin() }),
+            "Connect",
+            &json!({ "service": "tangent", "persona": "jeff", "address": server.origin() }),
         );
-        assert!(!outcome.is_error, "arrival failed: {}", outcome.text);
+        assert!(!outcome.is_error, "connect failed: {}", outcome.text);
         let seen = server
             .requests()
             .iter()
@@ -241,8 +250,8 @@ fn one_companion_at_two_servers_keeps_distinct_working_sessions() {
     }
     let again = hub.invoke(
         IntakeChannel::Cli,
-        "Arrive",
-        &json!({ "enrollmentId": at_b.enrollment_id, "serverUrl": server_b.origin() }),
+        "Connect",
+        &json!({ "service": "tangent", "persona": "jeff", "address": server_b.origin() }),
     );
     assert!(!again.is_error, "b still participates after forgetting a: {}", again.text);
 }
@@ -454,13 +463,13 @@ fn unbinding_flushes_every_session_the_credential_established() {
     // A model asking to connect meets an honest refusal (this workspace hosts no
     // manager page, so the pop itself is unavailable — also honest). It never limps
     // on a flushed session.
-    let waiting = hub.invoke(IntakeChannel::Mcp, "Connect", &json!({ "serverUrl": server.origin() }));
+    let waiting = hub.invoke(IntakeChannel::Mcp, "Connect", &json!({ "service": "tangent", "persona": "lumen", "address": server.origin() }));
     assert!(waiting.is_error, "no limping on a flushed session: {}", waiting.text);
 
     // A re-bind reconnects the remembered place: a fresh exchange, a fresh session,
     // still exactly one place.
     common::seed_atproto_session(&hub, &local_id, "lumen.bsky.example", "did:plc:lumen", server.origin());
-    let reconnected = hub.invoke(IntakeChannel::Mcp, "Connect", &json!({ "serverUrl": server.origin() }));
+    let reconnected = hub.invoke(IntakeChannel::Mcp, "Connect", &json!({ "service": "tangent", "persona": "lumen", "address": server.origin() }));
     assert!(!reconnected.is_error, "text: {}", reconnected.text);
     assert!(reconnected.text.contains("You are"), "the arrival introduces itself: {}", reconnected.text);
     {
@@ -484,7 +493,7 @@ fn the_service_grant_gates_session_establishment() {
     let local_id = common::seed_bound_companion(&hub, account, did, server.origin());
 
     hub.set_companion_services(&local_id, &[]).expect("withdraw the grant");
-    let refused = hub.invoke(IntakeChannel::Mcp, "Connect", &json!({ "serverUrl": server.origin() }));
+    let refused = hub.invoke(IntakeChannel::Mcp, "Connect", &json!({ "service": "tangent", "persona": "lumen", "address": server.origin() }));
     assert!(refused.is_error, "text: {}", refused.text);
     assert_eq!(
         refused.structured.pointer("/problem/code").and_then(Value::as_str),
@@ -495,7 +504,7 @@ fn the_service_grant_gates_session_establishment() {
     assert!(hub.enrollments_of(&local_id).is_empty(), "no session identifier was ever minted");
 
     hub.set_companion_services(&local_id, &["tangent".to_string()]).expect("restore the grant");
-    let connected = hub.invoke(IntakeChannel::Mcp, "Connect", &json!({ "serverUrl": server.origin() }));
+    let connected = hub.invoke(IntakeChannel::Mcp, "Connect", &json!({ "service": "tangent", "persona": "lumen", "address": server.origin() }));
     assert!(!connected.is_error, "text: {}", connected.text);
 }
 

@@ -288,7 +288,7 @@ function placesSection(container) {
 function statusSection(container) {
   const section = element("details", "diagnostics");
   const table = element("table"); table.id = "status";
-  table.append(element("thead", null, row([text("Server"), text("Waiting"), text("Needs attention"), text("Unsettled writes")])));
+  table.append(element("thead", null, row([text("Server"), text("Waiting"), text("Needs attention")])));
   const body = element("tbody");
   section.append(element("summary", "", "Connection details"), table);
   table.append(body);
@@ -297,7 +297,7 @@ function statusSection(container) {
   call("/api/status").then(result => {
     if (result.status !== "ok") return;
     body.replaceChildren();
-    for (const status of result.enrollments || []) body.append(row([text(status.origin), text(status.waiting), text(status.pendingAttention), text(status.unresolvedWrites)]));
+    for (const status of result.enrollments || []) body.append(row([text(status.origin), text(status.waiting), text(status.pendingAttention)]));
     if (!body.firstChild) body.append(row([text("No saved connections yet.")]));
   });
 }

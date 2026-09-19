@@ -1,5 +1,5 @@
-//! Durable connector state: atomic JSON snapshots plus an append-only pending-write journal.
-//! A mutation's tuple is journaled before it is sent; delivery checkpoints advance only after
+//! Durable connector state: atomic JSON snapshots. Guarantees of execution live at the
+//! service; this store keeps only the connector's own memory.
 //! the batch is saved. Crashes replay safely from these files.
 
 use std::collections::{BTreeMap, HashMap};
@@ -12,10 +12,8 @@ use serde::{Deserialize, Serialize};
 use companion_core::domain::attention::{AttentionRecord, AttentionState, ATTENTION_RECORD_LIMIT};
 use companion_core::domain::companion::{AccountSession, CallerId, Enrollment, Companion, Context};
 use companion_core::domain::policy::AttentionPolicy;
-use companion_core::domain::writes::Receipt;
 
 const STATE_FILE: &str = "state.json";
-const JOURNAL_FILE: &str = "pending-writes.jsonl";
 const JOURNAL_LINE_LIMIT: u64 = 256 * 1024;
 
 /// Public presentation only. The enrolled origin remains the routing companion.
@@ -79,7 +77,6 @@ struct StateFile {
 /// The connector's durable state store. Interior state is guarded by the owning hub.
 pub struct StateStore {
     path: PathBuf,
-    journal_path: PathBuf,
     state: StateFile,
 }
 
@@ -88,13 +85,12 @@ impl StateStore {
     pub fn open(data_dir: &Path) -> Result<Self, String> {
         fs::create_dir_all(data_dir).map_err(|error| format!("cannot create data directory: {error}"))?;
         let path = data_dir.join(STATE_FILE);
-        let journal_path = data_dir.join(JOURNAL_FILE);
         let state = match fs::read(&path) {
             Ok(bytes) if !bytes.is_empty() => serde_json::from_slice(&bytes)
                 .map_err(|error| format!("state file is malformed: {error}"))?,
             _ => StateFile::default(),
         };
-        Ok(Self { path, journal_path, state })
+        Ok(Self { path, state })
     }
 
 
@@ -310,7 +306,7 @@ impl StateStore {
 
     /// Reuses the live context for this caller/companion/origin binding, or issues a new one.
     /// A context never rebinds: mismatched companions or origins get distinct ids.
-    pub fn bind_context(&mut self, caller: &CallerId, companion: &Enrollment, now: i64) -> Context {
+    pub fn bind_context(&mut self, caller: &CallerId, companion: &Enrollment, now: i64, service: &str) -> Context {
         if let Some(existing) = self.state.contexts.iter_mut().find(|context| {
             context.belongs_to(caller, &companion.enrollment_id) && context.origin == companion.origin
         }) {
@@ -318,7 +314,8 @@ impl StateStore {
             return existing.clone();
         }
         let context = Context {
-            context_id: format!("ctx_{}", short_uuid()),
+            context_id: format!("{service}_{}", short_uuid()),
+            service: service.to_string(),
             caller: caller.clone(),
             enrollment_id: companion.enrollment_id.clone(),
             origin: companion.origin.clone(),
@@ -477,61 +474,8 @@ impl StateStore {
     pub fn set_revision(&mut self, enrollment_id: &str, revision: &str) {
         self.state.revisions.insert(enrollment_id.to_string(), revision.to_string());
     }
-
-
-    // ----- pending-write journal -----
-
-    /// Appends a registration event before the mutation is sent.
-    pub fn journal_register(&self, write: &Receipt) -> Result<(), String> {
-        append_journal(&self.journal_path, &serde_json::json!({
-            "event": "registered",
-            "requestId": write.request_id,
-            "contextId": write.context_id,
-            "enrollmentId": write.enrollment_id,
-            "origin": write.origin,
-            "operation": write.operation,
-            "targetRef": write.target_ref,
-            "payload": write.payload,
-            "registeredAt": write.registered_at,
-        }))
-    }
-
-    /// Appends a settlement (terminal or still-pending state observed from a receipt).
-    pub fn journal_settle(&self, request_id: &str, state: &str) -> Result<(), String> {
-        append_journal(&self.journal_path, &serde_json::json!({
-            "event": "settled", "requestId": request_id, "state": state,
-        }))
-    }
-
-    /// Replays the journal, returning writes whose outcome is not yet reconciled.
-    pub fn unsettled_writes(&self) -> Vec<Receipt> {
-        let Ok(content) = fs::read_to_string(&self.journal_path) else { return Vec::new() };
-        let mut writes: HashMap<String, Receipt> = HashMap::new();
-        for line in content.lines() {
-            if line.len() as u64 > JOURNAL_LINE_LIMIT {
-                break;
-            }
-            let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-            let request_id = event.get("requestId").and_then(|value| value.as_str()).unwrap_or_default().to_string();
-            match event.get("event").and_then(|value| value.as_str()) {
-                Some("registered") => {
-                    if let Ok(mut write) = serde_json::from_value::<Receipt>(event.clone()) {
-                        write.settled = false;
-                        writes.insert(request_id, write);
-                    }
-                }
-                Some("settled") => {
-                    if let Some(write) = writes.get_mut(&request_id) {
-                        write.settled = true;
-                        write.state = event.get("state").and_then(|value| value.as_str()).map(str::to_string);
-                    }
-                }
-                _ => {}
-            }
-        }
-        writes.into_values().filter(|write| !write.settled).collect()
-    }
 }
+
 
 /// Cascades every piece of derived state that belongs to one enrollment — including its
 /// session.
@@ -591,15 +535,6 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     }
 }
 
-fn append_journal(path: &Path, event: &serde_json::Value) -> Result<(), String> {
-    use std::io::Write as _;
-    let mut line = serde_json::to_string(event).map_err(|error| format!("cannot encode journal event: {error}"))?;
-    line.push('\n');
-    let mut file = fs::OpenOptions::new().create(true).append(true).open(path)
-        .map_err(|error| format!("cannot open journal: {error}"))?;
-    file.write_all(line.as_bytes()).map_err(|error| format!("cannot append journal: {error}"))?;
-    file.sync_all().map_err(|error| format!("cannot sync journal: {error}"))
-}
 
 /// Bounded file read for credentials and journals.
 pub fn read_bounded(path: &Path, limit: u64) -> Result<String, String> {

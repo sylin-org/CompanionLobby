@@ -171,8 +171,13 @@ impl std::fmt::Debug for AccountSession {
 /// The acting companion rides the enrollment; it is never chosen here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context {
-    /// Stable local handle, e.g. `ctx_9f01ab`.
+    /// The labeled session handle, e.g. `tangent_9f01ab` — the service moniker for
+    /// the eyes, a unique short id underneath. Dispatch is exact-token lookup; the
+    /// label is never parsed.
     pub context_id: String,
+    /// The service moniker this session was minted through ("tangent", "bluesky").
+    #[serde(default)]
+    pub service: String,
     pub caller: CallerId,
     pub enrollment_id: String,
     pub origin: String,

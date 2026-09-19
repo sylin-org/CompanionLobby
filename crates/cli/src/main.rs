@@ -269,7 +269,14 @@ fn invoke_once(hub: &Arc<ConnectorHub>, tool: &str, input: &str, options: &CallO
 
 fn catalog(rest: &[String]) -> i32 {
     let json = rest.iter().any(|argument| argument == "--json");
-    let tools = mcp::catalog();
+    let hub = match build_hub(CallerId("cli".into()), data_directory()) {
+        Ok(hub) => hub,
+        Err(error) => {
+            eprintln!("cannot open connector state: {error}");
+            return EXIT_FAILED;
+        }
+    };
+    let tools = mcp::catalog(&hub.granted_service_monikers(), &hub.optional_tool_names());
     let Some(tools) = tools.as_array() else { return EXIT_FAILED };
     if json {
         println!("{}", serde_json::to_string_pretty(&tools).unwrap_or_default());

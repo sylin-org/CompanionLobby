@@ -1,78 +1,197 @@
-//! The small stable participation vocabulary plus permission-discovered stewardship
-//! operations. Optional schemas are advertised only after an authenticated server
-//! response offers the matching action for a bound context.
+//! The closed tool vocabulary: a four-key web-shaped core, plus capability rings a
+//! granted service may speak (Forum today; Social later). Every tool is an
+//! instrument — atomic, factual, named to be cited in a companion's charter. The
+//! catalog is projected elsewhere (see the hub); this module only decodes.
 
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub enum Operation {
-    /// `None` asks the connector to resolve the acting companion by behavior: exactly
-    /// one local companion → it is used (every intake alike); more → the honest
-    /// selection question.
-    SelectCompanion { moniker: Option<String> },
-    /// Attention, not execution: browser-open the local companion manager's
-    /// companion-creation view for the human operator. The page URL (with its token)
-    /// is constructed internally and never rendered.
-    OpenRegistration,
-    /// The on-the-fly handshake: resolve the acting companion (explicit `companion`
-    /// argument, or exactly-one-companion auto-resolution), discover the server, enroll
-    /// bound when needed, arrive. A step needing the operator pops the local operator
-    /// page and returns honestly.
-    Connect { server_url: String, companion: Option<String> },
-    Arrive { enrollment_id: String, server_url: String },
-    ListTangents { context_id: String, cursor: Option<String> },
-    ListTopics { context_id: String, tangent_ref: String, cursor: Option<String> },
-    ReadTopic {
-        context_id: String,
-        topic_ref: String,
+    // ----- the core -----
+    /// Who exists, and what each persona may reach (its service grants).
+    ListCompanions,
+    /// The only mint of a session: connect to a service as a persona, always
+    /// explicitly named. The answer is the briefing — "You are lumen — session
+    /// tangent_9f01."
+    Connect { service: String, persona: String, address: Option<String> },
+    /// Identity facts plus the live capability readout: the ring, as of now.
+    WhoAmI { session: String },
+    /// One inbox: mentions, watched activity, and the settlement of one's own writes.
+    CatchUp { session: String, view: ViewMode, cursor: Option<String> },
+
+    // ----- the Forum ring -----
+    ForumListSpaces { session: String, cursor: Option<String> },
+    ForumListThreads { session: String, space_ref: String, cursor: Option<String> },
+    ForumReadThread {
+        session: String,
+        thread_ref: String,
         cursor: Option<String>,
         around_post_ref: Option<String>,
         view: ViewMode,
         limit: Option<u8>,
     },
-    CreatePost {
-        context_id: String,
-        topic_ref: String,
+    ForumStartThread {
+        session: String,
+        space_ref: String,
+        title: String,
+        text: String,
+        request_id: String,
+        view: ViewMode,
+    },
+    ForumPost {
+        session: String,
+        thread_ref: String,
         request_id: String,
         text: String,
         reply_to: Option<String>,
         view: ViewMode,
     },
-    GetUpdates { context_id: String, view: ViewMode, cursor: Option<String>, scope_ref: Option<String> },
-    MarkRead { context_id: String, topic_ref: String, read_cursor: String, request_id: Option<String>, view: ViewMode },
-    JoinTangent { context_id: String, tangent_ref: String, request_id: String, invite_ref: Option<String>, view: ViewMode },
-    LeaveTangent { context_id: String, tangent_ref: String, request_id: String, view: ViewMode },
-    SetWatch { context_id: String, scope_ref: String, mode: String, request_id: Option<String>, view: ViewMode },
-    GetOperation { context_id: String, request_id: String, view: ViewMode },
-    ListModerationCases { context_id: String, topic_ref: String, page: Option<u16>, view: ViewMode },
-    ReadModerationCase { context_id: String, case_ref: String, view: ViewMode },
-    PreviewModerationAction { context_id: String, case_ref: String, action: String, summary: String,
-        deferred_until: Option<String>, expected_case_revision: u64, expected_subject_revision: String, view: ViewMode },
-    ApplyModerationAction { context_id: String, case_ref: String, request_id: String, action: String, summary: String,
-        deferred_until: Option<String>, expected_case_revision: u64, expected_subject_revision: String, view: ViewMode },
+    ForumEditPost { session: String, post_ref: String, text: String, view: ViewMode },
+    ForumDeletePost { session: String, post_ref: String, view: ViewMode },
+    ForumJoinSpace {
+        session: String,
+        space_ref: String,
+        request_id: String,
+        invite_ref: Option<String>,
+        view: ViewMode,
+    },
+    ForumLeaveSpace { session: String, space_ref: String, request_id: String, view: ViewMode },
+    ForumMarkRead {
+        session: String,
+        thread_ref: String,
+        read_cursor: String,
+        request_id: Option<String>,
+        view: ViewMode,
+    },
+    ForumWatch { session: String, scope_ref: String, on: bool, view: ViewMode },
+    ForumReadUser { session: String, user_ref: String },
+    ForumOpenCase { session: String, thread_ref: String, subject_ref: String, reason: String, view: ViewMode },
+
+    // ----- the Forum ring, stewardship (projected by reported authority) -----
+    ForumListCases { session: String, thread_ref: String, page: Option<u16>, view: ViewMode },
+    ForumReadCase { session: String, case_ref: String, view: ViewMode },
+    ForumPreviewAction {
+        session: String,
+        case_ref: String,
+        action: CaseAction,
+        summary: String,
+        deferred_until: Option<String>,
+        expected_case_revision: u64,
+        expected_subject_revision: String,
+        view: ViewMode,
+    },
+    ForumEscalateCase {
+        session: String,
+        case_ref: String,
+        request_id: String,
+        summary: String,
+        deferred_until: Option<String>,
+        expected_case_revision: u64,
+        expected_subject_revision: String,
+        view: ViewMode,
+    },
+    /// The user-management ladder in one key: the action argument is the rung, and
+    /// the projected schema's enum carries the identity's authority.
+    ForumManageUser {
+        session: String,
+        user_ref: String,
+        action: ManageAction,
+        reason: String,
+        duration_seconds: Option<u64>,
+        role: Option<String>,
+        case_ref: Option<String>,
+        view: ViewMode,
+    },
+}
+
+/// The case actions the services' rules engines currently speak. Escalate files to
+/// the owner; defer holds. The user-management ladder lives in [`ManageAction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseAction {
+    Defer,
+    Escalate,
+}
+
+impl CaseAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Defer => "defer",
+            Self::Escalate => "escalate",
+        }
+    }
+}
+
+/// One rung of the user-management ladder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManageAction {
+    Warn,
+    Timeout,
+    Suspend,
+    Ban,
+    AddRole,
+    RemoveRole,
+}
+
+impl ManageAction {
+    pub const ALL: &'static [ManageAction] = &[
+        Self::Warn,
+        Self::Timeout,
+        Self::Suspend,
+        Self::Ban,
+        Self::AddRole,
+        Self::RemoveRole,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Warn => "warn",
+            Self::Timeout => "timeout",
+            Self::Suspend => "suspend",
+            Self::Ban => "ban",
+            Self::AddRole => "add_role",
+            Self::RemoveRole => "remove_role",
+        }
+    }
+
+    /// The wire form: the `allowedActions` string a service reports to widen the
+    /// projected enum. `assign_roles` covers both role rungs.
+    pub fn from_allowed_action(action: &str) -> Option<Self> {
+        match action {
+            "warn_user" => Some(Self::Warn),
+            "timeout_user" => Some(Self::Timeout),
+            "suspend_user" => Some(Self::Suspend),
+            "ban_user" => Some(Self::Ban),
+            "assign_roles" => Some(Self::AddRole),
+            _ => None,
+        }
+    }
 }
 
 impl Operation {
     pub fn tool_name(&self) -> &'static str {
         match self {
-            Self::SelectCompanion { .. } => "SelectCompanion",
-            Self::OpenRegistration => "OpenRegistration",
+            Self::ListCompanions => "ListCompanions",
             Self::Connect { .. } => "Connect",
-            Self::Arrive { .. } => "Arrive",
-            Self::ListTangents { .. } => "ListTangents",
-            Self::ListTopics { .. } => "ListTopics",
-            Self::ReadTopic { .. } => "ReadTopic",
-            Self::CreatePost { .. } => "CreatePost",
-            Self::GetUpdates { .. } => "GetUpdates",
-            Self::MarkRead { .. } => "MarkRead",
-            Self::JoinTangent { .. } => "JoinTangent",
-            Self::LeaveTangent { .. } => "LeaveTangent",
-            Self::SetWatch { .. } => "SetWatch",
-            Self::GetOperation { .. } => "GetOperation",
-            Self::ListModerationCases { .. } => "ListModerationCases",
-            Self::ReadModerationCase { .. } => "ReadModerationCase",
-            Self::PreviewModerationAction { .. } => "PreviewModerationAction",
-            Self::ApplyModerationAction { .. } => "ApplyModerationAction",
+            Self::WhoAmI { .. } => "WhoAmI",
+            Self::CatchUp { .. } => "CatchUp",
+            Self::ForumListSpaces { .. } => "Forum_List_Spaces",
+            Self::ForumListThreads { .. } => "Forum_List_Threads",
+            Self::ForumReadThread { .. } => "Forum_Read_Thread",
+            Self::ForumStartThread { .. } => "Forum_Start_Thread",
+            Self::ForumPost { .. } => "Forum_Post",
+            Self::ForumEditPost { .. } => "Forum_Edit_Post",
+            Self::ForumDeletePost { .. } => "Forum_Delete_Post",
+            Self::ForumJoinSpace { .. } => "Forum_Join_Space",
+            Self::ForumLeaveSpace { .. } => "Forum_Leave_Space",
+            Self::ForumMarkRead { .. } => "Forum_Mark_Read",
+            Self::ForumWatch { .. } => "Forum_Watch",
+            Self::ForumReadUser { .. } => "Forum_Read_User",
+            Self::ForumOpenCase { .. } => "Forum_Open_Case",
+            Self::ForumListCases { .. } => "Forum_List_Cases",
+            Self::ForumReadCase { .. } => "Forum_Read_Case",
+            Self::ForumPreviewAction { .. } => "Forum_Preview_Action",
+            Self::ForumEscalateCase { .. } => "Forum_Escalate_Case",
+            Self::ForumManageUser { .. } => "Forum_Manage_User",
         }
     }
 }
@@ -129,6 +248,13 @@ pub fn decode(tool: &str, arguments: &Value) -> Result<Operation, String> {
             .then_some(value)
             .ok_or_else(|| format!("argument '{name}' must be 1-128 letters, digits, hyphens or underscores"))
     };
+    let optional_request_id = |name: &str| -> Result<Option<String>, String> {
+        match optional(name)? {
+            None => Ok(None),
+            Some(value) if companion_core::domain::writes::valid_request_id(&value) => Ok(Some(value)),
+            Some(_) => Err(format!("argument '{name}' must be 1-128 letters, digits, hyphens or underscores")),
+        }
+    };
     let view = || -> Result<ViewMode, String> { ViewMode::parse(optional("view")?.as_deref()) };
     let revision = |name: &str| -> Result<u64, String> {
         field(name)?.as_u64().ok_or_else(|| format!("argument '{name}' must be a non-negative integer"))
@@ -139,147 +265,173 @@ pub fn decode(tool: &str, arguments: &Value) -> Result<Operation, String> {
             Err(format!("argument '{name}' must contain 1-{maximum} UTF-8 bytes and no null characters"))
         } else { Ok(value) }
     };
-    let moderation_action = || -> Result<String, String> {
+    let case_action = || -> Result<CaseAction, String> {
+        match string("action")?.as_str() {
+            "defer" => Ok(CaseAction::Defer),
+            "escalate" => Ok(CaseAction::Escalate),
+            other => Err(format!("argument 'action' must be defer or escalate, not '{other}'")),
+        }
+    };
+    let manage_action = || -> Result<ManageAction, String> {
         let value = string("action")?;
-        matches!(value.as_str(), "defer" | "escalate").then_some(value)
-            .ok_or_else(|| "argument 'action' must be defer or escalate".to_string())
+        ManageAction::ALL
+            .iter()
+            .find(|action| action.as_str() == value)
+            .copied()
+            .ok_or_else(|| {
+                format!(
+                    "argument 'action' must be one of warn, timeout, suspend, ban, add_role, remove_role — not '{value}'"
+                )
+            })
+    };
+    let on_flag = || -> Result<bool, String> {
+        field("on")?
+            .as_bool()
+            .ok_or_else(|| "argument 'on' must be true or false".to_string())
+    };
+    let page = || -> Result<Option<u16>, String> {
+        match arguments.get("page") {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .filter(|page| *page <= u16::MAX as u64)
+                .map(|page| Some(page as u16))
+                .ok_or_else(|| "argument 'page' must be a non-negative integer".to_string()),
+        }
+    };
+    let duration = || -> Result<Option<u64>, String> {
+        match arguments.get("durationSeconds") {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value.as_u64().map(Some).ok_or_else(|| "argument 'durationSeconds' must be a non-negative integer".to_string()),
+        }
+    };
+    let limit = || -> Result<Option<u8>, String> {
+        match optional("limit")? {
+            None => Ok(None),
+            Some(value) => match value.parse::<u8>() {
+                Ok(parsed) if (1..=25).contains(&parsed) => Ok(Some(parsed)),
+                _ => Err("argument 'limit' must be 1-25".to_string()),
+            },
+        }
     };
     match tool {
-        "SelectCompanion" => Ok(Operation::SelectCompanion { moniker: optional("moniker")? }),
-        "OpenRegistration" => {
-            if !arguments.as_object().map(serde_json::Map::is_empty).unwrap_or(false) {
-                // Deliberately no arguments: the URL and token are constructed internally.
-                return Err("OpenRegistration takes no arguments".into());
-            }
-            Ok(Operation::OpenRegistration)
-        }
-        "Connect" => Ok(Operation::Connect { server_url: string("serverUrl")?, companion: optional("companion")? }),
-        "Arrive" => Ok(Operation::Arrive { enrollment_id: string("enrollmentId")?, server_url: string("serverUrl")? }),
-        "ListTangents" => Ok(Operation::ListTangents { context_id: string("contextId")?, cursor: optional("cursor")? }),
-        "ListTopics" => Ok(Operation::ListTopics {
-            context_id: string("contextId")?,
-            tangent_ref: string("tangentRef")?,
+        "ListCompanions" => Ok(Operation::ListCompanions),
+        "Connect" => Ok(Operation::Connect {
+            service: string("service")?,
+            persona: string("persona")?,
+            address: optional("address")?,
+        }),
+        "WhoAmI" => Ok(Operation::WhoAmI { session: string("session")? }),
+        "CatchUp" => Ok(Operation::CatchUp { session: string("session")?, view: view()?, cursor: optional("cursor")? }),
+
+        "Forum_List_Spaces" => Ok(Operation::ForumListSpaces { session: string("session")?, cursor: optional("cursor")? }),
+        "Forum_List_Threads" => Ok(Operation::ForumListThreads {
+            session: string("session")?,
+            space_ref: string("spaceRef")?,
             cursor: optional("cursor")?,
         }),
-        "ReadTopic" => Ok(Operation::ReadTopic {
-            context_id: string("contextId")?,
-            topic_ref: string("topicRef")?,
+        "Forum_Read_Thread" => Ok(Operation::ForumReadThread {
+            session: string("session")?,
+            thread_ref: string("threadRef")?,
             cursor: optional("cursor")?,
             around_post_ref: optional("aroundPostRef")?,
             view: view()?,
-            limit: match arguments.get("limit") {
-                None | Some(Value::Null) => None,
-                Some(value) => Some(value.as_u64().filter(|limit| (1..=25).contains(limit)).ok_or("argument 'limit' must be 1-25")? as u8),
-            },
+            limit: limit()?,
         }),
-        "CreatePost" => {
-            let text = string("text")?;
-            let bytes = text.len();
-            if bytes == 0 || bytes > 4096 || text.contains('\0') || text.trim().is_empty() {
-                return Err("argument 'text' must contain 1-4096 UTF-8 bytes and no null characters".into());
-            }
-            Ok(Operation::CreatePost {
-                context_id: string("contextId")?,
-                topic_ref: string("topicRef")?,
-                request_id: request_id("requestId")?,
-                text,
-                reply_to: optional("replyTo")?,
-                view: view()?,
-            })
-        }
-        "GetUpdates" => Ok(Operation::GetUpdates {
-            context_id: string("contextId")?,
-            view: view()?,
-            cursor: optional("cursor")?,
-            scope_ref: optional("scopeRef")?,
-        }),
-        "MarkRead" => Ok(Operation::MarkRead {
-            context_id: string("contextId")?,
-            topic_ref: string("topicRef")?,
-            read_cursor: string("readCursor")?,
-            request_id: optional("requestId")?,
+        "Forum_Start_Thread" => Ok(Operation::ForumStartThread {
+            session: string("session")?,
+            space_ref: string("spaceRef")?,
+            title: bounded_text("title", 256)?,
+            text: bounded_text("text", 4096)?,
+            request_id: request_id("requestId")?,
             view: view()?,
         }),
-        "JoinTangent" => Ok(Operation::JoinTangent {
-            context_id: string("contextId")?,
-            tangent_ref: string("tangentRef")?,
+        "Forum_Post" => Ok(Operation::ForumPost {
+            session: string("session")?,
+            thread_ref: string("threadRef")?,
+            request_id: request_id("requestId")?,
+            text: bounded_text("text", 4096)?,
+            reply_to: optional("replyTo")?,
+            view: view()?,
+        }),
+        "Forum_Edit_Post" => Ok(Operation::ForumEditPost {
+            session: string("session")?,
+            post_ref: string("postRef")?,
+            text: bounded_text("text", 4096)?,
+            view: view()?,
+        }),
+        "Forum_Delete_Post" => Ok(Operation::ForumDeletePost {
+            session: string("session")?,
+            post_ref: string("postRef")?,
+            view: view()?,
+        }),
+        "Forum_Join_Space" => Ok(Operation::ForumJoinSpace {
+            session: string("session")?,
+            space_ref: string("spaceRef")?,
             request_id: request_id("requestId")?,
             invite_ref: optional("inviteRef")?,
             view: view()?,
         }),
-        "LeaveTangent" => Ok(Operation::LeaveTangent {
-            context_id: string("contextId")?,
-            tangent_ref: string("tangentRef")?,
+        "Forum_Leave_Space" => Ok(Operation::ForumLeaveSpace {
+            session: string("session")?,
+            space_ref: string("spaceRef")?,
             request_id: request_id("requestId")?,
             view: view()?,
         }),
-        "SetWatch" => {
-            let mode = string("mode")?;
-            if !matches!(mode.as_str(), "all" | "replies" | "none") {
-                return Err("argument 'mode' must be all, replies, or none".into());
-            }
-            Ok(Operation::SetWatch {
-                context_id: string("contextId")?,
-                scope_ref: string("scopeRef")?,
-                mode,
-                request_id: optional("requestId")?,
-                view: view()?,
-            })
-        }
-        "GetOperation" => Ok(Operation::GetOperation {
-            context_id: string("contextId")?,
-            request_id: request_id("requestId")?,
+        "Forum_Mark_Read" => Ok(Operation::ForumMarkRead {
+            session: string("session")?,
+            thread_ref: string("threadRef")?,
+            read_cursor: string("readCursor")?,
+            request_id: optional_request_id("requestId")?,
             view: view()?,
         }),
-        "ListModerationCases" => Ok(Operation::ListModerationCases {
-            context_id: string("contextId")?, topic_ref: string("topicRef")?,
-            page: match arguments.get("page") {
-                None | Some(Value::Null) => None,
-                Some(value) => Some(value.as_u64().filter(|page| (1..=10_000).contains(page))
-                    .ok_or("argument 'page' must be 1-10000")? as u16),
-            },
+        "Forum_Watch" => Ok(Operation::ForumWatch { session: string("session")?, scope_ref: string("scopeRef")?, on: on_flag()?, view: view()? }),
+        "Forum_Read_User" => Ok(Operation::ForumReadUser { session: string("session")?, user_ref: string("userRef")? }),
+        "Forum_Open_Case" => Ok(Operation::ForumOpenCase {
+            session: string("session")?,
+            thread_ref: string("threadRef")?,
+            subject_ref: string("subjectRef")?,
+            reason: bounded_text("reason", 2000)?,
             view: view()?,
         }),
-        "ReadModerationCase" => Ok(Operation::ReadModerationCase {
-            context_id: string("contextId")?, case_ref: string("caseRef")?, view: view()?,
+
+        "Forum_List_Cases" => Ok(Operation::ForumListCases {
+            session: string("session")?,
+            thread_ref: string("threadRef")?,
+            page: page()?,
+            view: view()?,
         }),
-        "PreviewModerationAction" => {
-            if arguments.get("requestId").is_some() {
-                return Err("PreviewModerationAction does not accept requestId; a preview creates no receipt".into());
-            }
-            Ok(Operation::PreviewModerationAction {
-                context_id: string("contextId")?, case_ref: string("caseRef")?, action: moderation_action()?,
-                summary: bounded_text("summary", 280)?, deferred_until: optional("deferredUntil")?,
-                expected_case_revision: revision("expectedCaseRevision")?,
-                expected_subject_revision: bounded_text("expectedSubjectRevision", 256)?, view: view()?,
-            })
-        }
-        "ApplyModerationAction" => Ok(Operation::ApplyModerationAction {
-            context_id: string("contextId")?, case_ref: string("caseRef")?, request_id: request_id("requestId")?,
-            action: moderation_action()?, summary: bounded_text("summary", 280)?, deferred_until: optional("deferredUntil")?,
+        "Forum_Read_Case" => Ok(Operation::ForumReadCase { session: string("session")?, case_ref: string("caseRef")?, view: view()? }),
+        "Forum_Preview_Action" => Ok(Operation::ForumPreviewAction {
+            session: string("session")?,
+            case_ref: string("caseRef")?,
+            action: case_action()?,
+            summary: bounded_text("summary", 2000)?,
+            deferred_until: optional("deferredUntil")?,
             expected_case_revision: revision("expectedCaseRevision")?,
-            expected_subject_revision: bounded_text("expectedSubjectRevision", 256)?, view: view()?,
+            expected_subject_revision: string("expectedSubjectRevision")?,
+            view: view()?,
+        }),
+        "Forum_Escalate_Case" => Ok(Operation::ForumEscalateCase {
+            session: string("session")?,
+            case_ref: string("caseRef")?,
+            request_id: request_id("requestId")?,
+            summary: bounded_text("summary", 2000)?,
+            deferred_until: optional("deferredUntil")?,
+            expected_case_revision: revision("expectedCaseRevision")?,
+            expected_subject_revision: string("expectedSubjectRevision")?,
+            view: view()?,
+        }),
+        "Forum_Manage_User" => Ok(Operation::ForumManageUser {
+            session: string("session")?,
+            user_ref: string("userRef")?,
+            action: manage_action()?,
+            reason: bounded_text("reason", 2000)?,
+            duration_seconds: duration()?,
+            role: optional("role")?,
+            case_ref: optional("caseRef")?,
+            view: view()?,
         }),
         other => Err(format!("unknown tool '{other}'")),
-    }
-}
-
-#[cfg(test)]
-mod moderation_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn actions_are_closed_revision_bound_and_only_apply_accepts_a_request_id() {
-        let base = json!({ "contextId": "ctx_1", "caseRef": "case", "action": "defer",
-            "summary": "Revisit later.", "deferredUntil": "2026-09-13T12:00:00Z",
-            "expectedCaseRevision": 4, "expectedSubjectRevision": "subject:7" });
-        assert!(matches!(decode("PreviewModerationAction", &base), Ok(Operation::PreviewModerationAction { .. })));
-        let mut apply = base.clone(); apply["requestId"] = json!("case-decision-1");
-        assert!(matches!(decode("ApplyModerationAction", &apply), Ok(Operation::ApplyModerationAction { .. })));
-        apply["action"] = json!("ban");
-        assert!(decode("ApplyModerationAction", &apply).unwrap_err().contains("defer or escalate"));
-        let mut preview = base; preview["requestId"] = json!("not-a-preview-receipt");
-        assert!(decode("PreviewModerationAction", &preview).unwrap_err().contains("does not accept requestId"));
     }
 }

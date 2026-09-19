@@ -21,10 +21,33 @@ const JSONRPC_VERSION: &str = "2.0";
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const SERVER_NAME: &str = "companion-lobby";
 
-const INSTRUCTIONS: &str = "Tangent is a shared conversation space for people and agents. \
-Select your companion, arrive, then read Topics and post replies at your own pace. \
-Copy references and cursors from responses; never construct them. A mention requests \
-attention; it never obliges you to accept work. Quiet reading is always fine.";
+const INSTRUCTIONS: &str = "Your keys are instruments; your charter governs their use. \
+ListCompanions names who you may be; Connect mints a labeled session and briefs you; \
+WhoAmI re-anchors; CatchUp is your one inbox. Copy references, cursors and session \
+handles from responses; never construct them. A requestId is an idempotency key: reuse \
+it to reconcile an uncertain outcome — a conflict answer means already done. A mention \
+requests attention; it never obliges you to accept work. Quiet reading is always fine.";
+
+/// The session argument every ring key carries.
+fn session_arg() -> Value {
+    json!({
+        "type": "string",
+        "description": "The labeled session handle returned by Connect (e.g. tangent_9f01). Copy it; never construct it."
+    })
+}
+fn view_arg() -> Value {
+    json!({ "type": "string", "enum": ["orientation", "compact", "expanded"] })
+}
+fn request_id_arg() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "description": "Your idempotency key for this write: reuse it to reconcile an uncertain outcome."
+    })
+}
+const REF_COPY: &str = "Copied from a response of this server; never constructed.";
+
 
 /// Echoes a supported requested revision; counteroffers the latest otherwise.
 pub fn negotiate_protocol_version(requested: &str) -> &'static str {
@@ -144,8 +167,9 @@ fn handle_request(
             if !ready(initialized, hub) {
                 return Some(rpc_error(id.clone(), -32002, "Server not initialized"));
             }
-            let optional = hub.map(ConnectorHub::optional_tool_names).unwrap_or_default();
-            Some(success(id, json!({ "tools": catalog_for(&optional) })))
+            let granted = hub.map(ConnectorHub::granted_service_monikers).unwrap_or_default();
+            let steward = hub.map(ConnectorHub::optional_tool_names).unwrap_or_default();
+            Some(success(id, json!({ "tools": catalog(&granted, &steward) })))
         }
         "tools/call" => {
             let Some(hub) = hub else {
@@ -278,266 +302,6 @@ fn read_line(reader: &mut impl BufRead, buffer: &mut String) -> Result<usize, Fr
 }
 
 /// The stable tool catalog. Fourteen participation tools; setup and stewardship stay in the CLI.
-pub fn catalog() -> Value {
-    let tools = [
-        tool(
-            "SelectCompanion",
-            "Select which enrolled companion (participant companion) to act as for this session. Returns a enrollmentId. With no moniker, the connector's one local companion is used; with several companions, name one explicitly.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "moniker": { "type": "string", "description": "An companion handle, or an enrollment's name, handle or participant reference. Omit when exactly one companion exists." }
-                },
-                "additionalProperties": false,
-            }),
-        ),
-        tool(
-            "OpenRegistration",
-            "Open the local companion manager in the operator's browser so a human can create an companion or complete a pending sign-in (attention, not execution: nothing runs automatically). Ask the operator when they are done.",
-            json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false,
-            }),
-        ),
-        tool(
-            "Connect",
-            "Connect to a Tangent server on the fly: the connector resolves your companion (the optional companion argument, or exactly one local companion), discovers the server, completes bound enrollment when needed, then arrives. The response leads with \"You are {handle} — session {contextId}\" — that session id is the context handle later calls carry. When operator action is needed (companion sign-in) the companion manager is opened and the tool says so honestly — connect again afterwards; enrollment also completes by itself once the sign-in is done.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "serverUrl": { "type": "string", "description": "The Tangent server origin, e.g. https://tangent.example" },
-                    "companion": { "type": "string", "description": "Which local companion to act as (its handle), when more than one exists" }
-                },
-                "required": ["serverUrl"],
-                "additionalProperties": false,
-            }),
-        ),
-        tool(
-            "Arrive",
-            "Arrive at the companion's enrolled Tangent server. Returns a contextId for subsequent calls plus an orientation view.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "enrollmentId": { "type": "string" },
-                    "serverUrl": { "type": "string", "description": "The server origin shown by SelectCompanion" }
-                },
-                "required": ["enrollmentId", "serverUrl"],
-                "additionalProperties": false,
-            }),
-        ),
-        tool(
-            "ListTangents",
-            "List the Tangent communities visible to this companion. Paginated with the returned cursor.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "contextId": { "type": "string" },
-                    "cursor": { "type": "string", "description": "Continuation cursor from a previous page" }
-                },
-                "required": ["contextId"],
-                "additionalProperties": false,
-            }),
-        ),
-        tool(
-            "ListTopics",
-            "List the Topics of one Tangent visible to this companion.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "contextId": { "type": "string" },
-                    "tangentRef": { "type": "string", "description": "Tangent reference copied from a previous response" },
-                    "cursor": { "type": "string" }
-                },
-                "required": ["contextId", "tangentRef"],
-                "additionalProperties": false,
-            }),
-        ),
-        tool(
-            "ReadTopic",
-            "Read a bounded window of Posts in one Topic. Pass a returned cursor to page, or aroundPostRef to center on a Post.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "contextId": { "type": "string" },
-                    "topicRef": { "type": "string", "description": "Topic reference copied from a previous response" },
-                    "cursor": { "type": "string" },
-                    "aroundPostRef": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 25 },
-                    "view": { "type": "string", "enum": ["orientation", "compact", "expanded"] }
-                },
-                "required": ["contextId", "topicRef"],
-                "additionalProperties": false,
-            }),
-        ),
-        tool(
-            "CreatePost",
-            "Submit a Post or reply in one Topic. requestId is a durable key: reuse it exactly to recover after a lost response; the same key with different content is rejected.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "contextId": { "type": "string" },
-                    "topicRef": { "type": "string" },
-                    "requestId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
-                    "text": { "type": "string", "maxLength": 4096 },
-                    "replyTo": { "type": "string", "description": "Post reference being answered, from a previous response" },
-                    "view": { "type": "string", "enum": ["orientation", "compact", "expanded"] }
-                },
-                "required": ["contextId", "topicRef", "requestId", "text"],
-                "additionalProperties": false,
-            }),
-        ),
-        tool(
-            "GetUpdates",
-            "Fetch the attention digest: direct mentions, direct replies, and watched-topic activity. Reading it does not mark anything read.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "contextId": { "type": "string" },
-                    "view": { "type": "string", "enum": ["orientation", "compact", "expanded"] },
-                    "cursor": { "type": "string", "description": "Page continuation cursor from a previous GetUpdates" },
-                    "scopeRef": { "type": "string", "description": "Optional server, Tangent, or Topic reference to scope the digest" }
-                },
-                "required": ["contextId"],
-                "additionalProperties": false,
-            }),
-        ),
-        tool(
-            "MarkRead",
-            "Acknowledge reading through a readCursor returned with a history page. Separate from fetching a digest.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "contextId": { "type": "string" },
-                    "topicRef": { "type": "string" },
-                    "readCursor": { "type": "string", "description": "readCursor from a ReadTopic response" },
-                    "requestId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
-                    "view": { "type": "string", "enum": ["orientation", "compact", "expanded"] }
-                },
-                "required": ["contextId", "topicRef", "readCursor"],
-                "additionalProperties": false,
-            }),
-        ),
-        tool(
-            "JoinTangent",
-            "Join one Tangent, or submit a join request when admission requires approval. Preserve the actual admission outcome.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "contextId": { "type": "string" },
-                    "tangentRef": { "type": "string" },
-                    "requestId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
-                    "inviteRef": { "type": "string" },
-                    "view": { "type": "string", "enum": ["orientation", "compact", "expanded"] }
-                },
-                "required": ["contextId", "tangentRef", "requestId"],
-                "additionalProperties": false,
-            }),
-        ),
-        tool(
-            "LeaveTangent",
-            "Leave one Tangent. Authorship is never erased.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "contextId": { "type": "string" },
-                    "tangentRef": { "type": "string" },
-                    "requestId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
-                    "view": { "type": "string", "enum": ["orientation", "compact", "expanded"] }
-                },
-                "required": ["contextId", "tangentRef", "requestId"],
-                "additionalProperties": false,
-            }),
-        ),
-        tool(
-            "SetWatch",
-            "Set the watch mode of a Tangent or Topic: all, replies, or none.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "contextId": { "type": "string" },
-                    "scopeRef": { "type": "string", "description": "Tangent or Topic reference" },
-                    "mode": { "type": "string", "enum": ["all", "replies", "none"] },
-                    "requestId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
-                    "view": { "type": "string", "enum": ["orientation", "compact", "expanded"] }
-                },
-                "required": ["contextId", "scopeRef", "mode"],
-                "additionalProperties": false,
-            }),
-        ),
-        tool(
-            "GetOperation",
-            "Recover the receipt of a previous mutation by its requestId. Never re-executes anything.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "contextId": { "type": "string" },
-                    "requestId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
-                    "view": { "type": "string", "enum": ["orientation", "compact", "expanded"] }
-                },
-                "required": ["contextId", "requestId"],
-                "additionalProperties": false,
-            }),
-        ),
-    ];
-    json!(tools)
-}
-
-/// Keeps the fourteen participation tools stable and adds only exact actions learned
-/// from authenticated, actor-scoped server responses.
-pub fn catalog_for(optional: &BTreeSet<String>) -> Value {
-    let mut tools = catalog().as_array().cloned().unwrap_or_default();
-    for name in ["ListModerationCases", "ReadModerationCase", "PreviewModerationAction", "ApplyModerationAction"] {
-        if optional.contains(name) { tools.push(moderation_tool(name)); }
-    }
-    json!(tools)
-}
-
-fn moderation_tool(name: &str) -> Value {
-    let common = json!({
-        "contextId": { "type": "string", "description": "Caller-bound contextId returned by Arrive" },
-        "caseRef": { "type": "string", "description": "Qualified caseRef copied from this server" },
-        "action": { "type": "string", "enum": ["defer", "escalate"] },
-        "summary": { "type": "string", "minLength": 1, "maxLength": 280 },
-        "deferredUntil": { "type": "string", "format": "date-time", "description": "Required only for defer; at most seven days ahead" },
-        "expectedCaseRevision": { "type": "integer", "minimum": 0 },
-        "expectedSubjectRevision": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "view": { "type": "string", "enum": ["orientation", "compact", "expanded"] }
-    });
-    let (description, schema, read_only, destructive, idempotent) = match name {
-        "ListModerationCases" => ("List one bounded page of moderation cases in an authorized Topic.", json!({
-            "type": "object", "properties": {
-                "contextId": { "type": "string" }, "topicRef": { "type": "string", "description": "Topic reference copied from this server" },
-                "page": { "type": "integer", "minimum": 1, "maximum": 10000 },
-                "view": { "type": "string", "enum": ["orientation", "compact", "expanded"] }
-            }, "required": ["contextId", "topicRef"], "additionalProperties": false
-        }), true, false, false),
-        "ReadModerationCase" => ("Read one bounded moderation case this context is currently authorized to inspect.", json!({
-            "type": "object", "properties": { "contextId": { "type": "string" }, "caseRef": { "type": "string" },
-                "view": { "type": "string", "enum": ["orientation", "compact", "expanded"] } },
-            "required": ["contextId", "caseRef"], "additionalProperties": false
-        }), true, false, false),
-        "PreviewModerationAction" => ("Preview a closed defer or escalate decision. This changes nothing.", json!({
-            "type": "object", "properties": common, "required": ["contextId", "caseRef", "action", "summary", "expectedCaseRevision", "expectedSubjectRevision"],
-            "additionalProperties": false
-        }), true, false, false),
-        "ApplyModerationAction" => {
-            let mut properties = common.as_object().cloned().unwrap_or_default();
-            properties.insert("requestId".into(), json!({ "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" }));
-            ("Apply a defer or escalate decision. Reuse requestId exactly to recover an uncertain outcome.", json!({
-                "type": "object", "properties": properties,
-                "required": ["contextId", "caseRef", "requestId", "action", "summary", "expectedCaseRevision", "expectedSubjectRevision"],
-                "additionalProperties": false
-            }), false, true, true)
-        }
-        _ => unreachable!("closed optional tool set"),
-    };
-    json!({ "name": name, "description": description, "inputSchema": schema, "annotations": {
-        "title": name, "readOnlyHint": read_only, "destructiveHint": destructive,
-        "idempotentHint": idempotent, "openWorldHint": false
-    }})
-}
-
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     json!({
         "name": name,
@@ -545,14 +309,197 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
         "inputSchema": input_schema,
         "annotations": {
             "title": name,
-            "readOnlyHint": matches!(name, "SelectCompanion" | "OpenRegistration" | "Arrive" | "ListTangents" | "ListTopics" | "ReadTopic" | "GetUpdates" | "GetOperation"),
+            "readOnlyHint": matches!(name, "ListCompanions" | "Connect" | "WhoAmI" | "CatchUp" | "Forum_List_Spaces" | "Forum_List_Threads" | "Forum_Read_Thread" | "Forum_Read_User" | "Forum_List_Cases" | "Forum_Read_Case" | "Forum_Preview_Action"),
         }
     })
 }
 
+/// The projected catalog: core keys always; a ring's keys iff a granted service
+/// speaks it and the wire supports them; stewardship keys iff a live context
+/// reported the authority; `Forum_Manage_User`'s action enum carries that authority.
+/// Never declared — only projected (ADR 0001).
+pub fn catalog(granted: &BTreeSet<String>, steward: &BTreeSet<String>) -> Value {
+    let mut tools: Vec<Value> = Vec::new();
+
+    // ----- the core -----
+    tools.push(tool(
+        "ListCompanions",
+        "Who exists, and what each persona may reach (its granted services). The first call, before any session exists.",
+        json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+    ));
+    tools.push(tool(
+        "Connect",
+        "The only mint of a session: connect to a service as a persona, always explicitly named. For multi-place services (forums) the address names which place. Returns the labeled session (e.g. tangent_9f01) and the briefing: You are {persona} — session {id}.",
+        json!({
+            "type": "object",
+            "properties": {
+                "service": { "type": "string", "description": "The service moniker: tangent (forums) — bluesky when granted." },
+                "persona": { "type": "string", "description": "The companion to act as, by moniker (ListCompanions names them)." },
+                "address": { "type": "string", "description": "The place's https origin. Required for tangent; absent for single-instance services." },
+            },
+            "required": ["service", "persona"],
+            "additionalProperties": false,
+        }),
+    ));
+    tools.push(tool(
+        "WhoAmI",
+        "Identity facts and the live capability readout for one session: who you are, where you are, what is on your ring — as of now.",
+        json!({
+            "type": "object",
+            "properties": { "session": session_arg() },
+            "required": ["session"],
+            "additionalProperties": false,
+        }),
+    ));
+    tools.push(tool(
+        "CatchUp",
+        "One inbox: mentions, watched activity, and the settlement of your own writes, cursor'd from where you left off.",
+        json!({
+            "type": "object",
+            "properties": { "session": session_arg(), "cursor": { "type": "string" }, "view": view_arg() },
+            "required": ["session"],
+            "additionalProperties": false,
+        }),
+    ));
+
+    // ----- the Forum ring, projected by grant and wire support -----
+    if granted.contains("tangent") {
+        let session = session_arg();
+        tools.push(tool(
+            "Forum_List_Spaces",
+            "The Tangents (spaces) visible to this session.",
+            json!({ "type": "object", "properties": { "session": session, "cursor": { "type": "string" } }, "required": ["session"], "additionalProperties": false }),
+        ));
+        let session = session_arg();
+        tools.push(tool(
+            "Forum_List_Threads",
+            "The threads (topics) of one space.",
+            json!({ "type": "object", "properties": { "session": session, "spaceRef": { "type": "string", "description": REF_COPY }, "cursor": { "type": "string" } }, "required": ["session", "spaceRef"], "additionalProperties": false }),
+        ));
+        let session = session_arg();
+        tools.push(tool(
+            "Forum_Read_Thread",
+            "A window of posts in one thread; aroundPostRef gathers the evidence around one post.",
+            json!({ "type": "object", "properties": { "session": session, "threadRef": { "type": "string", "description": REF_COPY }, "cursor": { "type": "string" }, "aroundPostRef": { "type": "string", "description": REF_COPY }, "limit": { "type": "integer", "minimum": 1, "maximum": 25 }, "view": view_arg() }, "required": ["session", "threadRef"], "additionalProperties": false }),
+        ));
+        let session = session_arg();
+        tools.push(tool(
+            "Forum_Post",
+            "The write key: post into a thread, optionally as a reply. requestId is the idempotency key — reuse it to reconcile an uncertain outcome; a conflict answer means already done.",
+            json!({ "type": "object", "properties": { "session": session, "threadRef": { "type": "string", "description": REF_COPY }, "requestId": request_id_arg(), "text": { "type": "string", "minLength": 1, "maxLength": 4096 }, "replyTo": { "type": "string", "description": REF_COPY }, "view": view_arg() }, "required": ["session", "threadRef", "requestId", "text"], "additionalProperties": false }),
+        ));
+        let session = session_arg();
+        tools.push(tool(
+            "Forum_Join_Space",
+            "Become a member of a space.",
+            json!({ "type": "object", "properties": { "session": session, "spaceRef": { "type": "string", "description": REF_COPY }, "requestId": request_id_arg(), "inviteRef": { "type": "string", "description": REF_COPY }, "view": view_arg() }, "required": ["session", "spaceRef", "requestId"], "additionalProperties": false }),
+        ));
+        let session = session_arg();
+        tools.push(tool(
+            "Forum_Leave_Space",
+            "End membership of a space.",
+            json!({ "type": "object", "properties": { "session": session, "spaceRef": { "type": "string", "description": REF_COPY }, "requestId": request_id_arg(), "view": view_arg() }, "required": ["session", "spaceRef", "requestId"], "additionalProperties": false }),
+        ));
+        let session = session_arg();
+        tools.push(tool(
+            "Forum_Mark_Read",
+            "Advance the read state of one thread to a cursor copied from a response.",
+            json!({ "type": "object", "properties": { "session": session, "threadRef": { "type": "string", "description": REF_COPY }, "readCursor": { "type": "string" }, "requestId": request_id_arg(), "view": view_arg() }, "required": ["session", "threadRef", "readCursor"], "additionalProperties": false }),
+        ));
+        let session = session_arg();
+        tools.push(tool(
+            "Forum_Watch",
+            "Subscribe or unsubscribe attention for one space or thread.",
+            json!({ "type": "object", "properties": { "session": session, "scopeRef": { "type": "string", "description": REF_COPY }, "on": { "type": "boolean" }, "view": view_arg() }, "required": ["session", "scopeRef", "on"], "additionalProperties": false }),
+        ));
+        let session = session_arg();
+        tools.push(tool(
+            "Forum_Open_Case",
+            "Reporting is a member ability: flag a post into the community's case system.",
+            json!({ "type": "object", "properties": { "session": session, "threadRef": { "type": "string", "description": REF_COPY }, "subjectRef": { "type": "string", "description": REF_COPY }, "reason": { "type": "string", "minLength": 1, "maxLength": 2000 }, "view": view_arg() }, "required": ["session", "threadRef", "subjectRef", "reason"], "additionalProperties": false }),
+        ));
+
+        // ----- stewardship, projected by the authority live contexts reported -----
+        if !steward.is_empty() {
+            if steward.contains("Forum_List_Cases") {
+                let session = session_arg();
+                tools.push(tool(
+                    "Forum_List_Cases",
+                    "One bounded page of the community's moderation cases in an authorized thread.",
+                    json!({ "type": "object", "properties": { "session": session, "threadRef": { "type": "string", "description": REF_COPY }, "page": { "type": "integer", "minimum": 0 }, "view": view_arg() }, "required": ["session", "threadRef"], "additionalProperties": false }),
+                ));
+            }
+            if steward.contains("Forum_Read_Case") {
+                let session = session_arg();
+                tools.push(tool(
+                    "Forum_Read_Case",
+                    "One case's evidence and state.",
+                    json!({ "type": "object", "properties": { "session": session, "caseRef": { "type": "string", "description": REF_COPY }, "view": view_arg() }, "required": ["session", "caseRef"], "additionalProperties": false }),
+                ));
+            }
+            if steward.contains("Forum_Preview_Action") {
+                let session = session_arg();
+                tools.push(tool(
+                    "Forum_Preview_Action",
+                    "The service's rules engine reporting what a case action would do — facts, never advice.",
+                    json!({ "type": "object", "properties": { "session": session, "caseRef": { "type": "string", "description": REF_COPY }, "action": { "type": "string", "enum": ["defer", "escalate"] }, "summary": { "type": "string", "minLength": 1, "maxLength": 2000 }, "deferredUntil": { "type": "string" }, "expectedCaseRevision": { "type": "integer", "minimum": 0 }, "expectedSubjectRevision": { "type": "string" }, "view": view_arg() }, "required": ["session", "caseRef", "action", "summary", "expectedCaseRevision", "expectedSubjectRevision"], "additionalProperties": false }),
+                ));
+            }
+            if steward.contains("Forum_Escalate_Case") {
+                let session = session_arg();
+                tools.push(tool(
+                    "Forum_Escalate_Case",
+                    "File a case to the owner. Deliberation itself stays conversational; this is filing.",
+                    json!({ "type": "object", "properties": { "session": session, "caseRef": { "type": "string", "description": REF_COPY }, "requestId": request_id_arg(), "summary": { "type": "string", "minLength": 1, "maxLength": 2000 }, "deferredUntil": { "type": "string" }, "expectedCaseRevision": { "type": "integer", "minimum": 0 }, "expectedSubjectRevision": { "type": "string" }, "view": view_arg() }, "required": ["session", "caseRef", "requestId", "summary", "expectedCaseRevision", "expectedSubjectRevision"], "additionalProperties": false }),
+                ));
+            }
+            let manage: Vec<String> = steward.iter().filter_map(|name| name.strip_prefix("manage:")).map(str::to_string).collect();
+            if !manage.is_empty() {
+                tools.push(manage_tool(&manage));
+            }
+        }
+    }
+
+    json!(tools)
+}
+
+/// `Forum_Manage_User`: the user-management ladder in one key. The action enum IS
+/// the authority — a schema that cannot express `ban` cannot ban.
+fn manage_tool(actions: &[String]) -> Value {
+    let mut schema = json!({
+        "type": "object",
+        "properties": {
+            "session": session_arg(),
+            "userRef": { "type": "string", "description": REF_COPY },
+            "action": { "type": "string", "enum": actions },
+            "reason": { "type": "string", "minLength": 1, "maxLength": 2000 },
+            "durationSeconds": { "type": "integer", "minimum": 0, "description": "For the rungs that allow it (timeout, ban)." },
+            "role": { "type": "string", "description": "For add_role / remove_role." },
+            "caseRef": { "type": "string", "description": "Binds the act to its evidence when one exists." },
+            "view": view_arg(),
+        },
+        "required": ["session", "userRef", "action", "reason"],
+        "additionalProperties": false,
+    });
+    let _ = &mut schema;
+    let mut entry = tool(
+        "Forum_Manage_User",
+        "The user-management ladder: warn, timeout, suspend, ban, add_role, remove_role. The action enum carries the authority this identity holds; the companion's charter governs when to climb it.",
+        schema,
+    );
+    entry["annotations"]["destructiveHint"] = json!(true);
+    entry["annotations"]["idempotentHint"] = json!(false);
+    entry
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn granted(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
 
     #[test]
     fn known_revisions_echo_and_future_ones_counteroffer() {
@@ -563,34 +510,57 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_is_the_fourteen_participation_tools() {
-        let catalog_value = catalog();
-        let tools = catalog_value.as_array().unwrap();
-        let names: Vec<&str> = tools.iter().filter_map(|entry| entry.get("name").and_then(Value::as_str)).collect();
-        assert_eq!(
-            names,
-            vec![
-                "SelectCompanion", "OpenRegistration", "Connect", "Arrive", "ListTangents", "ListTopics",
-                "ReadTopic", "CreatePost", "GetUpdates", "MarkRead", "JoinTangent", "LeaveTangent",
-                "SetWatch", "GetOperation"
-            ]
-        );
-        for entry in tools {
+    fn a_member_sees_the_core_and_the_forum_ring_alone() {
+        let tools = catalog(&granted(&["tangent"]), &BTreeSet::new());
+        let names: Vec<&str> = tools.as_array().unwrap().iter()
+            .filter_map(|entry| entry.get("name").and_then(Value::as_str)).collect();
+        assert_eq!(names, vec![
+            "ListCompanions", "Connect", "WhoAmI", "CatchUp",
+            "Forum_List_Spaces", "Forum_List_Threads", "Forum_Read_Thread", "Forum_Post",
+            "Forum_Join_Space", "Forum_Leave_Space", "Forum_Mark_Read", "Forum_Watch",
+            "Forum_Open_Case",
+        ]);
+        for entry in tools.as_array().unwrap() {
             assert!(entry.get("inputSchema").is_some(), "every tool carries a schema");
         }
     }
 
     #[test]
-    fn optional_moderation_schemas_are_exact_and_do_not_change_the_base_catalog() {
-        let optional = BTreeSet::from(["ListModerationCases".to_string(), "ApplyModerationAction".to_string(), "ReportPost".to_string()]);
-        let catalog_value = catalog_for(&optional);
-        let tools = catalog_value.as_array().unwrap();
-        assert_eq!(catalog().as_array().unwrap().len(), 14);
-        assert_eq!(tools.len(), 16);
-        assert!(tools.iter().any(|entry| entry["name"] == "ListModerationCases"));
-        let apply = tools.iter().find(|entry| entry["name"] == "ApplyModerationAction").unwrap();
-        assert_eq!(apply["annotations"]["destructiveHint"], true);
-        assert_eq!(apply["annotations"]["idempotentHint"], true);
-        assert!(!tools.iter().any(|entry| entry["name"] == "ReportPost"));
+    fn no_grant_no_ring_and_the_social_ring_waits_for_its_service() {
+        let tools = catalog(&BTreeSet::new(), &BTreeSet::new());
+        let names: Vec<&str> = tools.as_array().unwrap().iter()
+            .filter_map(|entry| entry.get("name").and_then(Value::as_str)).collect();
+        assert_eq!(names, vec!["ListCompanions", "Connect", "WhoAmI", "CatchUp"]);
+
+        let tools = catalog(&granted(&["tangent", "bluesky"]), &BTreeSet::new());
+        let names: Vec<&str> = tools.as_array().unwrap().iter()
+            .filter_map(|entry| entry.get("name").and_then(Value::as_str)).collect();
+        assert_eq!(names, vec!["ListCompanions", "Connect", "WhoAmI", "CatchUp",
+            "Forum_List_Spaces", "Forum_List_Threads", "Forum_Read_Thread", "Forum_Post",
+            "Forum_Join_Space", "Forum_Leave_Space", "Forum_Mark_Read", "Forum_Watch",
+            "Forum_Open_Case"],
+            "the Social ring appears only when a Social service speaks it");
+    }
+
+    #[test]
+    fn the_manage_enum_is_the_authority_and_keys_project_by_it() {
+        let steward = granted(&["Forum_List_Cases", "Forum_Read_Case", "Forum_Preview_Action", "Forum_Escalate_Case",
+            "manage:warn", "manage:timeout", "manage:ban"]);
+        let tools = catalog(&granted(&["tangent"]), &steward);
+        let entries = tools.as_array().unwrap();
+        assert_eq!(entries.len(), 13 + 5, "four case keys and the manage key join the member ring");
+        let manage = entries.iter().find(|entry| entry["name"] == "Forum_Manage_User").unwrap();
+        assert_eq!(manage["inputSchema"]["properties"]["action"]["enum"], json!(["ban", "timeout", "warn"]),
+            "the enum carries exactly the reported authority, sorted and no wider");
+        assert_eq!(manage["annotations"]["destructiveHint"], true);
+
+        // A warn-only steward cannot express ban; the case keys project independently.
+        let steward = granted(&["manage:warn"]);
+        let tools = catalog(&granted(&["tangent"]), &steward);
+        let manage = tools.as_array().unwrap().iter()
+            .find(|entry| entry["name"] == "Forum_Manage_User").unwrap();
+        assert_eq!(manage["inputSchema"]["properties"]["action"]["enum"], json!(["warn"]));
+        assert!(!tools.as_array().unwrap().iter().any(|entry| entry["name"] == "Forum_List_Cases"),
+            "case keys appear only when their authority was reported");
     }
 }

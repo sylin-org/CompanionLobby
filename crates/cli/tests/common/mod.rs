@@ -859,6 +859,30 @@ fn respond(
             if bearer.ends_with(STEWARD_CREDENTIAL) => Script::Body(200, moderation_preview(body)),
         ("POST", "/api/v1/experience/moderation/cases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/actions")
             if bearer.ends_with(STEWARD_CREDENTIAL) => Script::Body(200, moderation_apply(body)),
+        ("POST", p) if p.starts_with("/api/v1/experience/topics/") && p.ends_with("/reports") => {
+            Script::Body(200, envelope("open_case", "ok", json!({
+                "caseRef": format!("ORIGIN::home::lounge::case_{}", body.get("requestId").and_then(Value::as_str).unwrap_or("new")),
+                "subjectRef": body.get("subjectRef").cloned().unwrap_or(Value::Null),
+            })).with_receipt(body.get("requestId").and_then(Value::as_str).unwrap_or("case"), "completed", "ORIGIN::home::lounge::case_new"))
+        }
+        ("GET", p) if p.starts_with("/api/v1/experience/participants/") => {
+            let who = p.trim_start_matches("/api/v1/experience/participants/");
+            Script::Body(200, envelope("read_user", "ok", json!({
+                "profile": { "handle": who, "displayName": who, "participantRef": format!("prt_{who}") },
+                "recentPosts": [{ "ref": "ORIGIN::home::lounge::m40", "text": "a pattern, not a one-off" }],
+            })))
+        }
+        ("POST", p) if p.starts_with("/api/v1/experience/moderation/users/") && p.ends_with("/management") => {
+            if !bearer.ends_with(STEWARD_CREDENTIAL) {
+                return Script::Body(403, json!({ "error": "permission_denied", "message": "only stewards may act on users" }));
+            }
+            let acted = p.trim_start_matches("/api/v1/experience/moderation/users/").trim_end_matches("/management");
+            Script::Body(200, envelope("manage_user", "ok", json!({
+                "userRef": acted,
+                "action": body.get("action").cloned().unwrap_or(Value::Null),
+                "reason": body.get("reason").cloned().unwrap_or(Value::Null),
+            })).with_receipt(&format!("manage-{acted}"), "completed", acted))
+        }
         (_, path) if path.contains("/moderation/") => Script::Body(403,
             json!({ "code": "permission_denied", "message": "current Topic authority is required" })),
         ("GET", "/api/v1/experience/updates") if bearer.ends_with(SILENT_STEWARD_CREDENTIAL)
@@ -1011,7 +1035,11 @@ const CASE_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 fn steward_topic_window() -> Value {
     let mut value = topic_window();
     value["capabilities"]["stewardship"] = json!(true);
-    value["place"]["allowedActions"] = json!(["read_topic", "mark_read", "set_watch", "create_post", "list_moderation_cases"]);
+    value["place"]["allowedActions"] = json!([
+        "read_topic", "mark_read", "set_watch", "create_post",
+        "list_moderation_cases", "read_moderation_case", "preview_moderation_action", "apply_moderation_action",
+        "warn_user", "timeout_user", "suspend_user", "ban_user", "assign_roles",
+    ]);
     value
 }
 
@@ -1462,6 +1490,23 @@ pub fn seed_enrolled_state(home: &std::path::Path, handle: &str, origin: &str, t
             auto_check: true,
         });
         store.set_session(&enrollment_id, token);
+        // The credential the sign-in would leave behind, with its default grant: the
+        // state a completed bind plus enrollment leaves, not just half of it.
+        store.set_atproto_session(&companion.local_id, AccountSession {
+            did: format!("did:plc:{handle}"),
+            handle: format!("{handle}.bsky.example"),
+            access_jwt: format!("sat_seeded_{handle}"),
+            refresh_jwt: None,
+            pds: origin.to_string(),
+            authserver: None,
+            client_id: None,
+            dpop_key: None,
+            services: vec!["tangent".to_string()],
+            obtained_at: 1_757_000_000_000,
+        });
+        let mut bound = store.companion(&companion.local_id).unwrap();
+        bound.bound_did = Some(format!("did:plc:{handle}"));
+        store.upsert_companion(bound).expect("bind the seeded companion");
         store.save().expect("save seeded state");
     }
     enrollment_id

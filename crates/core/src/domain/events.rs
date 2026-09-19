@@ -16,8 +16,6 @@ pub enum DomainEvent {
     BackoffScheduled { enrollment_id: String, seconds: u64 },
     AttentionObserved { enrollment_id: String, new_items: Vec<String>, coalesced: usize },
     AttentionDelivered { enrollment_id: String, item_count: usize, delivery_mode: String },
-    WriteRegistered { request_id: String, operation: String },
-    WriteSettled { request_id: String, state: String },
     ToolInvoked { channel: IntakeChannel, tool: String },
     ToolCompleted { channel: IntakeChannel, tool: String, status: String, text_bytes: usize },
     /// The serve-mode companion manager became ready. The loopback URL is journal material
