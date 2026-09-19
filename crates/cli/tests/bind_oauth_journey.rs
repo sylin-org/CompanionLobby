@@ -586,4 +586,5 @@ fn signin_pendings_are_per_companion_and_cleared_by_completion() {
     assert_eq!(waiting("ox_omega").structured.pointer("/problem/code").and_then(Value::as_str), Some("operator_action_needed"));
     let callback_path = callback.strip_prefix(&format!("http://{address}")).unwrap_or(&callback);
     get(address, callback_path);
+    assert_eq!(hub.enrollments_of(&second.local_id).len(), 1, "and then the second enrolls on its own sign-in");
 }
