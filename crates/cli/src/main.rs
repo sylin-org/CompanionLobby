@@ -66,7 +66,7 @@ fn usage() {
          serve [--force]                MCP stdio server (the agent-facing intake);\n\
                                         also hosts the loopback companion manager in-process\n\
                                         (its URL goes to stderr, never stdout)\n\
-         manager [--port N] [--no-open] [--force]\n\
+         manager [--port N] [--force]\n\
                                         local operator web page + tray (companions,\n\
                                         atproto sign-in via the /bind route, enrollments,\n\
                                         status). Fixed default port 5219 (stable URL);\n\

@@ -140,10 +140,11 @@ fn recorded_page_url(data_dir: &std::path::Path) -> Option<String> {
 }
 
 /// Entry point of the `manager` verb. Owns stdout for its banner; the MCP edge is a
-/// separate process and never runs here.
+/// separate process and never runs here. Launching opens no browser: tabs already
+/// pointing here reattach to the fresh process on their own, and the tray and the
+/// agent-facing tools open the page when an operator actually needs it.
 pub fn manager(rest: &[String]) -> i32 {
     let mut port: Option<u16> = None;
-    let mut open_browser = true;
     let mut force = false;
     let mut remaining = rest.iter();
     while let Some(argument) = remaining.next() {
@@ -155,7 +156,6 @@ pub fn manager(rest: &[String]) -> i32 {
                     return 1;
                 }
             },
-            "--no-open" => open_browser = false,
             "--force" => force = true,
             other => {
                 eprintln!("unknown operator option {other}");
@@ -202,9 +202,6 @@ pub fn manager(rest: &[String]) -> i32 {
     // The page URL is recorded in memory AND durable state: a Connect in any
     // process — the CLI one-shots included — pops this page at the sign-in anchor.
     hub.announce_manager_page(&url);
-    if open_browser {
-        hub.open_page(&url);
-    }
     // The tray's Quit releases the data-directory lock and clears the recorded page
     // URL before exiting the process.
     let quit_lock = lock.clone();

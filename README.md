@@ -162,7 +162,7 @@ lock and are expected to be operator-driven, not concurrent.
 ## The manager verb
 
 ```
-companion-lobby manager [--port N] [--no-open] [--force]
+companion-lobby manager [--port N] [--force]
 ```
 
 On Windows, `start.bat` and `stop.bat` in the repository root restart and stop the
@@ -175,8 +175,9 @@ A long-running local web server (loopback `127.0.0.1` only, on the fixed port 52
 unless `--port` or `COMPANION_LOBBY_PORT` names another; port 0 is refused; `--force`
 overrides a stale data-directory lock), one page of embedded HTML+JS (no framework, no
 CDN), and a Windows tray icon. It prints the ready-to-use address
-`http://127.0.0.1:{port}/` to stdout, records it in connector state (see below), and
-opens the default browser detached. The page carries **no interactive token**: the
+`http://127.0.0.1:{port}/` to stdout and records it in connector state (see below).
+Launching opens no browser: tabs already pointing here reattach to the fresh process
+on their own, and the tray and the agent-facing tools open the page when it is needed. The page carries **no interactive token**: the
 operator is the trust root, a local process can read `state.json` directly anyway, and
 the browser drive-by class is blocked structurally — loopback-only bind, GET/POST
 only, 8 KiB header / 1 MiB body caps, `Connection: close`, JSON-only bodies, no CORS
@@ -317,9 +318,8 @@ Connect, view, delivery mode, aliases, unresolved writes). Read operations accep
 optional `view` of `orientation` | `compact` | `expanded`.
 
 `COMPANION_LOBBY_NO_BROWSER=1` stops the binary opening any browser (headless hosts):
-the tool opens (`OpenRegistration`, `Connect`'s popped sign-in page), the manager
-verb's startup open and the tray's "Open companion manager" share one page opener,
-chosen once at startup. The URLs are still constructed, and the tools answer as usual.
+the tool opens (`OpenRegistration`, `Connect`'s popped sign-in page) and the tray's
+"Open companion manager" share one page opener, chosen once at startup. The URLs are still constructed, and the tools answer as usual.
 A hub built without the platform browser opens nothing, so the test suites never open
 one.
 
