@@ -2517,32 +2517,6 @@ fn invalid_ref(kind: &str) -> ExperienceError {
     }
 }
 
-/// The ok outcome of a resolved selection: one enrollment, one server to arrive at.
-fn selected_outcome(companion: &Enrollment) -> ToolOutcome {
-    let text = format!(
-        "Selected {}. Continue with Arrive using this server: {}.",
-        companion.display_name.clone().unwrap_or_else(|| companion.name.clone()),
-        companion.origin
-    );
-    ToolOutcome {
-        is_error: false,
-        status: "ok".into(),
-        text,
-        structured: json!({
-            "experience": null,
-            "problem": null,
-            "connector": {
-                "enrollmentId": companion.enrollment_id,
-                "companionId": companion.local_id,
-                "contextId": null,
-                "serverUrl": companion.origin,
-                "view": "compact",
-                "deliveryMode": DELIVERY_MODE,
-            }
-        }),
-    }
-}
-
 /// Presentation fields are bounded and cannot change a connection's destination.
 fn project_server_card(origin: &str, raw: &Value, refreshed_at: i64) -> Option<ServerCard> {
     fn field(raw: &Value, name: &str, limit: usize) -> String {

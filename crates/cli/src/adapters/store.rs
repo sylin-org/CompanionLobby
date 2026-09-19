@@ -14,7 +14,6 @@ use companion_core::domain::companion::{AccountSession, CallerId, Enrollment, Co
 use companion_core::domain::policy::AttentionPolicy;
 
 const STATE_FILE: &str = "state.json";
-const JOURNAL_LINE_LIMIT: u64 = 256 * 1024;
 
 /// Public presentation only. The enrolled origin remains the routing companion.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

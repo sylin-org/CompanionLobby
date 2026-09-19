@@ -217,7 +217,7 @@ fn one_companion_at_two_servers_keeps_distinct_working_sessions() {
 
     // Both enrollments hold distinct working sessions: arrival at each origin uses that
     // origin's own bearer, and neither session ever reaches the other server.
-    for (entry, server, token) in [(&at_a, &server_a, &token_a), (&at_b, &server_b, &token_b)] {
+    for (_entry, server, token) in [(&at_a, &server_a, &token_a), (&at_b, &server_b, &token_b)] {
         let outcome = hub.invoke(
             IntakeChannel::Cli,
             "Connect",
