@@ -1944,13 +1944,16 @@ impl ConnectorHub {
                     browsing.get(&frame.request, &format!("/api/v1/experience/participants/{}", encode(&user_ref)))
                 })
             }
-            Operation::ForumOpenCase { session, thread_ref, subject_ref, reason, view } => {
+            Operation::ForumOpenCase { session, thread_ref, post_ref, reason_code, statement, view } => {
                 self.with_context("Forum_Open_Case", &session, view, |frame| {
                     let Some((_space, thread)) = refs::topic_keys(&frame.request.origin, &thread_ref) else {
                         return Err(invalid_ref("Thread"));
                     };
+                    if refs::post_keys(&frame.request.origin, &post_ref).is_none() {
+                        return Err(invalid_ref("Post"));
+                    }
                     let request_id = format!("case-{}", crate::adapters::store::short_uuid());
-                    let body = json!({ "requestId": request_id, "subjectRef": subject_ref, "reason": reason });
+                    let body = json!({ "requestId": request_id, "postRef": post_ref, "reasonCode": reason_code, "statement": statement });
                     self.send_route(frame, Route::TopicReports(thread.to_string()), &body)
                 })
             }

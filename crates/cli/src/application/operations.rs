@@ -65,7 +65,7 @@ pub enum Operation {
     },
     ForumWatch { session: String, scope_ref: String, mode: WatchMode, view: ViewMode },
     ForumReadUser { session: String, user_ref: String },
-    ForumOpenCase { session: String, thread_ref: String, subject_ref: String, reason: String, view: ViewMode },
+    ForumOpenCase { session: String, thread_ref: String, post_ref: String, reason_code: String, statement: String, view: ViewMode },
 
     // ----- the Forum ring, stewardship (projected by reported authority) -----
     ForumListCases { session: String, thread_ref: String, page: Option<u16>, view: ViewMode },
@@ -327,12 +327,12 @@ pub fn decode(tool: &str, arguments: &Value) -> Result<Operation, String> {
         }
     };
     let limit = || -> Result<Option<u8>, String> {
-        match optional("limit")? {
-            None => Ok(None),
-            Some(value) => match value.parse::<u8>() {
-                Ok(parsed) if (1..=25).contains(&parsed) => Ok(Some(parsed)),
-                _ => Err("argument 'limit' must be 1-25".to_string()),
-            },
+        match arguments.get("limit") {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value.as_u64().and_then(|limit| u8::try_from(limit).ok())
+                .filter(|limit| (1..=25).contains(limit))
+                .map(Some)
+                .ok_or_else(|| "argument 'limit' must be 1-25".to_string()),
         }
     };
     match tool {
@@ -411,8 +411,9 @@ pub fn decode(tool: &str, arguments: &Value) -> Result<Operation, String> {
         "Forum_Open_Case" => Ok(Operation::ForumOpenCase {
             session: string("session")?,
             thread_ref: string("threadRef")?,
-            subject_ref: string("subjectRef")?,
-            reason: bounded_text("reason", 2000)?,
+            post_ref: string("postRef")?,
+            reason_code: string("reasonCode")?,
+            statement: bounded_text("statement", 2000)?,
             view: view()?,
         }),
 

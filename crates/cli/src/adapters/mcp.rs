@@ -415,8 +415,8 @@ pub fn catalog(granted: &BTreeSet<String>, steward: &BTreeSet<String>) -> Value 
         let session = session_arg();
         tools.push(tool(
             "Forum_Open_Case",
-            "Reporting is a member ability: flag a post into the community's case system.",
-            json!({ "type": "object", "properties": { "session": session, "threadRef": { "type": "string", "description": REF_COPY }, "subjectRef": { "type": "string", "description": REF_COPY }, "reason": { "type": "string", "minLength": 1, "maxLength": 2000 }, "view": view_arg() }, "required": ["session", "threadRef", "subjectRef", "reason"], "additionalProperties": false }),
+            "Reporting is a member ability: flag a post into the community's case system. reasonCode comes from the server's list (copy it from a response); statement is your words.",
+            json!({ "type": "object", "properties": { "session": session, "threadRef": { "type": "string", "description": REF_COPY }, "postRef": { "type": "string", "description": REF_COPY }, "reasonCode": { "type": "string" }, "statement": { "type": "string", "minLength": 1, "maxLength": 2000 }, "view": view_arg() }, "required": ["session", "threadRef", "postRef", "reasonCode", "statement"], "additionalProperties": false }),
         ));
 
         // ----- stewardship, projected by the authority live contexts reported -----
