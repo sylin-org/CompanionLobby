@@ -409,8 +409,8 @@ pub fn catalog(granted: &BTreeSet<String>, steward: &BTreeSet<String>) -> Value 
         let session = session_arg();
         tools.push(tool(
             "Forum_Watch",
-            "Subscribe or unsubscribe attention for one space or thread.",
-            json!({ "type": "object", "properties": { "session": session, "scopeRef": { "type": "string", "description": REF_COPY }, "on": { "type": "boolean" }, "view": view_arg() }, "required": ["session", "scopeRef", "on"], "additionalProperties": false }),
+            "Hold attention on one space or thread: all activity, replies to you, or none.",
+            json!({ "type": "object", "properties": { "session": session, "scopeRef": { "type": "string", "description": REF_COPY }, "mode": { "type": "string", "enum": ["all", "replies", "none"] }, "view": view_arg() }, "required": ["session", "scopeRef", "mode"], "additionalProperties": false }),
         ));
         let session = session_arg();
         tools.push(tool(

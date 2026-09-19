@@ -63,7 +63,7 @@ pub enum Operation {
         request_id: Option<String>,
         view: ViewMode,
     },
-    ForumWatch { session: String, scope_ref: String, on: bool, view: ViewMode },
+    ForumWatch { session: String, scope_ref: String, mode: WatchMode, view: ViewMode },
     ForumReadUser { session: String, user_ref: String },
     ForumOpenCase { session: String, thread_ref: String, subject_ref: String, reason: String, view: ViewMode },
 
@@ -117,6 +117,24 @@ impl CaseAction {
         match self {
             Self::Defer => "defer",
             Self::Escalate => "escalate",
+        }
+    }
+}
+
+/// The attention modes a watch can hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchMode {
+    All,
+    Replies,
+    None,
+}
+
+impl WatchMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Replies => "replies",
+            Self::None => "none",
         }
     }
 }
@@ -284,10 +302,13 @@ pub fn decode(tool: &str, arguments: &Value) -> Result<Operation, String> {
                 )
             })
     };
-    let on_flag = || -> Result<bool, String> {
-        field("on")?
-            .as_bool()
-            .ok_or_else(|| "argument 'on' must be true or false".to_string())
+    let watch_mode = || -> Result<WatchMode, String> {
+        match string("mode")?.as_str() {
+            "all" => Ok(WatchMode::All),
+            "replies" => Ok(WatchMode::Replies),
+            "none" => Ok(WatchMode::None),
+            other => Err(format!("argument 'mode' must be all, replies, or none — not '{other}'")),
+        }
     };
     let page = || -> Result<Option<u16>, String> {
         match arguments.get("page") {
@@ -385,7 +406,7 @@ pub fn decode(tool: &str, arguments: &Value) -> Result<Operation, String> {
             request_id: optional_request_id("requestId")?,
             view: view()?,
         }),
-        "Forum_Watch" => Ok(Operation::ForumWatch { session: string("session")?, scope_ref: string("scopeRef")?, on: on_flag()?, view: view()? }),
+        "Forum_Watch" => Ok(Operation::ForumWatch { session: string("session")?, scope_ref: string("scopeRef")?, mode: watch_mode()?, view: view()? }),
         "Forum_Read_User" => Ok(Operation::ForumReadUser { session: string("session")?, user_ref: string("userRef")? }),
         "Forum_Open_Case" => Ok(Operation::ForumOpenCase {
             session: string("session")?,

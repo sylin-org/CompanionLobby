@@ -1925,7 +1925,7 @@ impl ConnectorHub {
                     self.send_route(frame, Route::TopicReadPosition(thread.to_string()), &body)
                 })
             }
-            Operation::ForumWatch { session, scope_ref, on, view } => {
+            Operation::ForumWatch { session, scope_ref, mode, view } => {
                 self.with_context("Forum_Watch", &session, view, |frame| {
                     if refs::tangent_key(&frame.request.origin, &scope_ref).is_none()
                         && refs::topic_keys(&frame.request.origin, &scope_ref).is_none()
@@ -1933,7 +1933,7 @@ impl ConnectorHub {
                         return Err(invalid_ref("Thread or Space"));
                     }
                     let request_id = format!("watch-{}", crate::adapters::store::short_uuid());
-                    let body = json!({ "requestId": request_id, "scopeRef": scope_ref, "mode": if on { "on" } else { "off" } });
+                    let body = json!({ "requestId": request_id, "scopeRef": scope_ref, "mode": mode.as_str() });
                     self.send_route(frame, Route::Watches, &body)
                 })
             }
