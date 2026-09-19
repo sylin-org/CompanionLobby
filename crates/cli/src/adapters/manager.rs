@@ -38,7 +38,7 @@ use serde_json::{json, Value};
 
 use crate::adapters::lockfile::DataDirLock;
 use crate::adapters::tray;
-use crate::application::hub::ConnectorHub;
+use crate::application::hub::{BindOutcome, BindTarget, ConnectorHub};
 use companion_core::domain::events::DomainEvent;
 use companion_core::domain::companion::CallerId;
 use crate::{build_hub, data_directory};
@@ -83,6 +83,14 @@ pub const DEFAULT_PAGE_URL: &str = "http://127.0.0.1:5219/";
 pub use companion_core::traits::CONNECTOR_PRODUCT;
 /// The one bind provider this connector serves today.
 const BIND_PROVIDER_ATPROTO: &str = "atproto";
+
+/// How the page names each registered provider; presentation only.
+fn provider_label(id: &str) -> &str {
+    match id {
+        "atproto" => "Bluesky",
+        other => other,
+    }
+}
 
 /// The port the companion manager serves on: the `--port` flag wins, then
 /// `COMPANION_LOBBY_PORT`, then the fixed default. Port 0 is refused.
@@ -531,10 +539,28 @@ fn route(hub: &ConnectorHub, method: &str, target: &str, body: &RequestBody, roo
     let segments: Vec<&str> = path.trim_start_matches("/api/").split('/').filter(|segment| !segment.is_empty()).collect();
     match (method, segments.as_slice()) {
         ("GET", ["companions"]) => ApiResponse(200, ok_json(json!({ "companions": companion_list(hub) })), None),
-        ("POST", ["companions"]) => {
-            let handle = body.get("handle").and_then(Value::as_str).unwrap_or_default();
-            let display = body.get("displayName").and_then(Value::as_str);
-            finish(hub.create_companion(handle, display), |companion| ok_json(json!({ "companion": companion_json(&companion) })))
+        // Companion creation deliberately has no route here: companions are born from
+        // a completed sign-in (the /bind route), one credential each — the add screen
+        // shows the providers and nothing else.
+        ("GET", ["providers"]) => ApiResponse(200, ok_json(json!({
+            "providers": hub.auth_providers().into_iter().map(|id| json!({
+                "id": id,
+                "label": provider_label(&id),
+            })).collect::<Vec<_>>()
+        })), None),
+        ("GET", ["services"]) => ApiResponse(200, ok_json(json!({
+            "services": hub.service_catalog().into_iter().map(|class| json!({
+                "id": class.id, "label": class.label, "available": class.available,
+            })).collect::<Vec<_>>()
+        })), None),
+        ("POST", ["companions", local_id, "services"]) => {
+            let services: Option<Vec<String>> = body.get("services").and_then(|value| value.as_array()).map(|entries| {
+                entries.iter().filter_map(Value::as_str).map(str::to_string).collect()
+            });
+            let Some(services) = services else {
+                return ApiResponse(400, problem_json("bad_request", "services must be an array of service ids"), None);
+            };
+            finish(hub.set_companion_services(local_id, &services), |services| ok_json(json!({ "services": services })))
         }
         ("POST", ["companions", local_id]) => {
             let handle = body.get("handle").and_then(Value::as_str);
@@ -613,6 +639,21 @@ fn html_routes(hub: &ConnectorHub, method: &str, path: &str, query: &str, _body:
             ApiResponse(200, Value::String(manager_index()), None)
         }
         ("GET", ["index.html"]) => ApiResponse(200, Value::String(manager_index()), None),
+        // Sign-in as creation: the add screen's one provider entry. The companion is
+        // born from the completed sign-in — there is nothing to pick or name here.
+        ("GET", ["bind", "new", provider]) => {
+            if *provider != BIND_PROVIDER_ATPROTO {
+                return not_found_page(&format!(
+                    "Unknown bind provider '{provider}' — only '{}' lives here.",
+                    BIND_PROVIDER_ATPROTO
+                ));
+            }
+            let handle = bind_handle_hint(query);
+            match hub.begin_atproto_bind(BindTarget::New, handle.as_deref(), root_url) {
+                Ok(authorize_url) => ApiResponse(302, Value::String(String::new()), Some(authorize_url)),
+                Err(problem) => bind_problem_page(&problem, "/bind/new/atproto"),
+            }
+        }
         ("GET", ["bind", local_id, provider]) => {
             if *provider != BIND_PROVIDER_ATPROTO {
                 return not_found_page(&format!(
@@ -628,21 +669,33 @@ fn html_routes(hub: &ConnectorHub, method: &str, path: &str, query: &str, _body:
             // its own UI; the answer is the 302 to its authorize page. `?handle=` is
             // the self-hosted escape hatch — it runs the handle→DID→PDS→AS discovery
             // path first, then the same redirect.
-            let handle = parse_query(query)
-                .iter()
-                .find(|(name, _)| name == "handle")
-                .map(|(_, value)| value.trim().to_string())
-                .filter(|value| !value.is_empty());
-            match hub.begin_atproto_bind(local_id, handle.as_deref(), root_url) {
+            let handle = bind_handle_hint(query);
+            let retry = format!("/bind/{local_id}/{BIND_PROVIDER_ATPROTO}");
+            match hub.begin_atproto_bind(BindTarget::Existing(local_id.to_string()), handle.as_deref(), root_url) {
                 Ok(authorize_url) => ApiResponse(302, Value::String(String::new()), Some(authorize_url)),
-                Err(problem) => bind_problem_page(&problem, local_id),
+                Err(problem) => bind_problem_page(&problem, &retry),
             }
         }
         // No POST bind route exists: the bind is a navigation, and a cross-origin
-        // GET only ever starts a flow the operator sees at the provider. Form posts
-        // anywhere outside /api/'s JSON surface fall through to the honest 404.
+        // GET only ever starts a flow the operator sees at the provider. Bind-route
+        // mistakes stay honest 404s; every other POST outside /api/ does too.
+        ("POST", _) => not_found_page("only the companion manager, its bind route and /api/* live here"),
+        (_, ["bind", ..]) => not_found_page("only the companion manager, its bind route and /api/* live here"),
+        // The manager is a single-page app: every application state is a route, and
+        // any GET the server does not itself own serves the shell. The client router
+        // resolves (or honestly redirects from) the path.
+        ("GET", _) => ApiResponse(200, Value::String(manager_index()), None),
         _ => not_found_page("only the companion manager, its bind route and /api/* live here"),
     }
+}
+
+/// The `?handle=` self-hosted escape hatch, shared by both bind routes.
+fn bind_handle_hint(query: &str) -> Option<String> {
+    parse_query(query)
+        .iter()
+        .find(|(name, _)| name == "handle")
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// The loopback callback (redirect target of the bind flow): a provider error renders
@@ -654,16 +707,17 @@ fn bind_callback(hub: &ConnectorHub, parameters: &[(String, String)], root_url: 
     let parameter = |name: &str| parameters.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str());
     if let Some(error) = parameter("error") {
         let description = parameter("error_description").unwrap_or_default();
-        return bind_result_page(false, &format!("provider_refused: {error}: {description}"));
+        return bind_result_page_failed(&format!("provider_refused: {error}: {description}"));
     }
     let state = parameter("state").unwrap_or_default();
     let code = parameter("code").unwrap_or_default();
     if state.is_empty() {
-        return bind_result_page(false, "invalid_callback: the callback carried no state");
+        return bind_result_page_failed("invalid_callback: the callback carried no state");
     }
     match hub.complete_atproto_bind(state, code, parameter("iss"), root_url) {
-        Ok(handle) => bind_result_page(true, &handle),
-        Err(problem) => bind_result_page(false, &problem),
+        Ok(BindOutcome::Bound { handle, created, .. }) => bind_result_page(&handle, created),
+        Ok(BindOutcome::AlreadyCompanion { handle, .. }) => bind_already_page(&handle),
+        Err(problem) => bind_result_page_failed(&problem),
     }
 }
 
@@ -689,43 +743,69 @@ fn bind_skeleton(title: &str, body: &str) -> String {
 <main>{body}</main>{atmosphere}</body></html>"##)
 }
 
-/// The callback's result page: success names the bound handle and frees the tab; a
-/// failure names the failure code honestly.
-fn bind_result_page(success: bool, message: &str) -> ApiResponse {
-    let body = if success {
+/// The callback's success page: names the companion (created by this sign-in, or the
+/// one that just re-signed) and frees the tab.
+fn bind_result_page(handle: &str, created: bool) -> ApiResponse {
+    let escaped = html_escape(handle);
+    let title = if created { "Companion created" } else { "Account connected" };
+    let body = if created {
         format!(
-            "<p class=\"eyebrow\">A familiar face, ready to return</p><h1>You’re connected.</h1>\n\
-             <p class=\"account\">Signed in as <strong>{}</strong></p>\n\
-             <p class=\"muted\">Your companion’s account is ready. The connector remembers this sign-in for future visits and continues any waiting connection.</p>\n\
-             <a class=\"button\" href=\"/\">Back to your companions</a>\n\
-             <p class=\"muted\">You can also close this tab and return to your agent app.</p>\n",
-            html_escape(message)
+            "<p class=\"eyebrow\">A new face arrives</p><h1>{escaped} is here.</h1>\n\
+             <p class=\"muted\">This companion was created from your sign-in and named after your account. Rename it any time on its page.</p>\n\
+             <a class=\"button\" href=\"/companion/{escaped}\">Visit {escaped}’s page</a>\n\
+             <a class=\"muted\" href=\"/\">Back to your companions</a>\n\
+             <p class=\"muted\">You can also close this tab and return to your agent app.</p>\n"
         )
     } else {
         format!(
-            "<p class=\"eyebrow\">Let’s try that again</p><h1>Sign-in didn’t finish.</h1>\n\
-             <p class=\"muted\">We couldn’t connect your companion’s account. Return to the manager and choose Sign in to start again.</p>\n\
-             <a class=\"button\" href=\"/\">Back to your companions</a>\n\
-             <details><summary>What happened</summary><p class=\"error\">{}</p></details>\n",
-            html_escape(message)
+            "<p class=\"eyebrow\">A familiar face, ready to return</p><h1>You’re connected.</h1>\n\
+             <p class=\"account\">Signed in as <strong>{escaped}</strong></p>\n\
+             <p class=\"muted\">Your companion’s account is ready. The connector remembers this sign-in for future visits and continues any waiting connection.</p>\n\
+             <a class=\"button\" href=\"/companion/{escaped}\">Visit {escaped}’s page</a>\n\
+             <a class=\"muted\" href=\"/\">Back to your companions</a>\n\
+             <p class=\"muted\">You can also close this tab and return to your agent app.</p>\n"
         )
     };
-    ApiResponse(200, Value::String(bind_skeleton(if success { "Account connected" } else { "Sign-in didn’t finish" }, &body)), None)
+    ApiResponse(200, Value::String(bind_skeleton(title, &body)), None)
+}
+
+/// The friendly duplicate: the account already belongs to a companion, so the sign-in
+/// created nothing — the operator is routed to that companion instead.
+fn bind_already_page(handle: &str) -> ApiResponse {
+    let escaped = html_escape(handle);
+    let body = format!(
+        "<p class=\"eyebrow\">One account, one companion</p><h1>This account already has a companion.</h1>\n\
+         <p class=\"muted\">The account you signed in with belongs to <strong>{escaped}</strong>, so no new companion was created.</p>\n\
+         <a class=\"button\" href=\"/companion/{escaped}\">Go to {escaped}’s page</a>\n\
+         <a class=\"muted\" href=\"/\">Back to your companions</a>\n"
+    );
+    ApiResponse(200, Value::String(bind_skeleton("Already a companion", &body)), None)
+}
+
+/// The callback's failure page: names the failure code honestly.
+fn bind_result_page_failed(problem: &str) -> ApiResponse {
+    let body = format!(
+        "<p class=\"eyebrow\">Let’s try that again</p><h1>Sign-in didn’t finish.</h1>\n\
+         <p class=\"muted\">We couldn’t connect your companion’s account. Return to the manager and choose Sign in to start again.</p>\n\
+         <a class=\"button\" href=\"/\">Back to your companions</a>\n\
+         <details><summary>What happened</summary><p class=\"error\">{}</p></details>\n",
+        html_escape(problem)
+    );
+    ApiResponse(200, Value::String(bind_skeleton("Sign-in didn’t finish", &body)), None)
 }
 
 /// A bind that could not even start (default authorization server unreachable,
 /// discovery failure on the `?handle=` path, PAR refusal): the operator sees the
 /// honest reason with a way back to retry.
-fn bind_problem_page(problem: &str, local_id: &str) -> ApiResponse {
+fn bind_problem_page(problem: &str, retry_path: &str) -> ApiResponse {
     let body = format!(
         "<p class=\"eyebrow\">A little interruption</p><h1>We couldn’t open sign-in.</h1>\n\
          <p class=\"muted\">The account connection couldn’t be started. Try again, or return to your companions.</p>\n\
          <details><summary>What happened</summary><p class=\"error\">{}</p></details>\n\
-         <p><a class=\"button\" href=\"/bind/{}/{}\">Try again</a></p><p class=\"muted\"><a href=\"/\">Back to your companions</a></p>\n\
+         <p><a class=\"button\" href=\"{}\">Try again</a></p><p class=\"muted\"><a href=\"/\">Back to your companions</a></p>\n\
          <details><summary>Using another account provider?</summary><p class=\"muted\">Add <code>?handle=your.handle</code> to the sign-in address. The connector will use that handle to find your provider.</p></details>\n",
         html_escape(problem),
-        html_escape(local_id),
-        BIND_PROVIDER_ATPROTO
+        html_escape(retry_path)
     );
     ApiResponse(200, Value::String(bind_skeleton("Sign-in unavailable", &body)), None)
 }
@@ -792,18 +872,28 @@ fn companion_list(hub: &ConnectorHub) -> Vec<Value> {
     // froze the entire hub (store held forever): every Connect, every operator
     // mutation, the page itself. Never re-enter the store from under a store guard.
     let inventory = hub.companion_inventory();
-    let availability: std::collections::HashMap<String, bool> = hub
-        .enrollment_inventory()
-        .into_iter()
-        .map(|(entry, available)| (entry.local_id.clone(), available))
-        .collect();
+    // One batched read for every enrollment too: the page fetches companions once and
+    // renders places from the same payload — never one request per companion.
+    let mut enrollments: std::collections::HashMap<String, Vec<Value>> = std::collections::HashMap::new();
+    for (entry, available) in hub.enrollment_inventory() {
+        enrollments
+            .entry(entry.local_id.clone())
+            .or_default()
+            .push(enrollment_json(&entry, available));
+    }
     inventory
         .into_iter()
         .map(|(companion, atproto, count)| {
             let local_id = companion.local_id.clone();
             let mut value = companion_with_atproto(&companion, atproto);
             value["enrollmentCount"] = json!(count);
-            value["sessionsAvailable"] = json!(availability.get(&local_id).copied().unwrap_or(true));
+            // Every one of this companion's enrollment sessions is stored (vacuously
+            // true with none — nothing is waiting on a reconnect).
+            value["sessionsAvailable"] = json!(enrollments
+                .get(&local_id)
+                .map(|list| list.iter().all(|entry| entry["sessionStatus"] == "stored"))
+                .unwrap_or(true));
+            value["enrollments"] = json!(enrollments.get(&local_id).cloned().unwrap_or_default());
             value
         })
         .collect()
@@ -833,6 +923,7 @@ fn companion_with_atproto(
             "handle": binding.handle,
             "pds": binding.pds,
             "obtainedAt": binding.obtained_at,
+            "services": binding.services,
         }),
         None => Value::Null,
     };

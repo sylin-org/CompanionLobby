@@ -102,7 +102,6 @@ fn the_stdio_edge_negotiates_and_serves_the_fourteen_tools() {
     // bound_journey's subject, and this test is about the stdio edge.
     common::seed_enrolled_state(&home, "lumen", server.origin(), LUMEN_CREDENTIAL);
 
-    // The MCP intake: the real stdio transport.
     let mut peer = Peer::spawn(&["serve"], &home);
     peer.send(&json!({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -335,11 +334,16 @@ fn serve_mode_hosts_the_operator_page_with_a_clean_url_and_pure_stdout() {
 /// whole hub: the second Connect and every operator mutation hung.
 #[test]
 fn serve_mode_survives_a_looping_connect_and_operator_mutations_together() {
+    const SEED_LOCAL_ID: &str = "017f017f017f017f017f017f017f017f";
     let server = FakeServer::start();
     let home = std::env::temp_dir().join(format!("companion-lobby-looping-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).expect("temp dir");
 
+    // Companions are born from sign-in; this journey seeds one straight into the
+    // durable state — the shape a completed sign-in leaves behind, minus the binding.
+    let seed = json!({ "companions": [{ "local_id": SEED_LOCAL_ID, "handle": "ox_omega", "display_name": null, "bound_did": null, "created_at": 1 }] });
+    std::fs::write(home.join("state.json"), seed.to_string()).expect("seed state");
     let mut peer = Peer::spawn(&["serve"], &home);
     // The startup URL and its note are the only stderr lines.
     let mut manager_url = None;
@@ -375,14 +379,6 @@ fn serve_mode_survives_a_looping_connect_and_operator_mutations_together() {
             .map(|_| String::from_utf8_lossy(&raw).to_string())
             .map_err(|_| "no answer within 5s — the operator API is frozen".to_string())
     };
-    let create_body = json!({ "handle": "ox_omega", "displayName": null }).to_string();
-    let created = http(&format!(
-        "POST /api/companions HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{create_body}",
-        create_body.len()
-    ))
-    .expect("companion creation answered");
-    assert!(created.contains("\"status\":\"ok\""), "create was: {created}");
-    assert!(created.contains("ox_omega"), "create was: {created}");
 
     // Connect #1: waiting for the operator — the honest blocked return, page popped.
     peer.send(&json!({
@@ -416,11 +412,12 @@ fn serve_mode_survives_a_looping_connect_and_operator_mutations_together() {
     }
 
     // The operator's mutation during the pending connect still answers.
-    let mutate_body = json!({ "handle": "ox_second", "displayName": null }).to_string();
+    let mutate_body = json!({ "displayName": "Ox Omega" }).to_string();
     let mutated = http(&format!(
-        "POST /api/companions HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{mutate_body}",
+        "POST /api/companions/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{mutate_body}",
+        SEED_LOCAL_ID,
         mutate_body.len()
     ))
-    .expect("manager.create_companion answered during the pending connect");
+    .expect("the operator mutation answered during the pending connect");
     assert!(mutated.contains("\"status\":\"ok\""), "mutation was: {mutated}");
 }

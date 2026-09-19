@@ -147,6 +147,47 @@ impl StateStore {
         self.state.atproto_sessions.remove(local_id);
     }
 
+    /// The companion a given account DID is bound to, if any. The DID is the join key
+    /// of the 1:1 companion-credential rule: one account can belong to exactly one
+    /// companion.
+    pub fn companion_by_bound_did(&self, did: &str) -> Option<Companion> {
+        self.state.companions.iter().find(|companion| companion.bound_did.as_deref() == Some(did)).cloned()
+    }
+
+    /// The service classes this companion's credential may establish sessions for.
+    /// `None` when no credential is held.
+    pub fn granted_services(&self, local_id: &str) -> Option<Vec<String>> {
+        self.state.atproto_sessions.get(local_id).map(|session| session.services.clone())
+    }
+
+    /// Replaces the credential's service grants (validation is the hub's; the store stores).
+    pub fn set_granted_services(&mut self, local_id: &str, services: Vec<String>) {
+        if let Some(session) = self.state.atproto_sessions.get_mut(local_id) {
+            session.services = services;
+        }
+    }
+
+    /// Drops every stored enrollment session of this companion — the flush half of
+    /// unbinding: the credential is gone, so every session it established stops being
+    /// usable immediately. The enrollment records stay as places-visited memories; their
+    /// sessions read as missing until a re-bind connects again.
+    pub fn flush_enrollment_sessions(&mut self, local_id: &str) -> usize {
+        let ids: Vec<String> = self
+            .state
+            .enrollments
+            .iter()
+            .filter(|entry| entry.local_id == local_id)
+            .map(|entry| entry.enrollment_id.clone())
+            .collect();
+        let mut flushed = 0;
+        for id in ids {
+            if self.state.sessions.remove(&id).is_some() {
+                flushed += 1;
+            }
+        }
+        flushed
+    }
+
     pub fn policy(&self) -> AttentionPolicy {
         self.state.policy.clone().unwrap_or_default()
     }

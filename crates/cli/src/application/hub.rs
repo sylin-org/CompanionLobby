@@ -44,12 +44,30 @@ pub const PENDING_CONNECT_TIMEOUT_MS: i64 = 10 * 60 * 1000;
 /// one DPoP key and one pushed request; an operator drives at most a few tabs.
 const BIND_FLIGHT_LIMIT: usize = 8;
 
+/// What a started sign-in will bind to: an existing companion (a re-bind), or a new
+/// companion that is born from the sign-in itself — companions only ever come into
+/// existence through a completed sign-in, one credential each.
+#[derive(Clone)]
+pub enum BindTarget {
+    Existing(String),
+    New,
+}
+
 /// One started, not-yet-completed OAuth bind (in memory only — live coordination
 /// state, like a pending connect). Keyed by its OAuth `state`; single use.
 struct BindFlight {
-    local_id: String,
+    target: BindTarget,
     created_at: i64,
     start: BindStart,
+}
+
+/// What a completed sign-in left behind, for the page to narrate honestly.
+pub enum BindOutcome {
+    /// The credential is bound; `created` says whether the companion was born with it.
+    Bound { local_id: String, handle: String, created: bool },
+    /// The account already belongs to another companion — nothing changed. The page
+    /// routes the operator to that companion instead.
+    AlreadyCompanion { local_id: String, handle: String },
 }
 /// Age-out scan cadence: one shared sweeper thread wakes at this period and drops
 /// expired pendings, so a looping model's repeated Connects (each refreshing the
@@ -81,6 +99,15 @@ pub struct AtprotoBinding {
     pub handle: String,
     pub pds: String,
     pub obtained_at: i64,
+    /// The service classes this credential may establish sessions for.
+    pub services: Vec<String>,
+}
+
+/// One service class in the connector's catalog.
+pub struct ServiceClass {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub available: bool,
 }
 
 impl ToolOutcome {
@@ -325,7 +352,7 @@ impl ConnectorHub {
         let pending = self.pending_bind.lock().ok().and_then(|slot| slot.clone());
         let anchor = match pending.as_deref() {
             Some(local_id) => bind_anchor(local_id),
-            None => "#create-companion".to_string(),
+            None => "add".to_string(),
         };
         Some(registration_target(&page, &anchor))
     }
@@ -384,8 +411,11 @@ impl ConnectorHub {
         Ok(updated)
     }
 
-    /// Clears one companion's atproto session and `bound_did`. Existing enrollments and
-    /// their Tangent sessions are untouched — those are per enrollment, not per binding.
+    /// Disconnects the companion's credential — and with it, immediately, every session
+    /// that credential established: the binding is cleared and all of the companion's
+    /// stored enrollment sessions are flushed, so the very next request that needs one
+    /// fails honestly instead of limping on issued tokens. The enrollment records stay
+    /// as places-visited memories; a re-bind connects to them again.
     pub fn unbind_atproto(&self, local_id: &str) -> Result<companion_core::domain::companion::Companion, String> {
         self.attributed("manager.unbind_atproto", || {
             let mut store = self.lock_store()?;
@@ -393,6 +423,7 @@ impl ConnectorHub {
             companion.bound_did = None;
             store.upsert_companion(companion.clone())?;
             store.remove_atproto_session(local_id);
+            store.flush_enrollment_sessions(local_id);
             store.save()?;
             Ok(companion)
         })
@@ -412,9 +443,9 @@ impl ConnectorHub {
     /// for the same companion replaces its in-flight one; different companions bind
     /// concurrently. All network I/O happens outside every guard. A flight
     /// that cannot be parked is an honest failure — never a dangling redirect.
-    pub fn begin_atproto_bind(&self, local_id: &str, handle: Option<&str>, redirect_uri: &str) -> Result<String, String> {
+    pub fn begin_atproto_bind(&self, target: BindTarget, handle: Option<&str>, redirect_uri: &str) -> Result<String, String> {
         self.attributed("manager.atproto_bind_start", || {
-            {
+            if let BindTarget::Existing(local_id) = &target {
                 let store = self.lock_store()?;
                 store.companion(local_id).ok_or_else(|| "no local companion matches that id".to_string())?;
             }
@@ -426,10 +457,13 @@ impl ConnectorHub {
                 .map_err(|_| "bind_unparkable: the connector's bind state is unavailable; restart the connector and try again".to_string())?;
             let now = now_millis();
             let ttl = self.bind_flight_ttl_ms.load(Ordering::Relaxed);
-            // Age out, then keep one bind at a time per companion.
+            // Age out, then keep one bind at a time per existing companion (new-companion
+            // sign-ins are keyed by their own state and may run alongside each other).
             flights.retain(|flight| now.saturating_sub(flight.created_at) < ttl);
-            flights.retain(|flight| flight.local_id != local_id);
-            flights.push(BindFlight { local_id: local_id.to_string(), created_at: now, start });
+            if let BindTarget::Existing(local_id) = &target {
+                flights.retain(|flight| !matches!(&flight.target, BindTarget::Existing(id) if id == local_id));
+            }
+            flights.push(BindFlight { target, created_at: now, start });
             while flights.len() > BIND_FLIGHT_LIMIT {
                 flights.remove(0);
             }
@@ -447,8 +481,7 @@ impl ConnectorHub {
     /// DPoP key included, cookie-jar posture — is stored, any pending sign-in routing
     /// is cleared, and every waiting-for-operator connect for this companion resumes:
     /// the handshake finishes connector-side, with no model involved.
-    pub fn complete_atproto_bind(&self, state: &str, code: &str, issuer: Option<&str>, redirect_uri: &str) -> Result<String, String> {
-        let mut bound_local: Option<String> = None;
+    pub fn complete_atproto_bind(&self, state: &str, code: &str, issuer: Option<&str>, redirect_uri: &str) -> Result<BindOutcome, String> {
         let outcome = self.attributed("manager.bind_account", || {
             // The issuer comes first (RFC 9207): without `iss` the callback does not
             // even name which authorization server answered, so nothing else is
@@ -500,29 +533,66 @@ impl ConnectorHub {
             // The bound label: the DID document's canonical handle when one is known,
             // else the DID itself (honest, never a guess).
             let handle = discovered_handle.unwrap_or_else(|| tokens.sub.clone());
-            let local_id = flight.local_id.clone();
-            self.store_atproto_session(
-                &local_id,
-                AccountSession {
-                    did: tokens.sub.clone(),
-                    handle: handle.clone(),
-                    access_jwt: tokens.access_token,
-                    refresh_jwt: tokens.refresh_token,
-                    pds,
-                    authserver: Some(flight.start.authserver.clone()),
-                    client_id: Some(flight.start.client_id.clone()),
-                    dpop_key: Some(flight.start.dpop_key.clone()),
-                    obtained_at: now_millis(),
-                },
-            )?;
-            bound_local = Some(local_id);
-            Ok(handle)
-        });
-        if outcome.is_ok() {
-            if let Some(local_id) = bound_local {
-                self.clear_pending_bind(&local_id);
-                self.resume_pending_connects(&local_id);
+            // The 1:1 rule turns on the account's DID: one credential, one companion.
+            let (owner, previous_grants) = {
+                let store = self.lock_store()?;
+                let owner = store.companion_by_bound_did(&tokens.sub);
+                let grants = match (&flight.target, &owner) {
+                    (BindTarget::Existing(id), None) => store.granted_services(id),
+                    (BindTarget::Existing(id), Some(owner)) if owner.local_id == *id => store.granted_services(id),
+                    _ => None,
+                };
+                (owner, grants)
+            };
+            if let Some(owner) = owner.filter(|owner| !matches!(&flight.target, BindTarget::Existing(id) if *id == owner.local_id)) {
+                // The account already lives on another companion; nothing changes.
+                return Ok(BindOutcome::AlreadyCompanion { local_id: owner.local_id.clone(), handle: owner.handle.clone() });
             }
+            // One credential, one session — only its grants differ: a fresh companion
+            // starts with the default grant, a re-bind carries the operator's existing
+            // grants forward. The session records the ACCOUNT's handle; the companion's
+            // own handle is presentation and may be renamed freely.
+            let session = AccountSession {
+                did: tokens.sub.clone(),
+                handle: handle.clone(),
+                access_jwt: tokens.access_token,
+                refresh_jwt: tokens.refresh_token,
+                pds,
+                authserver: Some(flight.start.authserver.clone()),
+                client_id: Some(flight.start.client_id.clone()),
+                dpop_key: Some(flight.start.dpop_key.clone()),
+                services: previous_grants.unwrap_or_else(|| vec!["tangent".to_string()]),
+                obtained_at: now_millis(),
+            };
+            match flight.target {
+                BindTarget::Existing(local_id) => {
+                    self.store_atproto_session(&local_id, session)?;
+                    Ok(BindOutcome::Bound { local_id, handle, created: false })
+                }
+                BindTarget::New => {
+                    // Sign-in as creation: the companion is born already bound, its
+                    // handle defaulting to the account's own (a unique, valid fallback
+                    // when that is taken or unusable). Moniker and display name are
+                    // the operator's to change later.
+                    let mut store = self.lock_store()?;
+                    let companion = Companion {
+                        local_id: crate::adapters::store::new_local_id(),
+                        handle: fresh_handle(&store, &handle),
+                        display_name: None,
+                        bound_did: Some(session.did.clone()),
+                        created_at: now_millis(),
+                    };
+                    let (local_id, companion_handle) = (companion.local_id.clone(), companion.handle.clone());
+                    store.upsert_companion(companion)?;
+                    store.set_atproto_session(&local_id, session);
+                    store.save()?;
+                    Ok(BindOutcome::Bound { local_id, handle: companion_handle, created: true })
+                }
+            }
+        });
+        if let Ok(BindOutcome::Bound { local_id, .. }) = &outcome {
+            self.clear_pending_bind(local_id);
+            self.resume_pending_connects(local_id);
         }
         outcome
     }
@@ -615,6 +685,52 @@ impl ConnectorHub {
             handle: session.handle,
             pds: session.pds,
             obtained_at: session.obtained_at,
+            services: session.services,
+        })
+    }
+
+    /// The authentication providers this connector can sign in with, straight from the
+    /// registry — the add screen's entire content.
+    pub fn auth_providers(&self) -> Vec<String> {
+        self.auths.read().map(|auths| auths.keys().cloned().collect()).unwrap_or_default()
+    }
+
+    /// The service classes the connector knows, and whether each is actually wired in
+    /// this process — the single source for the page's access list. A known class that
+    /// is not installed is listed honestly as unavailable, never hidden.
+    pub fn service_catalog(&self) -> Vec<ServiceClass> {
+        let installed = |name: &str| self.services.read().map(|registry| registry.contains_key(name)).unwrap_or(false);
+        vec![
+            ServiceClass { id: "tangent", label: "Tangent servers", available: installed("tangent") },
+            ServiceClass { id: "bluesky", label: "Bluesky", available: installed("bluesky") },
+        ]
+    }
+
+    /// Replaces the credential's service grants: which service classes may establish
+    /// sessions with this companion's credential. Only existing, available services
+    /// can be granted; a companion without a credential has nothing to grant.
+    pub fn set_companion_services(&self, local_id: &str, services: &[String]) -> Result<Vec<String>, String> {
+        self.attributed("manager.set_services", || {
+            let catalog = self.service_catalog();
+            for service in services {
+                let Some(class) = catalog.iter().find(|class| class.id == *service) else {
+                    return Err(format!("unknown_service: no '{service}' service exists in this connector"));
+                };
+                if !class.available {
+                    return Err(format!(
+                        "service_unavailable: the '{}' service is not available in this connector yet",
+                        class.id
+                    ));
+                }
+            }
+            let mut store = self.lock_store()?;
+            store.companion(local_id).ok_or_else(|| "no local companion matches that id".to_string())?;
+            if store.granted_services(local_id).is_none() {
+                return Err("no_credential: this companion holds no account sign-in; allow services after connecting one".to_string());
+            }
+            store.set_granted_services(local_id, services.to_vec());
+            store.save()?;
+            Ok(services.to_vec())
         })
     }
 
@@ -630,6 +746,7 @@ impl ConnectorHub {
             .iter()
             .map(|companion| {
                 let binding = store.atproto_session(&companion.local_id).map(|session| AtprotoBinding {
+                    services: session.services,
                     did: session.did,
                     handle: session.handle,
                     pds: session.pds,
@@ -677,14 +794,26 @@ impl ConnectorHub {
         self.attributed("manager.enroll_bound", || {
             let canonical = refs::acceptable_origin(origin)
                 .ok_or_else(|| "Use one HTTPS server origin, or explicit loopback HTTP for development".to_string())?;
-            let (companion, atproto, already) = {
+            let (companion, atproto, live) = {
                 let store = self.lock_store()?;
                 let companion = store.companion(local_id).ok_or_else(|| "no local companion matches that id".to_string())?;
+                // The per-credential grant gates session establishment: a held
+                // credential without the grant never mints a session identifier for
+                // this service at all. No credential yet is a different honest answer —
+                // the waiting-for-operator flow, checked further below.
+                if let Some(services) = store.granted_services(local_id) {
+                    if !services.iter().any(|service| service == "tangent") {
+                        return Err("service_not_allowed: the Tangent service is not allowed for this companion's credential; the operator can allow it on the companion's page".to_string());
+                    }
+                }
                 let atproto = store.atproto_session(local_id);
-                let already = store.enrollment_at(local_id, &canonical).is_some();
-                (companion, atproto, already)
+                // An existing record with a live session is the honest refusal; one whose
+                // session was flushed (a disconnect) is a place to connect to again, and
+                // it stays until a fresh exchange actually replaces it.
+                let live = store.enrollment_at(local_id, &canonical).is_some_and(|entry| store.session(&entry.enrollment_id).is_some());
+                (companion, atproto, live)
             };
-            if already {
+            if live {
                 return Err(
                     "already_enrolled: this companion already holds a session for that server. Use the existing enrollment, or forget it first to re-enroll."
                         .to_string(),
@@ -759,12 +888,16 @@ impl ConnectorHub {
             // Re-check under the write lock: a concurrent intake may have enrolled this
             // (companion, origin) while the exchange was in flight. The freshly issued
             // session is then discarded server-side untouched, and the honest answer is
-            // already_enrolled with the existing enrollment intact.
+            // already_enrolled with the existing enrollment intact. A record whose
+            // session was flushed (a disconnect) is replaced, not protected.
             if let Some(existing) = store.enrollment_at(local_id, &canonical) {
-                return Err(format!(
-                    "already_enrolled: companion '{}' gained an enrollment at {canonical} during the exchange ({}); use it, or forget it first to re-enroll",
-                    companion.handle, existing.enrollment_id
-                ));
+                if store.session(&existing.enrollment_id).is_some() {
+                    return Err(format!(
+                        "already_enrolled: companion '{}' gained an enrollment at {canonical} during the exchange ({}); use it, or forget it first to re-enroll",
+                        companion.handle, existing.enrollment_id
+                    ));
+                }
+                store.remove_enrollment(&existing.enrollment_id);
             }
             // The Tangent session is stored per enrollment, keyed by its fresh companion
             // id — one companion at two servers keeps two distinct sessions, and the
@@ -2357,37 +2490,29 @@ fn project_server_card(origin: &str, raw: &Value, refreshed_at: i64) -> Option<S
     })
 }
 
-#[cfg(test)]
-mod server_card_checks {
-    use super::*;
-
-    #[test]
-    fn server_card_keeps_enrolled_origin_and_rejects_unsafe_art() {
-        let origin = "https://garage.example";
-        let mut profile = json!({
-            "name": "Leo's Garage", "welcomeMessage": "A place to make things.",
-            "coverImageUrl": "/art/garage.png", "origin": "https://unrelated.example"
-        });
-        let card = project_server_card(origin, &profile, 42).unwrap();
-        assert_eq!(card.origin, origin);
-        assert_eq!(card.cover_image_url, "https://garage.example/art/garage.png");
-        assert_eq!(card.description, "A place to make things.");
-        assert_eq!(project_server_card("http://127.0.0.1:5220", &profile, 42).unwrap().cover_image_url,
-            "http://127.0.0.1:5220/art/garage.png");
-        for image in ["//unrelated.example/art.png", "javascript:alert(1)", "https://user:pass@example.com/art.png", "/\\unrelated.example/art.png"] {
-            profile["coverImageUrl"] = json!(image);
-            assert!(project_server_card(origin, &profile, 42).unwrap().cover_image_url.is_empty());
-        }
-        assert!(project_server_card(origin, &json!({"status":"ok"}), 42).is_none());
-    }
-}
-
 /// The browser target of one operator-page anchor. Pure construction, so tests can
 /// assert the URL without opening anything. The anchor
 /// carries its own sigil: `#create-companion` (a fragment) or `bind/{localId}/atproto`
 /// (the connector-served bind route, a path).
 pub fn registration_target(page_url: &str, anchor: &str) -> String {
     format!("{page_url}{anchor}")
+}
+
+/// A companion handle derived from an authenticated handle: the account's own when it
+/// is valid and free, then numbered fallbacks, then a minted name. Presentation only —
+/// the credential's DID is the identity, so any of these is honest.
+fn fresh_handle(store: &StateStore, authenticated: &str) -> String {
+    let base = authenticated.trim().trim_start_matches('@');
+    if valid_handle(base) && store.companion_by_handle(base).is_none() {
+        return base.to_string();
+    }
+    for attempt in 2..50u32 {
+        let candidate = format!("{base}-{attempt}");
+        if valid_handle(&candidate) && store.companion_by_handle(&candidate).is_none() {
+            return candidate;
+        }
+    }
+    format!("companion-{}", crate::adapters::store::short_uuid())
 }
 
 /// The per-companion sign-in target on the companion manager: the connector-served
@@ -2538,4 +2663,29 @@ fn encode(value: &str) -> String {
 fn truncate_reference(reference: &str) -> String {
     let tail = reference.rsplit("::").next().unwrap_or(reference);
     tail.chars().take(12).collect()
+}
+
+#[cfg(test)]
+mod server_card_checks {
+    use super::*;
+
+    #[test]
+    fn server_card_keeps_enrolled_origin_and_rejects_unsafe_art() {
+        let origin = "https://garage.example";
+        let mut profile = json!({
+            "name": "Leo's Garage", "welcomeMessage": "A place to make things.",
+            "coverImageUrl": "/art/garage.png", "origin": "https://unrelated.example"
+        });
+        let card = project_server_card(origin, &profile, 42).unwrap();
+        assert_eq!(card.origin, origin);
+        assert_eq!(card.cover_image_url, "https://garage.example/art/garage.png");
+        assert_eq!(card.description, "A place to make things.");
+        assert_eq!(project_server_card("http://127.0.0.1:5220", &profile, 42).unwrap().cover_image_url,
+            "http://127.0.0.1:5220/art/garage.png");
+        for image in ["//unrelated.example/art.png", "javascript:alert(1)", "https://user:pass@example.com/art.png", "/\\unrelated.example/art.png"] {
+            profile["coverImageUrl"] = json!(image);
+            assert!(project_server_card(origin, &profile, 42).unwrap().cover_image_url.is_empty());
+        }
+        assert!(project_server_card(origin, &json!({"status":"ok"}), 42).is_none());
+    }
 }

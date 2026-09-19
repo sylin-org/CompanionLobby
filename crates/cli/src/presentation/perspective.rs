@@ -172,7 +172,7 @@ pub fn result_summary(experience: &ExperienceDto, alias: &dyn Fn(&str) -> String
             if let Some(receipt) = &experience.result.receipt {
                 match receipt.state.as_str() {
                     "completed" => {
-                        let reference = receipt.result_ref.as_deref().map(|value| alias(value)).unwrap_or_default();
+                        let reference = receipt.result_ref.as_deref().map(alias).unwrap_or_default();
                         lines.push(format!("Your Post was accepted ({reference}). Request {}.", receipt.request_id));
                     }
                     "rejected" => lines.push(format!("The source rejected your Post. Request {} is inspectable.", receipt.request_id)),
@@ -186,7 +186,7 @@ pub fn result_summary(experience: &ExperienceDto, alias: &dyn Fn(&str) -> String
                 .data
                 .get("throughPostRef")
                 .and_then(|value| value.as_str())
-                .map(|value| alias(value))
+                .map(alias)
                 .unwrap_or_else(|| "the newest Post".to_string());
             lines.push(format!("Read acknowledged through {through}."));
         }

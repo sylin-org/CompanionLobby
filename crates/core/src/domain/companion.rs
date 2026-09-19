@@ -129,8 +129,21 @@ pub struct AccountSession {
     /// for the refresh request.
     #[serde(default)]
     pub dpop_key: Option<String>,
+    /// The service classes this credential may establish sessions for (the operator's
+    /// per-credential grant). Agents never see credentials — only session identifiers —
+    /// and discover this boundary only when a connect is honestly refused. Grants gate
+    /// establishment only, never mid-session use. Older state without the field grants
+    /// the Tangent service.
+    #[serde(default = "default_services")]
+    pub services: Vec<String>,
     /// Epoch milliseconds of the sign-in that produced this session.
     pub obtained_at: i64,
+}
+
+/// The grant a credential carries when the operator has not chosen one: the Tangent
+/// service, which is the connector's reason to exist.
+fn default_services() -> Vec<String> {
+    vec!["tangent".to_string()]
 }
 
 /// Redacted by hand: a derived Debug would print the access token, refresh token
@@ -148,6 +161,7 @@ impl std::fmt::Debug for AccountSession {
             .field("authserver", &self.authserver)
             .field("client_id", &self.client_id)
             .field("dpop_key", &self.dpop_key.as_ref().map(|_| "[redacted]"))
+            .field("services", &self.services)
             .field("obtained_at", &self.obtained_at)
             .finish()
     }

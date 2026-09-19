@@ -470,3 +470,76 @@ fn an_in_use_port_is_a_refusal_naming_the_holder() {
     // With the port free again, the same call binds.
     assert!(manager::bind_listener(&dir, manager::DEFAULT_PORT).is_ok(), "the fixed port binds once free");
 }
+
+// ---------- the 1:1 model: sign-in as creation, duplicates, re-binds ----------
+
+/// The add screen's one flow: a companion is BORN from the sign-in, named after the
+/// account, granted the Tangent service by default. No bare creation exists anywhere.
+#[test]
+fn a_new_signin_creates_the_companion_named_after_the_account() {
+    let server = FakeServer::start();
+    server.add_account("nova.bsky.example", "unused-password", "did:plc:nova");
+    let (hub, _dir, _page, address) = operator_workspace("creation", &server);
+    assert!(hub.companions().is_empty(), "nothing exists before any sign-in");
+
+    // The add route starts the same dance with no companion to name.
+    let callback = start_bind(address, &server, "new", None);
+    let callback_path = callback.strip_prefix(&format!("http://{address}")).unwrap_or(&callback);
+    let page = get(address, callback_path);
+    assert!(page.starts_with("HTTP/1.1 200"), "the callback answers: {page}");
+    assert!(page.contains("nova.bsky.example is here."), "creation is named: {page}");
+
+    let companions = hub.companions();
+    assert_eq!(companions.len(), 1, "exactly one companion was born");
+    assert_eq!(companions[0].handle, "nova.bsky.example", "the account's handle is the companion's name");
+    assert_eq!(companions[0].bound_did.as_deref(), Some("did:plc:nova"));
+    let session = hub.store().lock().unwrap().atproto_session(&companions[0].local_id).expect("the credential rode in with the companion");
+    assert_eq!(session.did, "did:plc:nova");
+    assert_eq!(session.services, vec!["tangent".to_string()], "a fresh credential grants the Tangent service");
+}
+
+/// One account, one companion: a repeat sign-in creates nothing and routes the
+/// operator to the companion that already holds the account.
+#[test]
+fn a_duplicate_signin_routes_to_the_existing_companion() {
+    let server = FakeServer::start();
+    server.add_account("lumen.bsky.example", "unused-password", "did:plc:lumen");
+    let (hub, _dir, _page, address) = operator_workspace("duplicate", &server);
+    let companion = hub.create_companion("lumen", None).expect("companion");
+    drive_bind(address, &server, &companion.local_id, None);
+
+    // The same account walks the add flow again.
+    let callback = start_bind(address, &server, "new", None);
+    let callback_path = callback.strip_prefix(&format!("http://{address}")).unwrap_or(&callback);
+    let page = get(address, callback_path);
+    assert!(page.contains("This account already has a companion."), "the duplicate is friendly: {page}");
+    assert!(page.contains("href=\"/companion/lumen\""), "the page routes to the companion: {page}");
+    assert_eq!(hub.companions().len(), 1, "no second companion appeared");
+    assert_eq!(hub.companions()[0].handle, "lumen", "the existing companion is untouched");
+}
+
+/// A re-bind replaces the credential and carries the operator's service grants
+/// forward — renewing access never silently widens or narrows it.
+#[test]
+fn a_rebind_replaces_the_session_and_carries_the_grants() {
+    let server = FakeServer::start();
+    server.add_account("lumen.bsky.example", "unused-password", "did:plc:lumen");
+    let (hub, _dir, _page, address) = operator_workspace("rebind", &server);
+    let companion = hub.create_companion("lumen", None).expect("companion");
+    drive_bind(address, &server, &companion.local_id, None);
+    hub.set_companion_services(&companion.local_id, &[]).expect("withdraw the Tangent grant");
+    // The fake mints deterministic tokens, so replacement is proven by poisoning the
+    // stored session: a re-bind that kept it would leave the poison in place.
+    {
+        let mut store = hub.store().lock().unwrap();
+        let mut stale = store.atproto_session(&companion.local_id).expect("first session");
+        stale.access_jwt = "stale".to_string();
+        store.set_atproto_session(&companion.local_id, stale);
+    }
+
+    drive_bind(address, &server, &companion.local_id, None);
+    let second = hub.store().lock().unwrap().atproto_session(&companion.local_id).expect("re-bound session");
+    assert_ne!(second.access_jwt, "stale", "the re-bind replaced the poisoned session");
+    assert!(second.services.is_empty(), "the operator's grants carried forward");
+    assert_eq!(hub.companions().len(), 1, "a re-bind creates nothing");
+}

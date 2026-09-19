@@ -299,18 +299,34 @@ fn the_operator_api_answers_plainly_and_the_ceremony_routes_are_gone() {
     assert!(head.starts_with("HTTP/1.1 200"), "head was: {head}");
     assert!(body.contains("\"status\":\"ok\""), "body was: {body}");
 
-    // A mutation works plainly: creating an companion through the API.
+    // Companion creation is sign-in only: the bare creation route is gone with the
+    // rest of the ceremony, and answers an honest 404.
     let mut via_post = TcpStream::connect(address).expect("connect");
-    let payload = json!({ "handle": "lumen", "displayName": "Lumen" }).to_string();
-    let (head, body) = http_round_trip(
+    let payload = json!({ "handle": "lumen" }).to_string();
+    let (head, _) = http_round_trip(
         &mut via_post,
         &format!(
             "POST /api/companions HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
             payload.len()
         ),
     );
+    assert!(head.starts_with("HTTP/1.1 404"), "bare creation is gone: {head}");
+    assert!(hub.companions().is_empty(), "no companion appeared");
+
+    // A mutation still works plainly: renaming through the API crosses the same hub.
+    let seeded = hub.create_companion("lumen", None).expect("seed companion");
+    let mut via_update = TcpStream::connect(address).expect("connect");
+    let payload = json!({ "displayName": "Lumen" }).to_string();
+    let (head, body) = http_round_trip(
+        &mut via_update,
+        &format!(
+            "POST /api/companions/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            seeded.local_id,
+            payload.len()
+        ),
+    );
     assert!(head.starts_with("HTTP/1.1 200"), "head was: {head}");
-    assert!(body.contains("\"handle\":\"lumen\""), "body was: {body}");
+    assert!(body.contains("displayName"), "body was: {body}");
     assert_eq!(hub.companions().len(), 1, "the mutation crossed the same hub");
 
     // The enroll API routes are gone, and the allowlist routes are gone (owner
@@ -352,10 +368,12 @@ fn the_companion_manager_refuses_foreign_hosts_and_cross_site_writes() {
             .spawn(move || companion_lobby::adapters::manager::serve(serving, hub))
             .expect("server thread");
     }
-    let payload = json!({ "handle": "intruder" }).to_string();
+    let seeded = hub.create_companion("resident", None).expect("seed companion");
+    let payload = json!({ "displayName": "Intruder" }).to_string();
     let write = |headers: &str| {
         format!(
-            "POST /api/companions HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            "POST /api/companions/{} HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            seeded.local_id,
             payload.len()
         )
     };
@@ -393,13 +411,13 @@ fn the_companion_manager_refuses_foreign_hosts_and_cross_site_writes() {
     let (head, _) = http_round_trip(&mut anonymous, &write(""));
     assert!(head.starts_with("HTTP/1.1 403"), "a write with no origin is refused: {head}");
 
-    assert!(hub.companions().is_empty(), "no refused write reached the hub");
+    assert!(hub.companions()[0].display_name.is_none(), "no refused write reached the hub");
 
     // The page's own write still works.
     let mut page = TcpStream::connect(address).expect("connect");
     let (head, _) = http_round_trip(&mut page, &write("Origin: http://127.0.0.1\r\nSec-Fetch-Site: same-origin\r\n"));
     assert!(head.starts_with("HTTP/1.1 200"), "the page's own write is served: {head}");
-    assert_eq!(hub.companions().len(), 1, "exactly one companion was created");
+    assert_eq!(hub.companions()[0].display_name.as_deref(), Some("Intruder"), "exactly the page's write landed");
 
     // Discovery stays readable across origins: it is the inert document another process
     // reads to recognise this page, and it discloses nothing else.
@@ -411,4 +429,112 @@ fn the_companion_manager_refuses_foreign_hosts_and_cross_site_writes() {
     assert!(head.starts_with("HTTP/1.1 200"), "discovery still answers: {head}");
     assert!(body.contains("tangent-space-connector"), "discovery names the product: {body}");
     assert!(!body.contains("intruder"), "discovery discloses no companion: {body}");
+}
+
+// ---------- the 1:1 credential model ----------
+
+/// Unbinding is the flush: the credential goes and, with it, every session that
+/// credential established — immediately. The places stay as memories and reconnect
+/// after a re-bind.
+#[test]
+fn unbinding_flushes_every_session_the_credential_established() {
+    let server = FakeServer::start();
+    let hub = workspace("unbind-flush", CallerId("cli".into()));
+    let (local_id, enrollment_id) = enrolled(&hub, &server, "lumen");
+
+    hub.unbind_atproto(&local_id).expect("unbind");
+    {
+        let store = hub.store().lock().unwrap();
+        assert!(store.atproto_session(&local_id).is_none(), "the credential is gone");
+        assert!(store.session(&enrollment_id).is_none(), "the enrollment session was flushed");
+        assert!(store.enrollment(&enrollment_id).is_some(), "the place itself stays, as a memory");
+        assert!(store.companion(&local_id).unwrap().bound_did.is_none(), "the binding is cleared");
+    }
+
+    // A model asking to connect meets an honest refusal (this workspace hosts no
+    // manager page, so the pop itself is unavailable — also honest). It never limps
+    // on a flushed session.
+    let waiting = hub.invoke(IntakeChannel::Mcp, "Connect", &json!({ "serverUrl": server.origin() }));
+    assert!(waiting.is_error, "no limping on a flushed session: {}", waiting.text);
+
+    // A re-bind reconnects the remembered place: a fresh exchange, a fresh session,
+    // still exactly one place.
+    common::seed_atproto_session(&hub, &local_id, "lumen.bsky.example", "did:plc:lumen", server.origin());
+    let reconnected = hub.invoke(IntakeChannel::Mcp, "Connect", &json!({ "serverUrl": server.origin() }));
+    assert!(!reconnected.is_error, "text: {}", reconnected.text);
+    assert!(reconnected.text.contains("You are"), "the arrival introduces itself: {}", reconnected.text);
+    {
+        let store = hub.store().lock().unwrap();
+        let enrollments = store.enrollments_of(&local_id);
+        assert_eq!(enrollments.len(), 1, "the remembered place is the one place");
+        assert!(store.session(&enrollments[0].enrollment_id).is_some(), "the session lives again");
+    }
+}
+
+/// The credential's grant gates session establishment: without the Tangent grant a
+/// Connect is refused honestly — the agent never receives a session identifier. The
+/// gate is establishment only; it never touches a session that already exists.
+#[test]
+fn the_service_grant_gates_session_establishment() {
+    let server = FakeServer::start();
+    let hub = workspace("grant-gate", CallerId("cli".into()));
+    let account = "lumen.bsky.example";
+    let did = "did:plc:lumen";
+    server.add_account(account, "unused", did);
+    let local_id = common::seed_bound_companion(&hub, account, did, server.origin());
+
+    hub.set_companion_services(&local_id, &[]).expect("withdraw the grant");
+    let refused = hub.invoke(IntakeChannel::Mcp, "Connect", &json!({ "serverUrl": server.origin() }));
+    assert!(refused.is_error, "text: {}", refused.text);
+    assert_eq!(
+        refused.structured.pointer("/problem/code").and_then(Value::as_str),
+        Some("service_not_allowed"),
+        "text: {}",
+        refused.text
+    );
+    assert!(hub.enrollments_of(&local_id).is_empty(), "no session identifier was ever minted");
+
+    hub.set_companion_services(&local_id, &["tangent".to_string()]).expect("restore the grant");
+    let connected = hub.invoke(IntakeChannel::Mcp, "Connect", &json!({ "serverUrl": server.origin() }));
+    assert!(!connected.is_error, "text: {}", connected.text);
+}
+
+/// The manager is a single-page app: every application state is a route, unknown GETs
+/// serve the shell for the client router — and the server-owned surfaces (bind routes,
+/// the API) keep their exact shapes, mistakes included.
+#[test]
+fn the_manager_serves_routes_from_one_shell() {
+    let hub = workspace("spa", CallerId("manager".into()));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().unwrap();
+    {
+        let hub = hub.clone();
+        let serving = listener.try_clone().expect("clone listener");
+        std::thread::Builder::new()
+            .name("spa-under-test".into())
+            .spawn(move || companion_lobby::adapters::manager::serve(serving, hub))
+            .expect("server thread");
+    }
+    let get = |path: &str| format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+
+    let mut shell = TcpStream::connect(address).expect("connect");
+    let (head, body) = http_round_trip(&mut shell, &get("/companion/nobody"));
+    assert!(head.starts_with("HTTP/1.1 200"), "a deep link serves the shell: {head}");
+    assert!(body.contains("id=\"view\""), "the router mount is in the shell: {body}");
+
+    let mut add = TcpStream::connect(address).expect("connect");
+    let (head, _) = http_round_trip(&mut add, &get("/add"));
+    assert!(head.starts_with("HTTP/1.1 200"), "the add route serves the shell: {head}");
+
+    let mut mistake = TcpStream::connect(address).expect("connect");
+    let (head, body) = http_round_trip(&mut mistake, &get("/bind/ox_missing/github"));
+    assert!(head.starts_with("HTTP/1.1 404"), "bind mistakes stay honest 404s: {head}");
+    assert!(body.contains("Unknown bind provider"), "the 404 names itself: {body}");
+
+    let mut post = TcpStream::connect(address).expect("connect");
+    let (head, _) = http_round_trip(
+        &mut post,
+        "POST /nowhere HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    );
+    assert!(head.starts_with("HTTP/1.1 404"), "posts outside the API never serve the shell: {head}");
 }

@@ -281,7 +281,7 @@ fn serve_connection(
         if reader.read_line(&mut line).unwrap_or(0) == 0 {
             return;
         }
-        let mut parts = line.trim().split_whitespace();
+        let mut parts = line.split_whitespace();
         let method = parts.next().unwrap_or_default().to_string();
         let path = parts.next().unwrap_or_default().to_string();
         let mut content_length = 0usize;
@@ -1428,6 +1428,7 @@ pub fn seed_atproto_session(hub: &ConnectorHub, local_id: &str, handle: &str, di
             authserver: Some(pds.to_string()),
             client_id: None,
             dpop_key: None,
+            services: vec!["tangent".to_string()],
             obtained_at: 1_757_000_000_000,
         },
     );
