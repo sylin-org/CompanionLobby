@@ -49,9 +49,11 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Settling pause after a failed accept, so a persistent socket-level failure cannot
 /// spin the loop hot.
 const ACCEPT_ERROR_PAUSE: Duration = Duration::from_millis(100);
-/// Concurrent SSE feed clients this server will hold open. A small bound: each pins a
-/// connection thread, and one operator needs at most a couple of tabs.
-const SSE_CLIENT_LIMIT: usize = 4;
+/// Concurrent SSE feed clients this server will hold open. Generous on purpose: a
+/// single operator accumulates manager tabs over time, and a starved tab's retry
+/// loop reads as a broken page. The bound caps parked threads — which a loopback,
+/// single-user server shrugs at — it does not ration attention.
+const SSE_CLIENT_LIMIT: usize = 64;
 /// SSE keepalive cadence: a comment frame that also proves the peer is still there.
 const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
 const INDEX_HTML: &str = include_str!("manager.html");
@@ -485,6 +487,8 @@ fn stream_events(mut writer: TcpStream, hub: Arc<ConnectorHub>, sse_clients: Arc
     if writer.write_all(head.as_bytes()).is_err() || writer.flush().is_err() {
         return;
     }
+    // The reconnect cadence is ours: two seconds, so a dropped feed heals promptly.
+    let _ = writer.write_all(b"retry: 2000\n\n");
     loop {
         match receiver.recv_timeout(SSE_KEEPALIVE) {
             Ok(event) => {

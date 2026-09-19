@@ -1,5 +1,6 @@
 @echo off
 rem Starts (or restarts) the Companion Lobby connector's companion manager:
+rem Existing manager tabs reconnect to the fresh process by themselves.
 rem any previous instance is stopped first, then a fresh one launches.
 setlocal
 set "ROOT=%~dp0"
@@ -26,7 +27,7 @@ if errorlevel 1 (
 rem Nothing runs, so any leftover lock is stale by definition; --force clears it.
 set "OUT=%TEMP%\companion-lobby-manager.out.log"
 set "ERR=%TEMP%\companion-lobby-manager.err.log"
-powershell -NoProfile -Command "Start-Process -FilePath '%BINARY%' -ArgumentList 'manager','--force' -WindowStyle Hidden -RedirectStandardOutput '%OUT%' -RedirectStandardError '%ERR%'" >nul 2>&1
+powershell -NoProfile -Command "Start-Process -FilePath '%BINARY%' -ArgumentList 'manager','--force','--no-open' -WindowStyle Hidden -RedirectStandardOutput '%OUT%' -RedirectStandardError '%ERR%'" >nul 2>&1
 
 rem Wait (up to ten seconds) for the page to answer.
 set /a TRIES=0

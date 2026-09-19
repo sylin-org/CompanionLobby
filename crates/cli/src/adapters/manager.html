@@ -454,7 +454,7 @@ function startFeed() {
   if (!window.EventSource) { document.getElementById("feed-state").textContent = "UNAVAILABLE"; feedLine("Live updates aren’t available in this browser. Use Refresh to check your connections.", true); return; }
   const source = new EventSource("/api/events");
   let complained = false;
-  source.onopen = () => { document.getElementById("feed-state").textContent = "LIVE"; complained = false; };
+  source.onopen = () => { document.getElementById("feed-state").textContent = "LIVE"; if (complained) { complained = false; feedLine("Live feed reconnected."); } };
   source.onmessage = (message) => {
     complained = false;
     let event; try { event = JSON.parse(message.data); } catch { return; }
