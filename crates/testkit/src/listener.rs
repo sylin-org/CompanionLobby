@@ -58,6 +58,26 @@ impl Received {
     pub fn json(&self) -> Value {
         serde_json::from_slice(&self.body).unwrap_or(Value::Null)
     }
+
+    /// The fields of a form body, percent-decoded, in the order sent.
+    pub fn form(&self) -> Vec<(String, String)> {
+        String::from_utf8_lossy(&self.body)
+            .split('&')
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| {
+                let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+                (crate::percent_decode(name), crate::percent_decode(value))
+            })
+            .collect()
+    }
+
+    /// The form field `name`, when the body is a form that has it.
+    pub fn field(&self, name: &str) -> Option<String> {
+        self.form()
+            .into_iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value)
+    }
 }
 
 /// What the listener answers.
@@ -88,6 +108,13 @@ impl Reply {
             headers: vec![("Location".to_owned(), location.to_owned())],
             body: Vec::new(),
         }
+    }
+
+    /// The same reply with one more header.
+    #[must_use]
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_owned(), value.to_owned()));
+        self
     }
 }
 

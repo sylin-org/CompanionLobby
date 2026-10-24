@@ -22,10 +22,13 @@
 //! * the two synthetic adapters and their fakes: the [`passbook`] credential
 //!   adapter with its authority and the [`board`] service adapter with its
 //!   boards, each in its own words, which prove the host without any real
-//!   provider or service.
+//!   provider or service;
+//! * [`atproto`], a fake atproto authorization server and PDS, for the
+//!   atproto credential adapter.
 //!
 //! Nothing here reaches the live network.
 
+pub mod atproto;
 pub mod board;
 pub mod events;
 pub mod hosts;
