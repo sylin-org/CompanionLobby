@@ -14,7 +14,12 @@
 //! The live file is `journal.jsonl`. When an entry would take it past
 //! [`GENERATION_BYTES`], it becomes `journal.1.jsonl`, the older generations
 //! move up by one, and the oldest beyond [`GENERATIONS`] is dropped. Nothing is
-//! deleted for its age.
+//! deleted for its age. A rotation is all or nothing: the live file is set
+//! aside first, and when that or any later move fails, every move already
+//! made is undone, so a file held open by a reader leaves every generation as
+//! it was and the live file grows past its limit until the next rotation.
+//! A rotation interrupted by a crash leaves the live file set aside, where it
+//! is still read, and the next rotation finishes it.
 //!
 //! A page of the journal is read newest first and fenced by a cursor that
 //! names the store and the highest entry the first page saw, so entries
@@ -33,6 +38,10 @@ use serde_json::{Map, Value, json};
 pub const JOURNAL_FILE: &str = "journal.jsonl";
 /// How many files the journal keeps: the live one and the rotated ones before it.
 pub const GENERATIONS: usize = 5;
+/// The live file while a rotation moves it to generation 1.
+pub const ROTATING_FILE: &str = "journal.rotating.jsonl";
+/// The oldest generation while a rotation drops it.
+pub const RETIRING_FILE: &str = "journal.retiring.jsonl";
 /// The size at which the live file rotates.
 pub const GENERATION_BYTES: u64 = 1024 * 1024;
 /// A page's default length.
@@ -51,7 +60,15 @@ pub fn generation_name(n: usize) -> String {
 
 /// Whether `name` is one of the journal's files.
 pub fn is_journal_file(name: &str) -> bool {
-    (0..GENERATIONS).any(|n| generation_name(n) == name)
+    name == ROTATING_FILE || name == RETIRING_FILE || read_order().any(|file| file == name)
+}
+
+/// The files that hold entries: every generation, and the live file a
+/// rotation set aside and did not finish moving.
+fn read_order() -> impl Iterator<Item = String> {
+    (0..GENERATIONS)
+        .map(generation_name)
+        .chain(std::iter::once(ROTATING_FILE.to_owned()))
 }
 
 /// What a command or a call asks the journal to record; the journal adds the
@@ -113,8 +130,8 @@ impl Journal {
         generation_bytes: u64,
     ) -> io::Result<Self> {
         let mut highest = 0;
-        for n in 0..GENERATIONS {
-            for (seq, _) in read_generation(dir, n)? {
+        for name in read_order() {
+            for (seq, _) in read_entries(dir, &name)? {
                 highest = highest.max(seq);
             }
         }
@@ -139,8 +156,9 @@ impl Journal {
     }
 
     /// Writes `note` as the next entry and returns it once it is on the disk.
-    /// When this fails, no entry took the number and nothing should proceed
-    /// that the entry was to attribute.
+    /// When this fails, nothing should proceed that the entry was to
+    /// attribute; a number whose line reached the file, even unsynced, is
+    /// never handed out again.
     pub fn append(&mut self, note: Note) -> io::Result<JournalEntry> {
         let entry = JournalEntry {
             seq: self.next_seq,
@@ -188,23 +206,63 @@ impl Journal {
                 line.insert(0, '\n');
             }
         }
-        file.write_all(line.as_bytes())?;
-        file.sync_data()?;
+        let written = file.write_all(line.as_bytes());
+        // Some of the line may be in the file even when the write failed.
         self.next_seq += 1;
+        written?;
+        file.sync_data()?;
         Ok(entry)
     }
 
+    /// Moves the live file to generation 1, all or nothing.
     fn rotate(&self) -> io::Result<()> {
-        for n in (1..GENERATIONS).rev() {
-            match std::fs::rename(
-                self.dir.join(generation_name(n - 1)),
-                self.dir.join(generation_name(n)),
-            ) {
-                Ok(()) => {}
+        let live = self.dir.join(JOURNAL_FILE);
+        let rotating = self.dir.join(ROTATING_FILE);
+        if rotating.exists() {
+            // An earlier rotation set the live file aside and stopped.
+            self.shift_in(&rotating)?;
+        }
+        // A live file held open by a reader fails here, before anything moved.
+        std::fs::rename(&live, &rotating)?;
+        if let Err(error) = self.shift_in(&rotating) {
+            // When even this fails, the set-aside file is still read and the
+            // next rotation finishes moving it.
+            let _ = std::fs::rename(&rotating, &live);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Moves every generation up by one and `rotating` into generation 1,
+    /// undoing every move already made when one fails. No move replaces a
+    /// file: each target was moved away the step before, or never existed.
+    fn shift_in(&self, rotating: &Path) -> io::Result<()> {
+        let retiring = self.dir.join(RETIRING_FILE);
+        match std::fs::remove_file(&retiring) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let path = |n: usize| self.dir.join(generation_name(n));
+        let mut moves = vec![(path(GENERATIONS - 1), retiring.clone())];
+        moves.extend((2..GENERATIONS).rev().map(|n| (path(n - 1), path(n))));
+        moves.push((rotating.to_path_buf(), path(1)));
+        let mut made: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for (from, to) in moves {
+            match std::fs::rename(&from, &to) {
+                Ok(()) => made.push((from, to)),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
+                Err(error) => {
+                    for (from, to) in made.into_iter().rev() {
+                        let _ = std::fs::rename(&to, &from);
+                    }
+                    return Err(error);
+                }
             }
         }
+        // The oldest generation is dropped only once everything else moved;
+        // when it cannot be removed now, the next rotation removes it.
+        let _ = std::fs::remove_file(&retiring);
         Ok(())
     }
 
@@ -218,9 +276,9 @@ impl Journal {
             Some(cursor) => self.parse_cursor(cursor).ok_or(PageProblem::Cursor)?,
         };
         let mut entries: Vec<(u64, Value)> = Vec::new();
-        for n in 0..GENERATIONS {
+        for name in read_order() {
             entries.extend(
-                read_generation(&self.dir, n)
+                read_entries(&self.dir, &name)
                     .map_err(PageProblem::Io)?
                     .into_iter()
                     .filter(|(seq, _)| *seq <= upper && *seq < below),
@@ -263,9 +321,10 @@ impl Journal {
     }
 }
 
-/// The entries of generation `n` that parse, with their sequence numbers.
-fn read_generation(dir: &Path, n: usize) -> io::Result<Vec<(u64, Value)>> {
-    let text = match std::fs::read(dir.join(generation_name(n))) {
+/// The entries of the journal file `name` that parse, with their sequence
+/// numbers.
+fn read_entries(dir: &Path, name: &str) -> io::Result<Vec<(u64, Value)>> {
+    let text = match std::fs::read(dir.join(name)) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
@@ -427,6 +486,124 @@ mod tests {
         std::fs::remove_file(dir.join(JOURNAL_FILE)).expect("remove the live file");
         let again = Journal::open(&dir, STORE).expect("reopen");
         assert!(again.high_water() >= last);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Every rotated generation's bytes, oldest last.
+    fn rotated(dir: &Path) -> Vec<Vec<u8>> {
+        (1..GENERATIONS)
+            .map(|n| std::fs::read(dir.join(generation_name(n))).expect("generation"))
+            .collect()
+    }
+
+    /// A journal of 600-byte generations with every generation written.
+    fn full_journal(label: &str) -> (PathBuf, Journal) {
+        let dir = temp_dir(label);
+        let mut journal = Journal::with_generation_bytes(&dir, STORE, 600).expect("open");
+        for _ in 0..40 {
+            journal.append(note("rename_companion")).expect("append");
+        }
+        (dir, journal)
+    }
+
+    /// Opens `name` in `dir` the way a reader that does not allow it to be
+    /// moved does: sharing reads and writes, never deletion.
+    #[cfg(windows)]
+    fn hold(dir: &Path, name: &str) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        const SHARE_READ_AND_WRITE: u32 = 0x1 | 0x2;
+        OpenOptions::new()
+            .read(true)
+            .share_mode(SHARE_READ_AND_WRITE)
+            .open(dir.join(name))
+            .expect("hold")
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_live_file_held_open_leaves_every_generation_as_it_was() {
+        let (dir, mut journal) = full_journal("held-live");
+        let before = rotated(&dir);
+        let reader = hold(&dir, JOURNAL_FILE);
+        let start = journal.high_water();
+        for _ in 0..6 {
+            journal.append(note("attach")).expect("append");
+        }
+        assert_eq!(rotated(&dir), before, "no generation moved or was lost");
+        assert!(!dir.join(ROTATING_FILE).exists());
+        assert!(!dir.join(RETIRING_FILE).exists());
+        let page = journal.page(None, 6).expect("page");
+        assert_eq!(
+            sequences(&page),
+            ((start + 1)..=(start + 6)).rev().collect::<Vec<_>>(),
+            "the live file grew past its limit instead"
+        );
+        drop(reader);
+        let live = std::fs::read(dir.join(JOURNAL_FILE)).expect("live");
+        journal.append(note("detach")).expect("append");
+        let after = rotated(&dir);
+        assert_eq!(after[0], live, "the live file became generation 1");
+        assert_eq!(
+            after[1..],
+            before[..GENERATIONS - 2],
+            "the rest moved up by one"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_rotated_generation_held_open_undoes_every_move() {
+        let (dir, mut journal) = full_journal("held-rotated");
+        let before = rotated(&dir);
+        let live = std::fs::read(dir.join(JOURNAL_FILE)).expect("live");
+        let reader = hold(&dir, &generation_name(2));
+        let start = journal.high_water();
+        for _ in 0..4 {
+            journal.append(note("attach")).expect("append");
+        }
+        assert_eq!(rotated(&dir), before, "every move was undone");
+        assert!(
+            std::fs::read(dir.join(JOURNAL_FILE))
+                .expect("live")
+                .starts_with(&live),
+            "the live file is back in place and only grew"
+        );
+        assert!(!dir.join(ROTATING_FILE).exists());
+        drop(reader);
+        journal.append(note("detach")).expect("append");
+        let after = rotated(&dir);
+        assert_eq!(after[1..], before[..GENERATIONS - 2]);
+        assert_eq!(journal.high_water(), start + 5);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_rotation_stopped_by_a_crash_is_still_read_and_then_finished() {
+        let (dir, journal) = full_journal("interrupted");
+        let last = journal.high_water();
+        drop(journal);
+        let before = rotated(&dir);
+        let set_aside = std::fs::read(dir.join(JOURNAL_FILE)).expect("live");
+        // The crash came right after the live file was set aside.
+        std::fs::rename(dir.join(JOURNAL_FILE), dir.join(ROTATING_FILE)).expect("set aside");
+        let mut journal = Journal::with_generation_bytes(&dir, STORE, 600).expect("reopen");
+        assert_eq!(journal.high_water(), last, "the set-aside file is counted");
+        assert_eq!(
+            sequences(&journal.page(None, 1).expect("page")),
+            vec![last],
+            "and read"
+        );
+        while dir.join(ROTATING_FILE).exists() {
+            journal.append(note("attach")).expect("append");
+        }
+        let after = rotated(&dir);
+        assert_eq!(
+            after[1], set_aside,
+            "it was finished into generation 1 first"
+        );
+        assert_eq!(after[2..], before[..GENERATIONS - 3]);
+        assert!(!dir.join(RETIRING_FILE).exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

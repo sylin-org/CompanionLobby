@@ -37,7 +37,7 @@ writes a new one.
 | File | Written by | What it holds |
 | --- | --- | --- |
 | `lobby.json` | the daemon | The state file: the truth. See below. |
-| `journal.jsonl`, `journal.1.jsonl` to `journal.4.jsonl` | the daemon | The journal: attribution. See below. |
+| `journal.jsonl`, `journal.1.jsonl` to `journal.4.jsonl` | the daemon | The journal: attribution. See below. `journal.rotating.jsonl` and `journal.retiring.jsonl` exist only while a rotation runs, or after a crash stopped one. |
 | `attach.secret` | the daemon | 32 random bytes as 64 hex digits, sealed. The shim presents it once per attachment, when it attaches. |
 | `daemon.instance` | the daemon | Nothing; its exclusive OS lock decides which daemon runs. A start that finds it held refuses at once. Nothing else touches it. |
 | `daemon.lock` | the daemon | Nothing; the running daemon holds an exclusive OS lock on it, and the shim, `open` and `stop` learn whether a daemon runs by taking it for an instant. The daemon waits out such a probe when it starts. The OS releases both locks when the process dies, so a daemon killed outright never blocks the next start. |
@@ -113,7 +113,12 @@ for the external calls adapters make. Fields that do not apply are absent.
   across rotations, restarts and a daemon killed outright.
 - **Generations.** When an entry would take `journal.jsonl` past 1 MiB, it
   becomes `journal.1.jsonl`, the older files move up by one, and the oldest
-  beyond five files is dropped. Nothing is deleted for its age. A line torn
+  beyond five files is dropped. Nothing is deleted for its age. A rotation is
+  all or nothing: the live file is set aside first, and when any move fails,
+  as it does while another program holds a journal file open without
+  allowing it to move, every move already made is undone and `journal.jsonl`
+  grows past 1 MiB until a later rotation succeeds. A rotation a crash
+  stopped is read as it lies and finished by the next one. A line torn
   by a crash is ended before the next one is written, so it spoils only
   itself, and readers skip it.
 - **Pages.** `GET /api/journal` reads newest first, at most 100 entries a
