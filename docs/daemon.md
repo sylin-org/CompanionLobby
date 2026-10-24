@@ -51,7 +51,9 @@ Every request passes these rules in order, before any body is read:
    hostname at the loopback address reaches nothing, reads included.
 2. **Size.** Request heads are capped at 8 KiB (431 beyond). A declared body
    over 1 MiB is refused with 413 before it is read; a body that grows past
-   1 MiB while arriving is refused too. A peer has 30 seconds to send its head.
+   1 MiB while arriving is refused too. A peer has 30 seconds to send its head
+   and 10 seconds after it to send its body (408 beyond), so a trickled body
+   cannot hold one of the 128 request slots or a stop's drain.
 3. **Operator writes** (`POST /api/...`) must be `application/json` and carry
    same-origin browser evidence: an `Origin` equal to `http://<Host>`, and a
    `Sec-Fetch-Site` that is absent or `same-origin`. Anything else is 403.

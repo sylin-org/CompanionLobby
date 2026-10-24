@@ -7,7 +7,8 @@
 //!    127.0.0.1 on the same port, and any other name is refused, so a page
 //!    that points its own hostname at the loopback address reaches nothing;
 //! 2. a declared body larger than 1 MiB is refused, and a body that grows past
-//!    it while arriving is refused too; headers are capped at 8 KiB;
+//!    it while arriving is refused too; headers are capped at 8 KiB; a head
+//!    must arrive within 30 seconds and a body within 10 seconds after it;
 //! 3. operator mutations under `/api/` need JSON and same-origin browser
 //!    evidence: an `Origin` equal to the page's own origin, and a
 //!    `Sec-Fetch-Site` that is absent or `same-origin`;
@@ -59,6 +60,9 @@ pub const HEADER_LIMIT: usize = 8 * 1024;
 pub const BODY_LIMIT: usize = 1024 * 1024;
 /// How long a peer may take to send its request head.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a peer may take to send a body once its head has arrived, so a
+/// trickled body cannot hold an admission slot or a stop's drain.
+pub const BODY_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Requests served at once; one more is answered 503 at once.
 pub const MAX_ACTIVE_REQUESTS: usize = 128;
 /// Settling pause after a failed accept, so a persistent socket failure cannot spin the loop hot.
@@ -393,15 +397,18 @@ impl Problem {
 }
 
 async fn read_body(request: Request<Incoming>) -> Result<Bytes, Problem> {
-    match Limited::new(request.into_body(), BODY_LIMIT)
-        .collect()
-        .await
-    {
-        Ok(collected) => Ok(collected.to_bytes()),
-        Err(_) => Err(Problem(
+    let collecting = Limited::new(request.into_body(), BODY_LIMIT).collect();
+    match tokio::time::timeout(BODY_READ_TIMEOUT, collecting).await {
+        Ok(Ok(collected)) => Ok(collected.to_bytes()),
+        Ok(Err(_)) => Err(Problem(
             StatusCode::PAYLOAD_TOO_LARGE,
             Outcome::InvalidInput,
             "The body exceeds 1 MiB or did not arrive.",
+        )),
+        Err(_) => Err(Problem(
+            StatusCode::REQUEST_TIMEOUT,
+            Outcome::InvalidInput,
+            "The body did not arrive in time.",
         )),
     }
 }

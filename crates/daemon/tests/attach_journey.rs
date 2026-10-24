@@ -881,3 +881,133 @@ fn the_daemon_narrows_a_widened_data_directory_again_when_it_starts() {
         "the daemon's start restricts the directory to its owner again"
     );
 }
+
+/// Attaches as `companion` the way the shim does, returning the attachment id and its token.
+fn attach_directly(install: &Install, companion: &str) -> (String, String) {
+    let bearer = format!("Bearer {}", install.secret().expose());
+    let body = json!({ "companion": companion }).to_string();
+    let answer = loopback::send(
+        install.port,
+        &Call {
+            method: "POST",
+            path: "/mcp/attach",
+            headers: &[("Authorization", &bearer)],
+            body: body.as_bytes(),
+            timeout: Duration::from_secs(5),
+        },
+    )
+    .expect("attach");
+    assert_eq!(answer.status, 201);
+    let answer: Value = serde_json::from_slice(&answer.body).expect("JSON");
+    (
+        answer["attachment"].as_str().expect("id").to_owned(),
+        answer["token"].as_str().expect("token").to_owned(),
+    )
+}
+
+#[test]
+fn a_body_that_never_finishes_arriving_is_refused_in_bounded_time() {
+    let install = Install::new("trickle");
+    install.open();
+    install.create("ada", "Ada");
+    let (attachment, token) = attach_directly(&install, "ada");
+    let port = install.port;
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("timeout");
+    let started = std::time::Instant::now();
+    stream
+        .write_all(
+            format!(
+                "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nLobby-Attachment: {attachment}\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{{\"jsonrpc\""
+            )
+            .as_bytes(),
+        )
+        .expect("write a head and the start of a body");
+    let mut bytes = Vec::new();
+    let _ = stream.read_to_end(&mut bytes);
+    let elapsed = started.elapsed();
+    let answer = loopback::parse(&bytes).expect("an answer");
+    assert_eq!(answer.status, 408);
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "the body limit is 10 seconds, it took {elapsed:?}"
+    );
+    // The daemon still serves the attachment afterwards.
+    let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+    let (status, _, _) = raw(
+        port,
+        &format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nLobby-Attachment: {attachment}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{ping}",
+            ping.len()
+        ),
+    );
+    assert_eq!(status, 200);
+}
+
+#[test]
+fn stop_lets_a_request_still_arriving_finish_before_the_daemon_exits() {
+    let install = Install::new("drain");
+    install.open();
+    install.create("ada", "Ada");
+    let (attachment, token) = attach_directly(&install, "ada");
+    let port = install.port;
+    let reach = reach_call(7).to_string();
+    let (first, rest) = reach.split_at(reach.len() / 2);
+
+    // A frame whose head has arrived and whose body is half way.
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("timeout");
+    stream
+        .write_all(
+            format!(
+                "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nLobby-Attachment: {attachment}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{first}",
+                reach.len()
+            )
+            .as_bytes(),
+        )
+        .expect("write the head and half the body");
+    std::thread::sleep(Duration::from_millis(300));
+
+    // `stop` is asked while that frame is still arriving.
+    let mut command = Command::new(&install.exe);
+    command.arg("stop").stdin(Stdio::null());
+    for (name, value) in install.environment() {
+        command.env(name, value);
+    }
+    let stopper = std::thread::spawn(move || command.output().expect("run stop"));
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        !stopper.is_finished(),
+        "stop returned while a request was still being served"
+    );
+    assert!(
+        install.discovery().is_none(),
+        "a stopping daemon accepts no new connection"
+    );
+
+    // The rest of the frame arrives, and it is answered in full.
+    stream.write_all(rest.as_bytes()).expect("write the rest");
+    let mut bytes = Vec::new();
+    let _ = stream.read_to_end(&mut bytes);
+    let answer = loopback::parse(&bytes).expect("an answer");
+    assert_eq!(answer.status, 200);
+    let frame: Value = serde_json::from_slice(&answer.body).expect("JSON");
+    assert_eq!(frame["id"], 7);
+    assert_eq!(
+        frame["result"]["structuredContent"]["companion"]["moniker"],
+        "ada"
+    );
+
+    let stopped = stopper.join().expect("stop");
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(String::from_utf8_lossy(&stopped.stdout).contains("stopped"));
+    assert!(!lobby_daemon::lock::is_held(&install.dir()).expect("lock probe"));
+}
