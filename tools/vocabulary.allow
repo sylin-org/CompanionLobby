@@ -15,3 +15,5 @@ docs/adr/0001-seven-nouns.md	provider-bluesky	The founding ADR names the second 
 crates/daemon/tests/remember_journey.rs	stale-files	The journey plants a file of that name to show the daemon never reads it.
 crates/daemon/src/http/feed_body.rs	identifiers	Implementing hyper's Body names the standard library's std::task::Context; it is no lobby handle.
 crates/daemon/src/http/feed_body.rs	context	Implementing hyper's Body names the standard library's std::task::Context; it is no lobby handle.
+crates/conformance/src/host.rs	session	The scenario asserts that this word never reaches a mind's tool list.
+crates/conformance/src/host.rs	context	The scenario asserts that this word never reaches a mind's tool list.

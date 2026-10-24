@@ -1,10 +1,15 @@
 //! Read models derived from the state.
 //!
 //! Each attachment's catalog is projected, never declared: `reach`, plus the
-//! native tools of the companion's ready connections as `<service>_<tool>`.
-//! A companion with no connections sees `reach` alone. `reach` always reports
-//! the live tool set, so a mind can trust it even when its host ignores tool
-//! list changes.
+//! native tools of every service the companion holds a ready connection to,
+//! as `<service>_<tool>`. Each of those tools takes one more argument, `at`,
+//! whose values are the sponsor's labels for the companion's connections to
+//! that service: it may be left out while there is one, and is required once
+//! there are more. A companion with no connections sees `reach` alone.
+//! `reach` always reports the live tool set, so a mind can trust it even when
+//! its host ignores tool list changes. Nothing a service wrote reaches a tool
+//! name, description or schema: the names and words are the adapter's, and
+//! the labels and addresses are the sponsor's.
 //!
 //! The manager page's projections are built the same way: each companion as
 //! the page shows it, with the host configuration that names it, and the live
@@ -16,7 +21,10 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use lobby_contracts::{Companion, Effect, Passage, ToolDescriptor, ToolName, ToolResult};
+use lobby_contracts::{
+    Address, Companion, Connection, ConnectionState, Credential, CredentialState, Effect, Label,
+    Passage, ServiceName, ToolDescriptor, ToolName, ToolResult,
+};
 use serde_json::{Map, Value, json};
 use tokio::sync::broadcast;
 
@@ -25,6 +33,20 @@ use crate::journal;
 
 /// The name of the one tool every attachment has.
 pub const REACH: &str = "reach";
+/// The argument every service tool takes to say which connection it acts through.
+pub const AT: &str = "at";
+
+/// What a companion reaches through one service: the service's tools and
+/// the sponsor's label and address of each ready connection to it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reached {
+    /// The service.
+    pub service: ServiceName,
+    /// Its tools, as its adapter declares them.
+    pub tools: Vec<ToolDescriptor>,
+    /// Each ready connection's label and address, oldest first.
+    pub connections: Vec<(Label, Address)>,
+}
 
 /// The descriptor of `reach`.
 pub fn reach_descriptor() -> ToolDescriptor {
@@ -45,36 +67,145 @@ pub fn reach_descriptor() -> ToolDescriptor {
     }
 }
 
-/// The tools an attachment of `companion` sees, in order.
-pub fn catalog(_companion: &Companion) -> Vec<ToolDescriptor> {
-    vec![reach_descriptor()]
+/// The tools an attachment sees, in order, each with the name a mind calls
+/// it by: `reach`, then each reached service's tools with `at` added.
+pub fn catalog(reached: &[Reached]) -> Vec<(String, ToolDescriptor)> {
+    let mut tools = vec![(REACH.to_owned(), reach_descriptor())];
+    for place in reached {
+        let labels: Vec<&str> = place
+            .connections
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect();
+        for tool in &place.tools {
+            let mut descriptor = tool.clone();
+            descriptor.input_schema = with_at(&tool.input_schema, &place.service, &labels);
+            tools.push((tool.name.projected(&place.service), descriptor));
+        }
+    }
+    tools
 }
 
-/// The answer to `reach` for `companion`.
-pub fn reach(companion: &Companion) -> ToolResult {
-    let tools: Vec<String> = catalog(companion)
-        .iter()
-        .map(|tool| tool.name.as_str().to_owned())
-        .collect();
-    let text = format!(
-        "You are attached as {display} (moniker {moniker}). {display} reaches nothing yet: \
-         the sponsor has not connected a service for this companion. Your tools: {tools}.",
-        display = companion.display_name,
-        moniker = companion.moniker,
-        tools = tools.join(", "),
+/// `schema` with the `at` property: the labels as its only values, required
+/// when there is more than one.
+fn with_at(schema: &Value, service: &ServiceName, labels: &[&str]) -> Value {
+    let mut schema = schema.clone();
+    if !schema.is_object() {
+        schema = json!({ "type": "object" });
+    }
+    let description = if labels.len() == 1 {
+        format!("Which {service} to act at, by the name the sponsor gave it; it may be left out.")
+    } else {
+        format!("Which {service} to act at, by the name the sponsor gave it.")
+    };
+    let properties = schema
+        .as_object_mut()
+        .map(|object| object.entry("properties").or_insert_with(|| json!({})));
+    if let Some(Value::Object(properties)) = properties {
+        properties.insert(
+            AT.to_owned(),
+            json!({ "type": "string", "enum": labels, "description": description }),
+        );
+    }
+    if labels.len() > 1
+        && let Some(object) = schema.as_object_mut()
+    {
+        let required = object.entry("required").or_insert_with(|| json!([]));
+        if let Value::Array(required) = required {
+            required.push(json!(AT));
+        }
+    }
+    schema
+}
+
+/// The answer to `reach` for `companion`, which reaches `reached`.
+pub fn reach(companion: &Companion, reached: &[Reached]) -> ToolResult {
+    let tools: Vec<String> = catalog(reached).into_iter().map(|(name, _)| name).collect();
+    let display = &companion.display_name;
+    let mut text = format!(
+        "You are attached as {display} (moniker {moniker}). ",
+        moniker = companion.moniker
     );
+    if reached.is_empty() {
+        text.push_str(&format!(
+            "{display} reaches nothing yet: the sponsor has not connected a service for this companion."
+        ));
+    }
+    for place in reached {
+        let places: Vec<String> = place
+            .connections
+            .iter()
+            .map(|(label, address)| format!("{label} ({address})"))
+            .collect();
+        let names: Vec<String> = place
+            .tools
+            .iter()
+            .map(|tool| tool.name.projected(&place.service))
+            .collect();
+        text.push_str(&format!(
+            "{display} reaches {service} at {places}, with {names}; pass {AT} to say which. ",
+            service = place.service,
+            places = places.join(" and "),
+            names = names.join(", "),
+        ));
+    }
+    text.push_str(&format!(" Your tools: {}.", tools.join(", ")));
+    let connections: Vec<Value> = reached
+        .iter()
+        .flat_map(|place| {
+            place.connections.iter().map(|(label, address)| {
+                json!({
+                    "service": place.service.as_str(),
+                    "at": label.as_str(),
+                    "address": address.as_str(),
+                })
+            })
+        })
+        .collect();
     ToolResult {
-        text: vec![Passage::Authored(text)],
+        text: vec![Passage::Authored(text.replace("  ", " ").trim().to_owned())],
         structured: Some(json!({
             "companion": {
                 "id": companion.id.to_string(),
                 "moniker": companion.moniker.as_str(),
                 "displayName": companion.display_name.as_str(),
             },
-            "connections": [],
+            "connections": connections,
             "tools": tools,
         })),
     }
+}
+
+/// A credential as the manager page shows it. Its material never is.
+pub fn credential_json(credential: &Credential) -> Value {
+    json!({
+        "id": credential.id.to_string(),
+        "companion": credential.companion.to_string(),
+        "kind": credential.kind.as_str(),
+        "account": credential.account.as_str(),
+        "state": match credential.state {
+            CredentialState::Ready => "ready",
+            CredentialState::Revoked => "revoked",
+        },
+    })
+}
+
+/// A connection as the manager page shows it. What the service issued for
+/// it never is.
+pub fn connection_json(connection: &Connection) -> Value {
+    json!({
+        "id": connection.id.to_string(),
+        "companion": connection.companion.to_string(),
+        "credential": connection.credential.to_string(),
+        "service": connection.service.as_str(),
+        "address": connection.address.as_str(),
+        "label": connection.label.as_str(),
+        "state": match connection.state {
+            ConnectionState::Ready => "ready",
+            ConnectionState::Revoked => "revoked",
+        },
+        "revision": connection.revision,
+    })
 }
 
 /// A companion as the manager page shows it: the record, how many minds are
@@ -112,6 +243,12 @@ pub fn event_json(event: &Event, store_id: &str, command: &str) -> Value {
             json!({ "kind": "companion", "companion": companion_json(view, command) })
         }
         Event::CompanionRemoved(id) => json!({ "kind": "companion_removed", "id": id.to_string() }),
+        Event::CredentialChanged(credential) => {
+            json!({ "kind": "credential", "credential": credential_json(credential) })
+        }
+        Event::ConnectionChanged(connection) => {
+            json!({ "kind": "connection", "connection": connection_json(connection) })
+        }
         Event::Journaled(entry) => {
             json!({ "kind": "journal", "entry": journal::encode(store_id, entry) })
         }
@@ -270,22 +407,84 @@ mod tests {
         }
     }
 
+    fn board(labels: &[&str]) -> Reached {
+        Reached {
+            service: ServiceName::new("board").expect("service"),
+            tools: vec![ToolDescriptor {
+                name: ToolName::new("read").expect("tool"),
+                title: "Read".to_owned(),
+                description: "Reads.".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "limit": { "type": "integer" } },
+                    "additionalProperties": false
+                }),
+                effect: Effect::Read,
+            }],
+            connections: labels
+                .iter()
+                .enumerate()
+                .map(|(port, label)| {
+                    (
+                        Label::new(label).expect("label"),
+                        Address::parse(
+                            &format!("http://127.0.0.1:{}", 5300 + port),
+                            lobby_contracts::AddressPolicy::LoopbackAllowed,
+                        )
+                        .expect("address"),
+                    )
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn a_companion_without_connections_sees_reach_alone() {
-        let catalog = catalog(&ada());
+        let catalog = catalog(&[]);
         assert_eq!(catalog.len(), 1);
-        assert_eq!(catalog[0].name.as_str(), REACH);
-        assert!(catalog[0].read_only_hint());
+        assert_eq!(catalog[0].0, REACH);
+        assert!(catalog[0].1.read_only_hint());
     }
 
     #[test]
     fn reach_reports_the_companion_and_the_live_tool_set() {
-        let answer = reach(&ada());
+        let answer = reach(&ada(), &[]);
         let text = answer.rendered();
         assert!(text.contains("Ada") && text.contains("reach"));
         let structured = answer.structured.expect("structured");
         assert_eq!(structured["companion"]["moniker"], "ada");
         assert_eq!(structured["tools"], json!(["reach"]));
         assert_eq!(structured["connections"], json!([]));
+    }
+
+    #[test]
+    fn service_tools_take_at_naming_the_sponsors_labels() {
+        let one = catalog(&[board(&["front"])]);
+        assert_eq!(
+            one.iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["reach", "board_read"]
+        );
+        let schema = &one[1].1.input_schema;
+        assert_eq!(schema["properties"]["at"]["enum"], json!(["front"]));
+        assert!(
+            schema.get("required").is_none(),
+            "one connection needs no at"
+        );
+        assert_eq!(schema["properties"]["limit"]["type"], "integer");
+        let two = catalog(&[board(&["front", "back"])]);
+        let schema = &two[1].1.input_schema;
+        assert_eq!(schema["properties"]["at"]["enum"], json!(["front", "back"]));
+        assert_eq!(schema["required"], json!(["at"]));
+        let answer = reach(&ada(), &[board(&["front", "back"])]);
+        let structured = answer.structured.clone().expect("structured");
+        assert_eq!(structured["tools"], json!(["reach", "board_read"]));
+        assert_eq!(structured["connections"][1]["at"], "back");
+        assert!(
+            answer
+                .rendered()
+                .contains("board at front (http://127.0.0.1:5300) and back")
+        );
     }
 }

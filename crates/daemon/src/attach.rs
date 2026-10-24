@@ -14,6 +14,9 @@
 //!   attachment, writing each answer back as one line; notifications go in
 //!   the order they arrived, before any later request, and at most
 //!   [`MAX_IN_FLIGHT`] requests are relayed at once;
+//! * follows the attachment's notice stream, opened before the first frame
+//!   is read, and writes each notification it carries to the host, so the
+//!   host learns that the companion's tools changed;
 //! * keeps stdout for protocol frames only: everything it has to say to a
 //!   person goes to stderr;
 //! * reads newline-delimited frames of at most 8 MiB, answers an unparseable
@@ -30,6 +33,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -37,7 +41,7 @@ use serde_json::{Value, json};
 
 use crate::contact::{self, Daemon};
 use crate::home;
-use crate::http::{self, ATTACHMENT_HEADER};
+use crate::http::{self, ATTACHMENT_HEADER, MCP_PATH};
 use crate::keyring::AttachmentToken;
 use crate::loopback::{self, Call};
 use crate::mcp::{INTERNAL_ERROR, INVALID_PARAMS, PARSE_ERROR, rpc_error};
@@ -50,6 +54,8 @@ pub const STARTUP_BUDGET: Duration = Duration::from_secs(10);
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// How many requests the shim relays at once; the next waits for the oldest.
 pub const MAX_IN_FLIGHT: usize = 16;
+/// The pause before the notice stream is opened again after it ended.
+pub const NOTICE_RETRY: Duration = Duration::from_millis(250);
 
 /// What the mind is told when the daemon is gone and attaching again failed.
 const GONE: &str =
@@ -197,6 +203,8 @@ struct Link {
     companion: String,
     daemon: Mutex<Daemon>,
     attached: Mutex<Attached>,
+    /// Set once the host closed stdin and the shim is detaching.
+    closing: AtomicBool,
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -210,6 +218,7 @@ impl Link {
             companion: companion.to_owned(),
             daemon: Mutex::new(daemon),
             attached: Mutex::new(attached),
+            closing: AtomicBool::new(false),
         })
     }
 
@@ -279,7 +288,64 @@ impl Link {
     }
 
     fn detach(&self) {
+        self.closing.store(true, Ordering::Release);
         detach(&self.current());
+    }
+
+    fn closing(&self) -> bool {
+        self.closing.load(Ordering::Acquire)
+    }
+}
+
+/// Opens the notice stream of `attached`, once it said it is open.
+fn open_notices(attached: &Attached) -> Option<loopback::Lines> {
+    let bearer = format!("Bearer {}", attached.token.expose());
+    let call = Call {
+        method: "GET",
+        path: MCP_PATH,
+        headers: &[
+            ("Authorization", &bearer),
+            (ATTACHMENT_HEADER, &attached.id),
+            ("Accept", "text/event-stream"),
+        ],
+        body: &[],
+        timeout: contact::PROBE_TIMEOUT,
+    };
+    let mut lines = loopback::open_stream(attached.port, &call).ok()?.ok()?;
+    let opened = lines.next_line().ok()??;
+    opened.starts_with(':').then_some(lines)
+}
+
+/// Writes every notification the attachment's notice stream carries to the
+/// host, opening the stream again, for the attachment of the moment, when it
+/// ends before the shim detaches.
+fn relay_notices(
+    link: &Link,
+    mut stream: Option<loopback::Lines>,
+    write: &(dyn Fn(&Value) -> bool + Send + Sync),
+) {
+    loop {
+        if let Some(lines) = stream.as_mut() {
+            while let Ok(Some(line)) = lines.next_line() {
+                let Some(frame) = line
+                    .strip_prefix("data:")
+                    .and_then(|data| serde_json::from_str::<Value>(data.trim()).ok())
+                else {
+                    continue;
+                };
+                if link.closing() || !write(&frame) {
+                    return;
+                }
+            }
+        }
+        if link.closing() {
+            return;
+        }
+        std::thread::sleep(NOTICE_RETRY);
+        if link.closing() {
+            return;
+        }
+        stream = open_notices(&link.current());
     }
 }
 
@@ -412,6 +478,14 @@ fn relay(link: Arc<Link>, transcript: Option<Arc<Transcript>>) {
         }
     };
     let write = Arc::new(write);
+    // The notice stream is open before the host's first frame is read, so no
+    // change after the host's first answer goes unannounced.
+    let first = open_notices(&link.current());
+    {
+        let link = link.clone();
+        let write = write.clone();
+        std::thread::spawn(move || relay_notices(&link, first, &*write));
+    }
     let mut reader = BufReader::new(io::stdin().lock());
     let mut buffer = String::new();
     let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();

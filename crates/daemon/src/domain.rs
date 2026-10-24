@@ -1,8 +1,8 @@
 //! The lobby's state and the commands that change it.
 //!
-//! The truth is the state file, held by [`Store`]; live attachments are
-//! runtime facts held beside it. Everything that changes either goes through
-//! one command pipeline, in this order:
+//! The truth is the state file, held by [`Store`]; live attachments and the
+//! sign-ins the lobby waits on are runtime facts held beside it. Everything
+//! that changes either goes through one command pipeline, in this order:
 //!
 //! 1. **validate**: a command that cannot apply is refused with an outcome
 //!    and a sentence the lobby wrote, and the refusal is journaled;
@@ -17,40 +17,73 @@
 //!    failing for the sponsor to see;
 //! 5. **emit**: the command's events go to one event pipeline.
 //!
+//! A command that needs an adapter (completing a sign-in, establishing a
+//! connection, a tool call) is split around it: validation and the pending
+//! entry under the lobby, the adapter on the request's blocking thread with
+//! nothing held, then a re-check of what was pinned, the commit and the
+//! settled entry under the lobby again. What changed while the adapter ran
+//! wins: a credential revoked meanwhile is never connected, and a connection
+//! revoked meanwhile never delivers its late result.
+//!
 //! The event pipeline runs every event through small handlers, in order,
 //! before the next command starts: the feed handler turns it into an item of
-//! the live feed the manager page follows, and the cascade handler ends the
-//! attachments of a companion that was removed, a command of its own
-//! initiated by the lobby. The handlers run while the lobby is held, which
-//! is what makes a snapshot's feed position exact, so a handler only changes
-//! state in memory and writes the journal; it never calls an adapter, which
-//! would hold the lobby across a service's I/O.
+//! the live feed the manager page follows, the catalog handler tells every
+//! attachment of a companion whose connections changed that its tools
+//! changed, and the cascade handler ends the attachments of a companion that
+//! was removed, a command of its own initiated by the lobby. The handlers run
+//! while the lobby is held, which is what makes a snapshot's feed position
+//! exact, so a handler only changes state in memory and writes the journal;
+//! it never calls an adapter, which would hold the lobby across a service's
+//! I/O.
 //!
 //! A companion is created, renamed and removed only by the sponsor, through
 //! the operator API; a rename or removal names the companion's revision and
 //! is refused when the companion changed since, and a removal is refused
 //! while minds are attached as the companion unless the sponsor confirms the
-//! cascade. An attachment exists only because the attach shim presented the
+//! cascade. Removing a companion removes its credentials and connections too.
+//! An attachment exists only because the attach shim presented the
 //! per-install secret and named a companion by id or moniker; it keeps the
 //! token its shim presents on every later request. When the daemon starts and
 //! finds an attach secret that could have been read or planted, replacing it
 //! is a command the lobby initiates, journaled like any other.
+//!
+//! A credential exists only because its adapter completed a sign-in the
+//! sponsor started: a companion holds at most one ready credential of a
+//! provider kind, and an account belongs to one companion, which keeps it
+//! after the credential is revoked. A connection exists only because its
+//! service adapter established it with a credential of its companion.
+//! Revoking a credential revokes every connection made from it in the same
+//! commit, under one journal entry, and deletes what they keep.
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use lobby_contracts::{
-    Attachment, AttachmentId, Companion, CompanionId, DisplayName, Initiator, JournalEntry,
-    JournalKind, Moniker, NameProblem, Outcome, Sponsor,
+    Address, Attachment, AttachmentId, Companion, CompanionId, Connection, ConnectionId,
+    ConnectionState, Credential, CredentialAdapter, CredentialId, CredentialState, DisplayName,
+    Initiator, JournalEntry, JournalKind, Label, Moniker, NameProblem, Outcome, ProviderKind,
+    SealedMaterial, ServiceAdapter, ServiceName, SignInRequest, SignInReturn, SignInStart, Sponsor,
+    ToolArguments, ToolResult,
 };
+use serde_json::{Map, Value};
+use tokio::sync::watch;
 
+use crate::broker::Broker;
+use crate::calls::{self, Ticket};
 use crate::journal::{Journal, Note, Page, PageProblem};
-use crate::keyring::AttachmentToken;
-use crate::projections::{self, Feed, Subscription};
+use crate::keyring::{self, AttachmentToken};
+use crate::projections::{self, Feed, Reached, Subscription};
+use crate::registry::Registry;
 use crate::store::{CompanionRecord, State, Store};
 use crate::trace;
+
+/// How long the lobby waits for a sign-in it started to come back.
+pub const SIGN_IN_TIME_LIMIT: Duration = Duration::from_secs(10 * 60);
+/// How many sign-ins the lobby waits on at once; the oldest gives way.
+pub const SIGN_INS_WAITING: usize = 32;
 
 /// Why a command was refused, with the lobby's own words for the sponsor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +101,30 @@ impl Refusal {
             message: message.into(),
         }
     }
+
+    /// The refusal of an adapter that answered `outcome`, in the lobby's words.
+    fn from_adapter(outcome: Outcome) -> Self {
+        let message = match outcome {
+            Outcome::Unsupported => {
+                "The credential cannot give this service the kind of proof it asks for."
+            }
+            Outcome::NeedsSignIn => {
+                "The provider refused this credential; sign the companion in again."
+            }
+            Outcome::Refused => "The provider or the service refused.",
+            other => other.sentence(),
+        };
+        Self::new(outcome, message)
+    }
+}
+
+/// Why a tool call was not made or did not succeed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallRefusal {
+    /// No tool of that name is in this attachment's catalog.
+    UnknownTool,
+    /// The call was refused or ended with this outcome.
+    Ended(Refusal),
 }
 
 /// A companion and how many minds are attached as it right now.
@@ -86,6 +143,10 @@ pub enum Event {
     CompanionChanged(CompanionView),
     /// A companion was removed.
     CompanionRemoved(CompanionId),
+    /// A credential was signed in or revoked.
+    CredentialChanged(Credential),
+    /// A connection was established or revoked.
+    ConnectionChanged(Connection),
     /// An entry reached the journal.
     Journaled(JournalEntry),
     /// The journal started failing (`false`) or recovered (`true`).
@@ -101,12 +162,31 @@ pub struct Rename<'a> {
     pub display_name: Option<&'a str>,
 }
 
+/// What the sponsor asks for when granting a connection.
+#[derive(Debug, Clone, Copy)]
+pub struct Grant<'a> {
+    /// The companion that will reach the service.
+    pub companion: CompanionId,
+    /// The credential it reaches the service with.
+    pub credential: CredentialId,
+    /// The service's name.
+    pub service: &'a str,
+    /// Where the service is.
+    pub address: &'a str,
+    /// The sponsor's name for the connection.
+    pub label: &'a str,
+}
+
 /// The lobby as one consistent picture, for a page to start from: the feed
 /// position is the last item that picture already includes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     /// Every companion, oldest first.
     pub companions: Vec<CompanionView>,
+    /// Every credential, oldest first.
+    pub credentials: Vec<Credential>,
+    /// Every connection, oldest first.
+    pub connections: Vec<Connection>,
     /// The store id that names the journal.
     pub store_id: String,
     /// The live feed's epoch.
@@ -123,12 +203,23 @@ pub struct Snapshot {
 struct Live {
     attachment: Attachment,
     token: AttachmentToken,
+    /// Advances whenever the attachment's tools change.
+    catalog: watch::Sender<u64>,
+}
+
+/// A sign-in the lobby started and waits to see come back.
+struct Awaited {
+    companion: CompanionId,
+    kind: ProviderKind,
+    request: SignInRequest,
+    started: Instant,
 }
 
 struct Core {
     store: Store,
     journal: Journal,
     attachments: HashMap<AttachmentId, Live>,
+    awaited: HashMap<String, Awaited>,
     journal_healthy: bool,
     events: VecDeque<Event>,
 }
@@ -138,6 +229,8 @@ pub struct Lobby {
     core: Mutex<Core>,
     feed: Feed,
     command: String,
+    dir: PathBuf,
+    registry: Registry,
 }
 
 /// The fixed names commands carry in the journal.
@@ -147,11 +240,61 @@ const REMOVE_COMPANION: &str = "remove_companion";
 const ATTACH: &str = "attach";
 const DETACH: &str = "detach";
 const RENEW_ATTACH_SECRET: &str = "renew_attach_secret";
+const BEGIN_SIGN_IN: &str = "begin_sign_in";
+const COMPLETE_SIGN_IN: &str = "complete_sign_in";
+const REVOKE_CREDENTIAL: &str = "revoke_credential";
+const GRANT_CONNECTION: &str = "grant_connection";
+const REVOKE_CONNECTION: &str = "revoke_connection";
+
+/// Who a journal entry is about, short of its kind and outcome.
+#[derive(Debug, Clone)]
+struct Subject {
+    initiator: Initiator,
+    companion: Option<CompanionId>,
+    connection: Option<ConnectionId>,
+    service: Option<ServiceName>,
+    name: &'static str,
+}
+
+impl Subject {
+    fn new(initiator: Initiator, companion: Option<CompanionId>, name: &'static str) -> Self {
+        Self {
+            initiator,
+            companion,
+            connection: None,
+            service: None,
+            name,
+        }
+    }
+
+    fn through(mut self, connection: Option<ConnectionId>, service: Option<ServiceName>) -> Self {
+        self.connection = connection;
+        self.service = service;
+        self
+    }
+
+    fn note(&self, outcome: Outcome) -> Note {
+        Note {
+            initiator: self.initiator,
+            companion: self.companion,
+            connection: self.connection,
+            service: self.service.clone(),
+            tool: None,
+            kind: JournalKind::Command { name: self.name },
+            outcome,
+        }
+    }
+}
+
+fn new_id() -> u128 {
+    uuid::Uuid::now_v7().as_u128()
+}
 
 impl Lobby {
     /// Opens the state file and the journal in `dir`. `command` is the path
-    /// host configurations name to start the shim.
-    pub fn open(dir: &Path, command: &str) -> Result<Self, String> {
+    /// host configurations name to start the shim; `registry` holds the
+    /// adapters the lobby runs with.
+    pub fn open(dir: &Path, command: &str, registry: Registry) -> Result<Self, String> {
         let store = Store::open(dir).map_err(|problem| problem.to_string())?;
         let journal = Journal::open(dir, &store.state().store_id)
             .map_err(|error| format!("cannot read the journal: {error}"))?;
@@ -160,11 +303,14 @@ impl Lobby {
                 store,
                 journal,
                 attachments: HashMap::new(),
+                awaited: HashMap::new(),
                 journal_healthy: true,
                 events: VecDeque::new(),
             }),
             feed: Feed::new(),
             command: command.to_owned(),
+            dir: dir.to_path_buf(),
+            registry,
         })
     }
 
@@ -175,7 +321,7 @@ impl Lobby {
     }
 
     /// Runs one command, then every event it emitted, before the next command.
-    fn run<T>(&self, command: impl FnOnce(&mut Core) -> Result<T, Refusal>) -> Result<T, Refusal> {
+    fn run<T, E>(&self, command: impl FnOnce(&mut Core) -> Result<T, E>) -> Result<T, E> {
         let mut core = self.core();
         let result = command(&mut core);
         core.settle_events(&self.feed, &self.command);
@@ -237,7 +383,7 @@ impl Lobby {
                 .map_err(|refusal| core.refused(sponsor, None, CREATE_COMPANION, refusal))?;
             let record = CompanionRecord {
                 companion: Companion {
-                    id: CompanionId::from_u128(uuid::Uuid::now_v7().as_u128()),
+                    id: CompanionId::from_u128(new_id()),
                     moniker,
                     display_name,
                     sponsor: Sponsor::LOCAL,
@@ -300,9 +446,9 @@ impl Lobby {
     }
 
     /// Removes the companion `id`, which must still be at `expected`
-    /// revision. While minds are attached as it the removal is refused unless
-    /// `cascade` confirms that their attachments end too. Returns how many
-    /// attachments ended.
+    /// revision, with its credentials and connections. While minds are
+    /// attached as it the removal is refused unless `cascade` confirms that
+    /// their attachments end too. Returns how many attachments ended.
     pub fn remove_companion(
         &self,
         id: CompanionId,
@@ -330,7 +476,27 @@ impl Lobby {
                 .map_err(|refusal| core.refused(sponsor, Some(id), REMOVE_COMPANION, refusal))?;
             let mut next = core.store.state().clone();
             next.companions.retain(|record| record.companion.id != id);
+            let kept: Vec<String> = next
+                .credentials
+                .iter()
+                .filter(|credential| credential.companion == id)
+                .map(|credential| keyring::material_file(credential.id))
+                .chain(
+                    next.connections
+                        .iter()
+                        .filter(|connection| connection.companion == id)
+                        .map(|connection| keyring::issued_file(connection.id)),
+                )
+                .collect();
+            next.credentials
+                .retain(|credential| credential.companion != id);
+            next.connections
+                .retain(|connection| connection.companion != id);
             core.commit(sponsor, Some(id), REMOVE_COMPANION, next)?;
+            for file in kept {
+                self.discard(&file);
+            }
+            core.awaited.retain(|_, awaited| awaited.companion != id);
             core.events.push_back(Event::CompanionRemoved(id));
             Ok(attached)
         })
@@ -357,7 +523,7 @@ impl Lobby {
                     ),
                 ));
             };
-            let attachment = AttachmentId::from_u128(uuid::Uuid::now_v7().as_u128());
+            let attachment = AttachmentId::from_u128(new_id());
             let mind = Initiator::Mind { attachment };
             let companion = record.companion.clone();
             core.begin(mind, Some(companion.id), ATTACH)?;
@@ -370,6 +536,7 @@ impl Lobby {
                 Live {
                     attachment: attachment.clone(),
                     token,
+                    catalog: watch::channel(0).0,
                 },
             );
             core.settle(mind, Some(companion.id), ATTACH, Outcome::Done);
@@ -386,13 +553,7 @@ impl Lobby {
         presented: &str,
     ) -> Result<(Attachment, Companion), Refusal> {
         let core = self.core();
-        let live = core.attachments.get(&id).ok_or_else(gone)?;
-        if !live.token.matches(presented) {
-            return Err(Refusal::new(
-                Outcome::Refused,
-                "That is not this attachment's token.",
-            ));
-        }
+        let live = core.proven(id, presented)?;
         let attachment = live.attachment.clone();
         let companion = core
             .store
@@ -401,6 +562,18 @@ impl Lobby {
             .map(|record| record.companion.clone())
             .ok_or_else(gone)?;
         Ok((attachment, companion))
+    }
+
+    /// Follows the changes of the tools of the attachment `id`, when
+    /// `presented` is its token. The value advances on every change and the
+    /// channel closes when the attachment ends.
+    pub fn catalog_changes(
+        &self,
+        id: AttachmentId,
+        presented: &str,
+    ) -> Result<watch::Receiver<u64>, Refusal> {
+        let core = self.core();
+        Ok(core.proven(id, presented)?.catalog.subscribe())
     }
 
     /// Ends an attachment, when `presented` is its token. A refused detach is
@@ -427,6 +600,507 @@ impl Lobby {
         })
     }
 
+    /// Starts signing `companion` in with the provider `kind`, as the sponsor
+    /// asked with `hint`. `origin` is the lobby's own origin, where the
+    /// provider sends the browser back. Returns where the browser goes.
+    pub fn begin_sign_in(
+        &self,
+        companion: CompanionId,
+        kind: &str,
+        hint: &str,
+        origin: &str,
+    ) -> Result<SignInStart, Refusal> {
+        let subject = Subject::new(Initiator::Sponsor, Some(companion), BEGIN_SIGN_IN);
+        let (adapter, kind) = self.run(|core| {
+            let validated = (|| {
+                core.store
+                    .state()
+                    .companion(companion)
+                    .ok_or_else(|| Refusal::new(Outcome::NotFound, "No companion has that id."))?;
+                let (adapter, kind) = self.credential_adapter(kind)?;
+                core.no_ready_credential(companion, &kind)?;
+                Ok((adapter, kind))
+            })();
+            let found = validated.map_err(|refusal| core.refused_as(&subject, refusal))?;
+            core.begin_as(&subject)?;
+            Ok(found)
+        })?;
+        let state = keyring::random_token();
+        let started = state
+            .as_ref()
+            .map_err(|_| Outcome::Internal)
+            .and_then(|state| {
+                let request = SignInRequest {
+                    hint: hint.to_owned(),
+                    state: state.clone(),
+                    return_to: format!("{origin}/signin/{kind}/return"),
+                };
+                adapter
+                    .begin_sign_in(&request)
+                    .map(|start| (start, request))
+            });
+        self.run(|core| match started {
+            Ok((start, request)) => {
+                core.prune_awaited();
+                core.awaited.insert(
+                    request.state.clone(),
+                    Awaited {
+                        companion,
+                        kind,
+                        request,
+                        started: Instant::now(),
+                    },
+                );
+                core.settle_as(&subject, Outcome::Done);
+                Ok(start)
+            }
+            Err(outcome) => {
+                core.settle_as(&subject, outcome);
+                Err(match outcome {
+                    Outcome::InvalidInput => Refusal::new(
+                        outcome,
+                        "The provider cannot start a sign-in from what was typed; check it and try again.",
+                    ),
+                    other => Refusal::from_adapter(other),
+                })
+            }
+        })
+    }
+
+    /// Completes a sign-in of the provider `kind` from what the provider sent
+    /// back to the return route. A return the lobby is not waiting for is
+    /// refused without a journal entry: nothing proves who sent it.
+    pub fn complete_sign_in(
+        &self,
+        kind: &str,
+        query: Vec<(String, String)>,
+    ) -> Result<Credential, Refusal> {
+        let returned = SignInReturn { query };
+        let awaited = self.run(|core| {
+            core.prune_awaited();
+            let awaited = returned
+                .get("state")
+                .and_then(|state| core.awaited.remove(state))
+                .filter(|awaited| awaited.kind.as_str() == kind)
+                .ok_or_else(|| {
+                    Refusal::new(
+                        Outcome::NotFound,
+                        "The lobby is not waiting for this sign-in; start it again on the manager page.",
+                    )
+                })?;
+            let subject = Subject::new(Initiator::Sponsor, Some(awaited.companion), COMPLETE_SIGN_IN);
+            core.begin_as(&subject)?;
+            Ok(awaited)
+        })?;
+        let subject = Subject::new(
+            Initiator::Sponsor,
+            Some(awaited.companion),
+            COMPLETE_SIGN_IN,
+        );
+        let signed = match self.registry.credential(&awaited.kind) {
+            Some(adapter) => adapter.complete_sign_in(&awaited.request, &returned),
+            None => Err(Outcome::Unsupported),
+        };
+        self.run(|core| {
+            let signed = signed.map_err(|outcome| {
+                core.settle_as(&subject, outcome);
+                Refusal::from_adapter(outcome)
+            })?;
+            let state = core.store.state();
+            let checked = if state.companion(awaited.companion).is_none() {
+                Err(Refusal::new(
+                    Outcome::NotFound,
+                    "The companion was removed while it was signing in.",
+                ))
+            } else if state.credentials.iter().any(|credential| {
+                credential.kind == awaited.kind
+                    && credential.account == signed.account
+                    && credential.companion != awaited.companion
+            }) {
+                Err(Refusal::new(
+                    Outcome::Conflict,
+                    "That account is signed in for another companion; an account belongs to one companion.",
+                ))
+            } else {
+                core.no_ready_credential(awaited.companion, &awaited.kind)
+            };
+            checked.inspect_err(|refusal| core.settle_as(&subject, refusal.outcome))?;
+            let credential = Credential {
+                id: CredentialId::from_u128(new_id()),
+                companion: awaited.companion,
+                kind: awaited.kind.clone(),
+                account: signed.account,
+                state: CredentialState::Ready,
+            };
+            if let Err(error) = keyring::write_material(&self.dir, credential.id, &signed.material) {
+                trace::line(&format!("the material of a new credential could not be kept: {error}"));
+                core.settle_as(&subject, Outcome::TemporarilyUnavailable);
+                return Err(Refusal::new(
+                    Outcome::TemporarilyUnavailable,
+                    "The lobby could not keep the new credential, so nothing was signed in; try again.",
+                ));
+            }
+            let mut next = core.store.state().clone();
+            next.credentials.push(credential.clone());
+            if let Err(refusal) = core.land_as(&subject, next) {
+                self.discard(&keyring::material_file(credential.id));
+                return Err(refusal);
+            }
+            core.events
+                .push_back(Event::CredentialChanged(credential.clone()));
+            Ok(credential)
+        })
+    }
+
+    /// Revokes the credential `id` and, in the same commit, every connection
+    /// made from it; what they keep is deleted. The account stays reserved
+    /// to the credential's companion.
+    pub fn revoke_credential(&self, id: CredentialId) -> Result<Credential, Refusal> {
+        self.run(|core| {
+            let found = core.store.state().credential(id).cloned();
+            let subject = Subject::new(
+                Initiator::Sponsor,
+                found.as_ref().map(|credential| credential.companion),
+                REVOKE_CREDENTIAL,
+            );
+            let mut credential = match found {
+                None => {
+                    return Err(core.refused_as(
+                        &subject,
+                        Refusal::new(Outcome::NotFound, "No credential has that id."),
+                    ));
+                }
+                Some(credential) if credential.state == CredentialState::Revoked => {
+                    return Err(core.refused_as(
+                        &subject,
+                        Refusal::new(Outcome::Conflict, "That credential is already revoked."),
+                    ));
+                }
+                Some(credential) => credential,
+            };
+            core.begin_as(&subject)?;
+            credential.state = CredentialState::Revoked;
+            let mut next = core.store.state().clone();
+            let mut revoked = Vec::new();
+            for slot in &mut next.credentials {
+                if slot.id == id {
+                    slot.state = CredentialState::Revoked;
+                }
+            }
+            for connection in &mut next.connections {
+                if connection.credential == id && connection.state == ConnectionState::Ready {
+                    connection.state = ConnectionState::Revoked;
+                    connection.revision += 1;
+                    revoked.push(connection.clone());
+                }
+            }
+            core.land_as(&subject, next)?;
+            self.discard(&keyring::material_file(id));
+            for connection in &revoked {
+                self.discard(&keyring::issued_file(connection.id));
+            }
+            core.events
+                .push_back(Event::CredentialChanged(credential.clone()));
+            core.events
+                .extend(revoked.into_iter().map(Event::ConnectionChanged));
+            Ok(credential)
+        })
+    }
+
+    /// Establishes a connection the sponsor granted: the companion's
+    /// credential is pinned, the service adapter establishes it with no lock
+    /// held, minting what it needs through the credential's adapter, and the
+    /// connection is committed only when the credential is still ready and
+    /// the label still free.
+    pub fn grant_connection(&self, grant: Grant<'_>) -> Result<Connection, Refusal> {
+        let pinned = self.run(|core| {
+            let subject = Subject::new(Initiator::Sponsor, Some(grant.companion), GRANT_CONNECTION)
+                .through(None, ServiceName::new(grant.service));
+            let validated = self.pin_grant(core, &grant);
+            let pinned = validated.map_err(|refusal| core.refused_as(&subject, refusal))?;
+            core.begin_as(&subject)?;
+            Ok(pinned)
+        })?;
+        let Pinned {
+            service,
+            adapter,
+            credential_adapter,
+            credential,
+            address,
+            label,
+        } = pinned;
+        let subject = Subject::new(Initiator::Sponsor, Some(grant.companion), GRANT_CONNECTION)
+            .through(None, Some(service.clone()));
+        let broker = Broker::new(self, credential.id, credential_adapter);
+        let established = adapter.establish(&address, &broker);
+        self.run(|core| {
+            let issued = established.map_err(|outcome| {
+                core.settle_as(&subject, outcome);
+                Refusal::from_adapter(outcome)
+            })?;
+            let state = core.store.state();
+            let still_ready = state
+                .credential(credential.id)
+                .is_some_and(|current| current.state == CredentialState::Ready)
+                && state.companion(grant.companion).is_some();
+            let checked = if !still_ready {
+                Err(Refusal::new(
+                    Outcome::Revoked,
+                    "The credential was revoked while the connection was being made.",
+                ))
+            } else {
+                core.label_free(grant.companion, &service, &label)
+            };
+            checked.inspect_err(|refusal| core.settle_as(&subject, refusal.outcome))?;
+            let connection = Connection {
+                id: ConnectionId::from_u128(new_id()),
+                companion: grant.companion,
+                credential: credential.id,
+                service: service.clone(),
+                address,
+                label,
+                state: ConnectionState::Ready,
+                revision: 1,
+            };
+            let subject = subject.through(Some(connection.id), Some(service));
+            if let Err(error) = keyring::write_issued(&self.dir, connection.id, &issued) {
+                trace::line(&format!("what a service issued could not be kept: {error}"));
+                core.settle_as(&subject, Outcome::TemporarilyUnavailable);
+                return Err(Refusal::new(
+                    Outcome::TemporarilyUnavailable,
+                    "The lobby could not keep what the service issued, so nothing was connected; try again.",
+                ));
+            }
+            let mut next = core.store.state().clone();
+            next.connections.push(connection.clone());
+            if let Err(refusal) = core.land_as(&subject, next) {
+                self.discard(&keyring::issued_file(connection.id));
+                return Err(refusal);
+            }
+            core.events
+                .push_back(Event::ConnectionChanged(connection.clone()));
+            Ok(connection)
+        })
+    }
+
+    /// Revokes the connection `id`; what the service issued for it is deleted.
+    pub fn revoke_connection(&self, id: ConnectionId) -> Result<Connection, Refusal> {
+        self.run(|core| {
+            let found = core.store.state().connection(id).cloned();
+            let subject = Subject::new(
+                Initiator::Sponsor,
+                found.as_ref().map(|connection| connection.companion),
+                REVOKE_CONNECTION,
+            )
+            .through(
+                found.as_ref().map(|connection| connection.id),
+                found.as_ref().map(|connection| connection.service.clone()),
+            );
+            let mut connection = match found {
+                None => {
+                    return Err(core.refused_as(
+                        &subject,
+                        Refusal::new(Outcome::NotFound, "No connection has that id."),
+                    ));
+                }
+                Some(connection) if connection.state == ConnectionState::Revoked => {
+                    return Err(core.refused_as(
+                        &subject,
+                        Refusal::new(Outcome::Conflict, "That connection is already revoked."),
+                    ));
+                }
+                Some(connection) => connection,
+            };
+            core.begin_as(&subject)?;
+            connection.state = ConnectionState::Revoked;
+            connection.revision += 1;
+            let mut next = core.store.state().clone();
+            for slot in &mut next.connections {
+                if slot.id == id {
+                    *slot = connection.clone();
+                }
+            }
+            core.land_as(&subject, next)?;
+            self.discard(&keyring::issued_file(id));
+            core.events
+                .push_back(Event::ConnectionChanged(connection.clone()));
+            Ok(connection)
+        })
+    }
+
+    /// The material of the credential `id`, for its adapter, when the
+    /// credential is still ready.
+    pub fn read_material(&self, id: CredentialId) -> Result<SealedMaterial, Outcome> {
+        let ready = self
+            .core()
+            .store
+            .state()
+            .credential(id)
+            .is_some_and(|credential| credential.state == CredentialState::Ready);
+        if !ready {
+            return Err(Outcome::Revoked);
+        }
+        keyring::read_material(&self.dir, id).map_err(|error| {
+            trace::line(&format!(
+                "the material of credential {id} could not be read: {error}"
+            ));
+            Outcome::Internal
+        })
+    }
+
+    /// What `companion` reaches right now: each installed service it holds a
+    /// ready connection to, its tools, and the labels and addresses of those
+    /// connections.
+    pub fn reached(&self, companion: CompanionId) -> Vec<Reached> {
+        let mut by_service: Vec<(ServiceName, Vec<(Label, Address)>)> = Vec::new();
+        {
+            let core = self.core();
+            for connection in &core.store.state().connections {
+                if connection.companion != companion || connection.state != ConnectionState::Ready {
+                    continue;
+                }
+                let place = (connection.label.clone(), connection.address.clone());
+                match by_service
+                    .iter_mut()
+                    .find(|(service, _)| *service == connection.service)
+                {
+                    Some((_, places)) => places.push(place),
+                    None => by_service.push((connection.service.clone(), vec![place])),
+                }
+            }
+        }
+        // Catalogs are the adapters' fixed declarations, read with nothing held.
+        by_service
+            .into_iter()
+            .filter_map(|(service, connections)| {
+                let adapter = self.registry.service(&service)?;
+                Some(Reached {
+                    tools: adapter.catalog(),
+                    service,
+                    connections,
+                })
+            })
+            .collect()
+    }
+
+    /// Calls the tool `name` for `attachment`: journaled as invoked through
+    /// the connection `at` names, performed with no lock held, and settled
+    /// against that connection as it is when the service answers.
+    pub fn call_tool(
+        &self,
+        attachment: &Attachment,
+        name: &str,
+        mut arguments: Map<String, Value>,
+    ) -> Result<ToolResult, CallRefusal> {
+        let companion = attachment.companion;
+        let mind = Initiator::Mind {
+            attachment: attachment.id,
+        };
+        let candidates = self.reached(companion);
+        let (service, tool) = candidates
+            .iter()
+            .find_map(|reached| {
+                calls::find_tool(&reached.service, &reached.tools, name)
+                    .map(|tool| (reached.service.clone(), tool))
+            })
+            .ok_or(CallRefusal::UnknownTool)?;
+        let at = arguments.remove(projections::AT);
+        let ticket = self.run(|core| {
+            let ready: Vec<&Connection> = core
+                .store
+                .state()
+                .connections
+                .iter()
+                .filter(|connection| {
+                    connection.companion == companion
+                        && connection.service == service
+                        && connection.state == ConnectionState::Ready
+                })
+                .collect();
+            let labels = ready
+                .iter()
+                .map(|connection| connection.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let chosen = match &at {
+                Some(Value::String(label)) => ready
+                    .iter()
+                    .find(|connection| connection.label.as_str() == label)
+                    .ok_or_else(|| {
+                        format!("This companion reaches no {service} called that; at is one of: {labels}.")
+                    }),
+                Some(_) => Err(format!(
+                    "at names one {service} connection as text, one of: {labels}."
+                )),
+                None if ready.len() == 1 => Ok(&ready[0]),
+                None if ready.is_empty() => Err(format!(
+                    "This companion does not reach {service} now; call reach to see what it reaches."
+                )),
+                None => Err(format!(
+                    "This companion reaches more than one {service}; name one with at: {labels}."
+                )),
+            };
+            let connection = (*chosen.map_err(|message| {
+                CallRefusal::Ended(Refusal::new(Outcome::InvalidInput, message))
+            })?)
+            .clone();
+            let adapter = self
+                .registry
+                .service(&service)
+                .ok_or(CallRefusal::UnknownTool)?;
+            let ticket = Ticket {
+                connection: connection.id,
+                revision: connection.revision,
+                address: connection.address,
+                service: service.clone(),
+                tool: tool.name.clone(),
+                effect: tool.effect,
+                adapter,
+            };
+            core.record(call_note(mind, companion, &ticket, JournalKind::Invoked, Outcome::Pending))
+                .map_err(|_| {
+                    CallRefusal::Ended(Refusal::new(
+                        Outcome::TemporarilyUnavailable,
+                        "The journal could not be written, so the call was not made; the trace log in the data directory says why.",
+                    ))
+                })?;
+            Ok(ticket)
+        })?;
+        let result = keyring::read_issued(&self.dir, ticket.connection)
+            .map_err(|_| Outcome::Revoked)
+            .and_then(|issued| {
+                ticket.adapter.call(
+                    &ticket.tool,
+                    &ToolArguments(arguments),
+                    &ticket.address,
+                    &issued,
+                )
+            });
+        let answer = self.run(|core| {
+            let still_pinned = core
+                .store
+                .state()
+                .connection(ticket.connection)
+                .is_some_and(|connection| {
+                    connection.state == ConnectionState::Ready
+                        && connection.revision == ticket.revision
+                });
+            let answer = calls::settle(ticket.effect, still_pinned, result);
+            let outcome = answer
+                .as_ref()
+                .map_or_else(|outcome| *outcome, |_| Outcome::Done);
+            let _ = core.record(call_note(
+                mind,
+                companion,
+                &ticket,
+                JournalKind::Settled,
+                outcome,
+            ));
+            Ok::<_, CallRefusal>(answer)
+        })?;
+        answer.map_err(|outcome| CallRefusal::Ended(Refusal::new(outcome, outcome.sentence())))
+    }
+
     /// Every companion with its live attachments, oldest first.
     pub fn companions(&self) -> Vec<CompanionView> {
         let core = self.core();
@@ -436,9 +1110,12 @@ impl Lobby {
     /// The lobby as one consistent picture.
     pub fn snapshot(&self) -> Snapshot {
         let core = self.core();
+        let state = core.store.state();
         Snapshot {
             companions: core.views(),
-            store_id: core.store.state().store_id.clone(),
+            credentials: state.credentials.clone(),
+            connections: state.connections.clone(),
+            store_id: state.store_id.clone(),
             epoch: self.feed.epoch().to_owned(),
             // Items are published only while the core is held, so this is
             // exactly the last item the picture includes.
@@ -475,6 +1152,124 @@ impl Lobby {
     pub fn attachment_count(&self) -> usize {
         self.core().attachments.len()
     }
+
+    /// The credential adapter of the provider kind `kind`.
+    fn credential_adapter(
+        &self,
+        kind: &str,
+    ) -> Result<(Arc<dyn CredentialAdapter>, ProviderKind), Refusal> {
+        ProviderKind::new(kind)
+            .and_then(|kind| {
+                self.registry
+                    .credential(&kind)
+                    .map(|adapter| (adapter, kind))
+            })
+            .ok_or_else(|| {
+                Refusal::new(
+                    Outcome::NotFound,
+                    "No credential provider of that kind is installed.",
+                )
+            })
+    }
+
+    /// Validates a grant and pins what establishing it needs.
+    fn pin_grant(&self, core: &Core, grant: &Grant<'_>) -> Result<Pinned, Refusal> {
+        let state = core.store.state();
+        state
+            .companion(grant.companion)
+            .ok_or_else(|| Refusal::new(Outcome::NotFound, "No companion has that id."))?;
+        let (service, adapter) = ServiceName::new(grant.service)
+            .and_then(|service| {
+                self.registry
+                    .service(&service)
+                    .map(|adapter| (service, adapter))
+            })
+            .ok_or_else(|| {
+                Refusal::new(Outcome::NotFound, "No service of that name is installed.")
+            })?;
+        let credential = state
+            .credential(grant.credential)
+            .filter(|credential| credential.companion == grant.companion)
+            .cloned()
+            .ok_or_else(|| {
+                Refusal::new(
+                    Outcome::NotFound,
+                    "That companion holds no credential with that id.",
+                )
+            })?;
+        if credential.state != CredentialState::Ready {
+            return Err(Refusal::new(
+                Outcome::Revoked,
+                "That credential was revoked; sign the companion in again first.",
+            ));
+        }
+        let description = adapter.describe();
+        if !description.accepts.contains(&credential.kind) {
+            return Err(Refusal::new(
+                Outcome::InvalidInput,
+                format!(
+                    "{service} does not accept a {} credential.",
+                    credential.kind
+                ),
+            ));
+        }
+        let (credential_adapter, _) = self.credential_adapter(credential.kind.as_str())?;
+        let address = Address::parse(grant.address, description.addresses).ok_or_else(|| {
+            Refusal::new(
+                Outcome::InvalidInput,
+                format!(
+                    "That is not an address {service} can reach: one origin, such as https://example.test, and nothing after it."
+                ),
+            )
+        })?;
+        let label = Label::new(grant.label).map_err(|problem| name_refusal("label", problem))?;
+        core.label_free(grant.companion, &service, &label)?;
+        Ok(Pinned {
+            service,
+            adapter,
+            credential_adapter,
+            credential,
+            address,
+            label,
+        })
+    }
+
+    /// Deletes a file the keyring kept, after the commit that let go of it.
+    /// A file that cannot be deleted is reported in the trace log; nothing
+    /// reads it again.
+    fn discard(&self, file: &str) {
+        if let Err(error) = keyring::remove_kept(&self.dir, file) {
+            trace::line(&format!("{file} could not be deleted: {error}"));
+        }
+    }
+}
+
+/// What establishing a granted connection is pinned to.
+struct Pinned {
+    service: ServiceName,
+    adapter: Arc<dyn ServiceAdapter>,
+    credential_adapter: Arc<dyn CredentialAdapter>,
+    credential: Credential,
+    address: Address,
+    label: Label,
+}
+
+fn call_note(
+    mind: Initiator,
+    companion: CompanionId,
+    ticket: &Ticket,
+    kind: JournalKind,
+    outcome: Outcome,
+) -> Note {
+    Note {
+        initiator: mind,
+        companion: Some(companion),
+        connection: Some(ticket.connection),
+        service: Some(ticket.service.clone()),
+        tool: Some(ticket.tool.clone()),
+        kind,
+        outcome,
+    }
 }
 
 fn gone() -> Refusal {
@@ -490,6 +1285,18 @@ impl Core {
             .values()
             .filter(|live| live.attachment.companion == companion)
             .count()
+    }
+
+    /// The live attachment `id`, when `presented` is its token.
+    fn proven(&self, id: AttachmentId, presented: &str) -> Result<&Live, Refusal> {
+        let live = self.attachments.get(&id).ok_or_else(gone)?;
+        if !live.token.matches(presented) {
+            return Err(Refusal::new(
+                Outcome::Refused,
+                "That is not this attachment's token.",
+            ));
+        }
+        Ok(live)
     }
 
     fn view(&self, record: &CompanionRecord) -> CompanionView {
@@ -550,20 +1357,79 @@ impl Core {
         Ok(())
     }
 
-    /// Writes one journal entry for the command `name`, emitting it.
-    fn note(
-        &mut self,
-        initiator: Initiator,
-        companion: Option<CompanionId>,
-        name: &'static str,
-        outcome: Outcome,
-    ) -> io::Result<JournalEntry> {
-        let note = Note {
-            initiator,
-            companion,
-            kind: JournalKind::Command { name },
-            outcome,
+    /// Refuses a second ready credential of `kind` for `companion`.
+    fn no_ready_credential(
+        &self,
+        companion: CompanionId,
+        kind: &ProviderKind,
+    ) -> Result<(), Refusal> {
+        let held = self.store.state().credentials.iter().any(|credential| {
+            credential.companion == companion
+                && credential.kind == *kind
+                && credential.state == CredentialState::Ready
+        });
+        if held {
+            return Err(Refusal::new(
+                Outcome::Conflict,
+                format!(
+                    "This companion is already signed in with {kind}; revoke that credential first."
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuses a label that already names a ready connection of `service`
+    /// for `companion`.
+    fn label_free(
+        &self,
+        companion: CompanionId,
+        service: &ServiceName,
+        label: &Label,
+    ) -> Result<(), Refusal> {
+        let taken = self.store.state().connections.iter().any(|connection| {
+            connection.companion == companion
+                && connection.service == *service
+                && connection.label == *label
+                && connection.state == ConnectionState::Ready
+        });
+        if taken {
+            return Err(Refusal::new(
+                Outcome::Conflict,
+                format!("This companion already reaches a {service} called {label}."),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Lets go of sign-ins that waited too long, and of the oldest when too
+    /// many wait.
+    fn prune_awaited(&mut self) {
+        self.awaited
+            .retain(|_, awaited| awaited.started.elapsed() < SIGN_IN_TIME_LIMIT);
+        while self.awaited.len() >= SIGN_INS_WAITING {
+            let oldest = self
+                .awaited
+                .iter()
+                .min_by_key(|(_, awaited)| awaited.started)
+                .map(|(state, _)| state.clone());
+            match oldest {
+                Some(state) => {
+                    self.awaited.remove(&state);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Writes one journal entry, emitting it.
+    fn record(&mut self, note: Note) -> io::Result<JournalEntry> {
+        let what = match note.kind {
+            JournalKind::Command { name } => name,
+            JournalKind::Invoked => "an invoked call",
+            JournalKind::Settled => "a settled call",
         };
+        let outcome = note.outcome;
         match self.journal.append(note) {
             Ok(entry) => {
                 self.events.push_back(Event::Journaled(entry.clone()));
@@ -576,7 +1442,7 @@ impl Core {
             }
             Err(error) => {
                 trace::line(&format!(
-                    "the journal could not record {name} ({}): {error}",
+                    "the journal could not record {what} ({}): {error}",
                     outcome.code()
                 ));
                 if self.journal_healthy {
@@ -589,6 +1455,11 @@ impl Core {
     }
 
     /// Journals a refusal; the refusal stands whether or not that worked.
+    fn refused_as(&mut self, subject: &Subject, refusal: Refusal) -> Refusal {
+        let _ = self.record(subject.note(refusal.outcome));
+        refusal
+    }
+
     fn refused(
         &mut self,
         initiator: Initiator,
@@ -596,18 +1467,12 @@ impl Core {
         name: &'static str,
         refusal: Refusal,
     ) -> Refusal {
-        let _ = self.note(initiator, companion, name, refusal.outcome);
-        refusal
+        self.refused_as(&Subject::new(initiator, companion, name), refusal)
     }
 
     /// The pending entry that precedes every effect: no entry, no effect.
-    fn begin(
-        &mut self,
-        initiator: Initiator,
-        companion: Option<CompanionId>,
-        name: &'static str,
-    ) -> Result<(), Refusal> {
-        self.note(initiator, companion, name, Outcome::Pending)
+    fn begin_as(&mut self, subject: &Subject) -> Result<(), Refusal> {
+        self.record(subject.note(Outcome::Pending))
             .map(drop)
             .map_err(|_| {
                 Refusal::new(
@@ -617,9 +1482,22 @@ impl Core {
             })
     }
 
+    fn begin(
+        &mut self,
+        initiator: Initiator,
+        companion: Option<CompanionId>,
+        name: &'static str,
+    ) -> Result<(), Refusal> {
+        self.begin_as(&Subject::new(initiator, companion, name))
+    }
+
     /// The settled entry that follows an effect. When it cannot be written
     /// the effect still stands and is reported as it happened; the journal's
     /// health says what is missing.
+    fn settle_as(&mut self, subject: &Subject, outcome: Outcome) {
+        let _ = self.record(subject.note(outcome));
+    }
+
     fn settle(
         &mut self,
         initiator: Initiator,
@@ -627,7 +1505,23 @@ impl Core {
         name: &'static str,
         outcome: Outcome,
     ) {
-        let _ = self.note(initiator, companion, name, outcome);
+        self.settle_as(&Subject::new(initiator, companion, name), outcome);
+    }
+
+    /// Commits `next` after a pending entry was written, then writes the
+    /// settled entry.
+    fn land_as(&mut self, subject: &Subject, next: State) -> Result<(), Refusal> {
+        if let Err(error) = self.store.commit(next) {
+            trace::line(&format!("{} could not be committed: {error}", subject.name));
+            let refusal = Refusal::new(
+                Outcome::TemporarilyUnavailable,
+                "The lobby could not write its state file, so nothing was changed; try again.",
+            );
+            self.settle_as(subject, refusal.outcome);
+            return Err(refusal);
+        }
+        self.settle_as(subject, Outcome::Done);
+        Ok(())
     }
 
     /// The pipeline of a change to the state file: pending entry, one commit,
@@ -639,18 +1533,9 @@ impl Core {
         name: &'static str,
         next: State,
     ) -> Result<(), Refusal> {
-        self.begin(initiator, companion, name)?;
-        if let Err(error) = self.store.commit(next) {
-            trace::line(&format!("{name} could not be committed: {error}"));
-            let refusal = Refusal::new(
-                Outcome::TemporarilyUnavailable,
-                "The lobby could not write its state file, so nothing was changed; try again.",
-            );
-            self.settle(initiator, companion, name, refusal.outcome);
-            return Err(refusal);
-        }
-        self.settle(initiator, companion, name, Outcome::Done);
-        Ok(())
+        let subject = Subject::new(initiator, companion, name);
+        self.begin_as(&subject)?;
+        self.land_as(&subject, next)
     }
 
     /// Runs every emitted event through the handlers, in order, including the
@@ -663,9 +1548,19 @@ impl Core {
                 &self.store.state().store_id,
                 command,
             ));
-            // The cascade handler: a removed companion's attachments end.
-            if let Event::CompanionRemoved(companion) = event {
-                self.end_attachments_of(companion);
+            match event {
+                // The catalog handler: every attachment of the companion
+                // learns that its tools changed.
+                Event::ConnectionChanged(connection) => {
+                    for live in self.attachments.values() {
+                        if live.attachment.companion == connection.companion {
+                            live.catalog.send_modify(|changes| *changes += 1);
+                        }
+                    }
+                }
+                // The cascade handler: a removed companion's attachments end.
+                Event::CompanionRemoved(companion) => self.end_attachments_of(companion),
+                _ => {}
             }
         }
     }
@@ -707,6 +1602,9 @@ fn name_refusal(what: &str, problem: NameProblem) -> Refusal {
         "moniker" => {
             " A moniker is 1 to 24 lowercase letters, digits and single hyphens, starting with a letter."
         }
+        "label" => {
+            " A label is 1 to 24 lowercase letters, digits and single hyphens, starting with a letter."
+        }
         _ => {
             " A display name is 1 to 64 characters with no control characters or surrounding spaces."
         }
@@ -736,7 +1634,12 @@ mod tests {
         }
 
         fn lobby(&self) -> Lobby {
-            Lobby::open(&self.0, r"C:\Tools\companion-lobby.exe").expect("open")
+            Lobby::open(
+                &self.0,
+                r"C:\Tools\companion-lobby.exe",
+                Registry::default(),
+            )
+            .expect("open")
         }
 
         fn journal(&self) -> Vec<serde_json::Value> {

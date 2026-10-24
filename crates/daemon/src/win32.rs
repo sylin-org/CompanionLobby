@@ -636,7 +636,7 @@ pub(crate) mod tests {
         );
         assert!(
             !create_private_dir(&dir).expect("already there"),
-            "an existing directory is left to the caller"
+            "an existing directory is left as it is"
         );
         std::fs::write(dir.join("file"), b"x").expect("file");
         assert!(is_private_file(&dir.join("file")).expect("read"));

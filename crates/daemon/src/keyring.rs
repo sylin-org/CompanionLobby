@@ -23,11 +23,19 @@
 //! The daemon also reports a fingerprint derived from the secret, so the shim
 //! can tell that the daemon on the port serves its own data directory without
 //! the secret ever leaving the machine's files.
+//!
+//! Beside the secret the keyring keeps what adapters hand the daemon and only
+//! they decode: each credential's material in `<credential id>.material` and
+//! what a service issued for each connection in `<connection id>.issued`.
+//! Each file is written atomically and sealed like the secret, with a purpose
+//! of its own, so a file of one kind never opens as the other; it is deleted
+//! when its credential or connection is revoked or removed.
 
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use lobby_contracts::{ConnectionId, CredentialId, SealedIssued, SealedMaterial};
 use sha2::{Digest, Sha256};
 
 use crate::store::atomic_write;
@@ -204,6 +212,122 @@ fn is_private(dir: &Path, path: &Path) -> io::Result<bool> {
     let file = std::fs::metadata(path)?;
     let directory = std::fs::metadata(dir)?;
     Ok(file.uid() == directory.uid() && file.permissions().mode() & 0o077 == 0)
+}
+
+/// The suffix of a credential's material file.
+pub const MATERIAL_SUFFIX: &str = ".material";
+/// The suffix of a connection's issued-data file.
+pub const ISSUED_SUFFIX: &str = ".issued";
+
+/// What material is sealed for.
+#[cfg(windows)]
+const MATERIAL_PURPOSE: &[u8] = b"companion-lobby credential material\0";
+/// What issued data is sealed for.
+#[cfg(windows)]
+const ISSUED_PURPOSE: &[u8] = b"companion-lobby connection issued data\0";
+
+/// The file name of a credential's material.
+pub fn material_file(id: CredentialId) -> String {
+    format!("{id}{MATERIAL_SUFFIX}")
+}
+
+/// The file name of a connection's issued data.
+pub fn issued_file(id: ConnectionId) -> String {
+    format!("{id}{ISSUED_SUFFIX}")
+}
+
+/// Whether `name` is a material or issued-data file, or a temporary one
+/// written on the way to it.
+pub fn is_sealed_file(name: &str) -> bool {
+    let sealed = |name: &str| {
+        [MATERIAL_SUFFIX, ISSUED_SUFFIX].iter().any(|suffix| {
+            name.strip_suffix(suffix)
+                .is_some_and(|id| CredentialId::parse(id).is_some())
+        })
+    };
+    sealed(name)
+        || name
+            .strip_suffix(".tmp")
+            .and_then(|rest| rest.rsplit_once('.'))
+            .is_some_and(|(file, _)| sealed(file) && crate::store::is_temporary_of(name, file))
+}
+
+/// Keeps `material` for the credential `id`, sealed.
+pub fn write_material(dir: &Path, id: CredentialId, material: &SealedMaterial) -> io::Result<()> {
+    atomic_write(
+        &dir.join(material_file(id)),
+        &seal_bytes(material.as_bytes(), Kept::Material)?,
+    )
+}
+
+/// The material kept for the credential `id`.
+pub fn read_material(dir: &Path, id: CredentialId) -> io::Result<SealedMaterial> {
+    let sealed = std::fs::read(dir.join(material_file(id)))?;
+    unseal_bytes(&sealed, Kept::Material).map(SealedMaterial::new)
+}
+
+/// Keeps `issued` for the connection `id`, sealed.
+pub fn write_issued(dir: &Path, id: ConnectionId, issued: &SealedIssued) -> io::Result<()> {
+    atomic_write(
+        &dir.join(issued_file(id)),
+        &seal_bytes(issued.as_bytes(), Kept::Issued)?,
+    )
+}
+
+/// The issued data kept for the connection `id`.
+pub fn read_issued(dir: &Path, id: ConnectionId) -> io::Result<SealedIssued> {
+    let sealed = std::fs::read(dir.join(issued_file(id)))?;
+    unseal_bytes(&sealed, Kept::Issued).map(SealedIssued::new)
+}
+
+/// Deletes a file the keyring kept; one already gone is not an error.
+pub fn remove_kept(dir: &Path, name: &str) -> io::Result<()> {
+    match std::fs::remove_file(dir.join(name)) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// Which kind of blob the keyring keeps.
+#[derive(Clone, Copy)]
+enum Kept {
+    Material,
+    Issued,
+}
+
+#[cfg(windows)]
+fn seal_bytes(bytes: &[u8], kept: Kept) -> io::Result<Vec<u8>> {
+    crate::win32::protect(bytes, purpose(kept))
+}
+
+#[cfg(windows)]
+fn unseal_bytes(bytes: &[u8], kept: Kept) -> io::Result<Vec<u8>> {
+    crate::win32::unprotect(bytes, purpose(kept))
+}
+
+#[cfg(windows)]
+fn purpose(kept: Kept) -> &'static [u8] {
+    match kept {
+        Kept::Material => MATERIAL_PURPOSE,
+        Kept::Issued => ISSUED_PURPOSE,
+    }
+}
+
+/// Elsewhere a kept file is the blob itself, owner-only in an owner-only
+/// directory.
+#[cfg(not(windows))]
+fn seal_bytes(bytes: &[u8], _kept: Kept) -> io::Result<Vec<u8>> {
+    Ok(bytes.to_vec())
+}
+
+#[cfg(not(windows))]
+fn unseal_bytes(bytes: &[u8], _kept: Kept) -> io::Result<Vec<u8>> {
+    Ok(bytes.to_vec())
+}
+
+/// A fresh random token: 32 random bytes as 64 hex digits.
+pub fn random_token() -> io::Result<String> {
+    random_hex()
 }
 
 /// The token of one attachment: 32 random bytes as 64 hex digits, held only
@@ -411,6 +535,58 @@ mod tests {
         assert_eq!(mode & 0o077, 0, "the renewed secret is owner-only");
         assert_eq!(AttachSecret::read(&dir).expect("read"), renewed);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn material_and_issued_data_are_kept_sealed_each_for_its_own_kind() {
+        let dir = private_dir("kept");
+        let credential = CredentialId::from_u128(7);
+        let connection = ConnectionId::from_u128(7);
+        let material = SealedMaterial::new(b"passbook key 0123".to_vec());
+        let issued = SealedIssued::new(b"board badge 4567".to_vec());
+        write_material(&dir, credential, &material).expect("material");
+        write_issued(&dir, connection, &issued).expect("issued");
+        assert_eq!(read_material(&dir, credential).expect("read"), material);
+        assert_eq!(read_issued(&dir, connection).expect("read"), issued);
+        if cfg!(windows) {
+            let at_rest = std::fs::read(dir.join(material_file(credential))).expect("read");
+            assert!(!String::from_utf8_lossy(&at_rest).contains("passbook key"));
+            // The same bytes under the other kind's name do not open.
+            std::fs::copy(
+                dir.join(material_file(credential)),
+                dir.join(issued_file(connection)),
+            )
+            .expect("copy");
+            assert!(read_issued(&dir, connection).is_err());
+        }
+        for name in [material_file(credential), issued_file(connection)] {
+            assert!(is_sealed_file(&name), "{name}");
+            remove_kept(&dir, &name).expect("remove");
+            remove_kept(&dir, &name).expect("removing twice is fine");
+        }
+        assert!(read_material(&dir, credential).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_sealed_file_names_are_recognized() {
+        let id = CredentialId::from_u128(0xab).to_string();
+        for name in [
+            format!("{id}.material"),
+            format!("{id}.issued"),
+            format!("{id}.material.42-7.tmp"),
+        ] {
+            assert!(is_sealed_file(&name), "{name}");
+        }
+        for name in [
+            "x.material".to_owned(),
+            format!("{id}.material.tmp"),
+            format!("{id}.other"),
+            format!("{}.issued", id.to_uppercase()),
+            format!("{id}.issued.x-1.tmp"),
+        ] {
+            assert!(!is_sealed_file(&name), "{name}");
+        }
     }
 
     #[test]

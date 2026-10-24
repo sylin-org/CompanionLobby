@@ -12,12 +12,37 @@
 //! the attach secret. Whatever a host says about itself in `clientInfo` is
 //! attribution, never authority. Errors use the standard JSON-RPC codes only.
 //!
-//! A mind sees exactly the catalog the projections build for its companion.
+//! A mind sees exactly the catalog the projections build for its companion,
+//! and calls only what is in it. A service tool's call is journaled, made and
+//! settled by the lobby; its answer is the tool's result, or an error result
+//! whose text is the lobby's own sentence for the outcome, with the outcome's
+//! code in the structured content. The server declares that its tool list
+//! changes: the lobby tells an attached host when the companion's connections
+//! change, over the attachment's notice stream (see [`crate::http`]).
 
-use lobby_contracts::{Companion, ToolDescriptor};
+use lobby_contracts::{Companion, ToolDescriptor, ToolResult};
 use serde_json::{Map, Value, json};
 
-use crate::projections;
+use crate::domain::CallRefusal;
+use crate::projections::{self, Reached};
+
+/// The notification that tells a host its tool list changed.
+pub const LIST_CHANGED: &str = "notifications/tools/list_changed";
+
+/// What an attachment's tools are, and how they are called: the lobby, for
+/// one attachment.
+pub trait Toolbox {
+    /// What the attachment's companion reaches right now.
+    fn reached(&self) -> Vec<Reached>;
+
+    /// Calls the service tool `name`.
+    fn call(&self, name: &str, arguments: Map<String, Value>) -> Result<ToolResult, CallRefusal>;
+}
+
+/// The notification frame that tells a host its tool list changed.
+pub fn list_changed() -> Value {
+    json!({ "jsonrpc": JSONRPC_VERSION, "method": LIST_CHANGED })
+}
 
 /// The JSON-RPC version every frame carries.
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -59,9 +84,9 @@ pub fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": JSONRPC_VERSION, "id": id, "error": { "code": code, "message": bounded } })
 }
 
-/// Answers one message from an attachment of `companion`. Notifications get
-/// no answer.
-pub fn handle(companion: &Companion, message: &Value) -> Option<Value> {
+/// Answers one message from an attachment of `companion`, whose tools are
+/// `tools`. Notifications get no answer.
+pub fn handle(companion: &Companion, tools: &dyn Toolbox, message: &Value) -> Option<Value> {
     let Some(object) = message.as_object() else {
         return Some(rpc_error(
             &Value::Null,
@@ -93,9 +118,14 @@ pub fn handle(companion: &Companion, message: &Value) -> Option<Value> {
         "ping" => success(&id, json!({})),
         "tools/list" => success(
             &id,
-            json!({ "tools": projections::catalog(companion).iter().map(tool_json).collect::<Vec<_>>() }),
+            json!({
+                "tools": projections::catalog(&tools.reached())
+                    .iter()
+                    .map(|(name, tool)| tool_json(name, tool))
+                    .collect::<Vec<_>>()
+            }),
         ),
-        "tools/call" => tools_call(companion, &id, params),
+        "tools/call" => tools_call(companion, tools, &id, params),
         _ => rpc_error(&id, METHOD_NOT_FOUND, "Method not found"),
     })
 }
@@ -108,7 +138,7 @@ fn initialize(companion: &Companion, id: &Value, params: Option<&Value>) -> Valu
         id,
         json!({
             "protocolVersion": negotiate(requested),
-            "capabilities": { "tools": { "listChanged": false } },
+            "capabilities": { "tools": { "listChanged": true } },
             "serverInfo": {
                 "name": SERVER_NAME,
                 "title": "Companion Lobby",
@@ -123,10 +153,11 @@ fn initialize(companion: &Companion, id: &Value, params: Option<&Value>) -> Valu
     )
 }
 
-/// The MCP rendering of a descriptor, hints derived from its effect.
-pub fn tool_json(tool: &ToolDescriptor) -> Value {
+/// The MCP rendering of a descriptor under the name a mind calls it by,
+/// hints derived from its effect.
+pub fn tool_json(name: &str, tool: &ToolDescriptor) -> Value {
     json!({
-        "name": tool.name.as_str(),
+        "name": name,
         "title": tool.title,
         "description": tool.description,
         "inputSchema": tool.input_schema,
@@ -140,7 +171,12 @@ pub fn tool_json(tool: &ToolDescriptor) -> Value {
     })
 }
 
-fn tools_call(companion: &Companion, id: &Value, params: Option<&Value>) -> Value {
+fn tools_call(
+    companion: &Companion,
+    tools: &dyn Toolbox,
+    id: &Value,
+    params: Option<&Value>,
+) -> Value {
     let Some(name) = params
         .and_then(|params| params.get("name"))
         .and_then(Value::as_str)
@@ -153,7 +189,18 @@ fn tools_call(companion: &Companion, id: &Value, params: Option<&Value>) -> Valu
         Some(_) => return rpc_error(id, INVALID_PARAMS, "arguments must be an object."),
     };
     if name != projections::REACH {
-        return rpc_error(id, INVALID_PARAMS, "Unknown tool.");
+        return match tools.call(name, arguments) {
+            Ok(answer) => success(id, result_json(&answer, false)),
+            Err(CallRefusal::UnknownTool) => rpc_error(id, INVALID_PARAMS, "Unknown tool."),
+            Err(CallRefusal::Ended(refusal)) => success(
+                id,
+                json!({
+                    "content": [{ "type": "text", "text": refusal.message }],
+                    "structuredContent": { "outcome": refusal.outcome.code() },
+                    "isError": true,
+                }),
+            ),
+        };
     }
     if !arguments.is_empty() {
         return success(
@@ -164,15 +211,21 @@ fn tools_call(companion: &Companion, id: &Value, params: Option<&Value>) -> Valu
             }),
         );
     }
-    let answer = projections::reach(companion);
+    let answer = projections::reach(companion, &tools.reached());
+    success(id, result_json(&answer, false))
+}
+
+/// The MCP result of a tool's answer: its rendered text, and its structured
+/// content when it has one.
+fn result_json(answer: &ToolResult, is_error: bool) -> Value {
     let mut result = json!({
         "content": [{ "type": "text", "text": answer.rendered() }],
-        "isError": false,
+        "isError": is_error,
     });
-    if let Some(structured) = answer.structured {
-        result["structuredContent"] = structured;
+    if let Some(structured) = &answer.structured {
+        result["structuredContent"] = structured.clone();
     }
-    success(id, result)
+    result
 }
 
 #[cfg(test)]
@@ -189,8 +242,22 @@ mod tests {
         }
     }
 
+    /// An attachment that reaches nothing; a call to anything but `reach`
+    /// names no tool.
+    struct Nothing;
+
+    impl Toolbox for Nothing {
+        fn reached(&self) -> Vec<Reached> {
+            Vec::new()
+        }
+
+        fn call(&self, _: &str, _: Map<String, Value>) -> Result<ToolResult, CallRefusal> {
+            Err(CallRefusal::UnknownTool)
+        }
+    }
+
     fn ask(message: Value) -> Option<Value> {
-        handle(&ada(), &message)
+        handle(&ada(), &Nothing, &message)
     }
 
     #[test]
@@ -202,6 +269,10 @@ mod tests {
             .expect("answer");
         assert_eq!(answer["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(answer["result"]["serverInfo"]["name"], SERVER_NAME);
+        assert_eq!(
+            answer["result"]["capabilities"]["tools"]["listChanged"],
+            true
+        );
         assert!(
             answer["result"]["instructions"]
                 .as_str()

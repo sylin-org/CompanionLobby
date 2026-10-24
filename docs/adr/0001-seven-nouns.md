@@ -35,14 +35,20 @@ provider text.
 `lobby-contracts` declares the nouns and two synchronous, `Send + Sync`
 contracts:
 
-- `CredentialAdapter`: kind, describe, begin and complete sign-in, authorize an
-  ask against a `MaterialSlot`, revoke, portrait.
-- `ServiceAdapter`: name, describe, establish a connection through an
-  `Authority`, catalog, available tools for the connection's authority, call,
-  and an optional push stream into an `Ingress`.
+- `CredentialAdapter`: kind, begin and complete sign-in, and authorize an
+  ask (a bearer token, a proof for an audience and method, or a proof of one
+  request) against a `MaterialSlot`.
+- `ServiceAdapter`: name, describe (the provider kinds it accepts and the
+  addresses it may reach), establish a connection at an `Address` through an
+  `Authority`, catalog, and call.
 
-The daemon implements `MaterialSlot`, `Authority` and `Ingress`. Material is a
-sealed blob only its own adapter decodes. The nouns themselves are declared
+The daemon implements `MaterialSlot` and `Authority`. Material is a
+sealed blob only its own adapter decodes; a service adapter never holds it,
+and asks the `Authority` for an `Authorization` in the shape it needs, which
+the credential adapter mints on demand. A connection keeps only what the
+service issued. The contracts grow as the slices that need more arrive:
+refreshing and revoking at the provider, portraits, the tools a connection's
+authority allows, and pushed events each join with their first user. The nouns themselves are declared
 with the crate: `Companion` with its moniker and display name, `Attachment`,
 `JournalEntry` with its kinds, its initiator and the `ConnectionId` it went
 through, `Outcome`, `ToolDescriptor`, and `ToolResult`, whose text marks
@@ -56,14 +62,18 @@ vocabulary of service nouns, and service adapters may duplicate each other.
 | Crate | Path | Depends on |
 | --- | --- | --- |
 | `lobby-contracts` | `crates/contracts` | `serde_json` only, for the JSON values that tool descriptors, arguments and results carry |
-| `lobby-outbound` | `crates/outbound` | contracts |
-| `lobby-testkit` (unpublished) | `crates/testkit` | contracts |
+| `lobby-outbound` | `crates/outbound` | contracts, `ureq` |
+| `lobby-testkit` (unpublished) | `crates/testkit` | contracts, outbound |
 | `lobby-credential-atproto` | `crates/credentials/atproto` | contracts, outbound |
 | `lobby-service-tangent` | `crates/services/tangent` | contracts, outbound |
-| `lobby-daemon` (lib + `companion-lobby` binary) | `crates/daemon` | contracts, outbound, the adapters |
+| `lobby-daemon` (lib + `companion-lobby` binary) | `crates/daemon` | contracts, outbound, the adapters; the test kit only under the `synthetic` feature |
 | `lobby-conformance` (unpublished) | `crates/conformance` | contracts, daemon, testkit |
 
-Adapters and the daemon use the test kit as a dev-dependency. A second service
+Adapters and the daemon use the test kit as a dev-dependency. The daemon's
+test build also turns on its own `synthetic` feature, which compiles the test
+kit's synthetic adapters into the registry so the conformance suite's host
+scenarios run them through the real binary; a plain or release build never
+contains them. A second service
 adapter on the same atproto credential, `lobby-service-bluesky`, is created
 only after the first service adapter passes the conformance suite.
 

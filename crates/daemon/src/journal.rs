@@ -37,7 +37,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lobby_contracts::{CompanionId, Initiator, JournalEntry, JournalKind, Outcome};
+use lobby_contracts::{
+    CompanionId, ConnectionId, Initiator, JournalEntry, JournalKind, Outcome, ServiceName, ToolName,
+};
 use serde_json::{Map, Value, json};
 
 /// The live file's name.
@@ -90,10 +92,36 @@ pub struct Note {
     pub initiator: Initiator,
     /// The companion it concerns, if any.
     pub companion: Option<CompanionId>,
+    /// The connection it went through, if any.
+    pub connection: Option<ConnectionId>,
+    /// The service it reached, if any.
+    pub service: Option<ServiceName>,
+    /// The tool it called, if any.
+    pub tool: Option<ToolName>,
     /// What kind of entry it is.
     pub kind: JournalKind,
     /// How it ended, or `pending` while it has not.
     pub outcome: Outcome,
+}
+
+impl Note {
+    /// A command's entry, which goes through no connection.
+    pub fn command(
+        initiator: Initiator,
+        companion: Option<CompanionId>,
+        name: &'static str,
+        outcome: Outcome,
+    ) -> Self {
+        Self {
+            initiator,
+            companion,
+            connection: None,
+            service: None,
+            tool: None,
+            kind: JournalKind::Command { name },
+            outcome,
+        }
+    }
 }
 
 /// The journal of one install.
@@ -193,9 +221,9 @@ impl Journal {
                 .unwrap_or(0),
             initiator: note.initiator,
             companion: note.companion,
-            connection: None,
-            service: None,
-            tool: None,
+            connection: note.connection,
+            service: note.service,
+            tool: note.tool,
             kind: note.kind,
             outcome: note.outcome,
         };
@@ -481,12 +509,12 @@ mod tests {
     const STORE: &str = "0123456789abcdef0123456789abcdef";
 
     fn note(name: &'static str) -> Note {
-        Note {
-            initiator: Initiator::Sponsor,
-            companion: Some(CompanionId::from_u128(5)),
-            kind: JournalKind::Command { name },
-            outcome: Outcome::Done,
-        }
+        Note::command(
+            Initiator::Sponsor,
+            Some(CompanionId::from_u128(5)),
+            name,
+            Outcome::Done,
+        )
     }
 
     fn sequences(page: &Page) -> Vec<u64> {
@@ -505,12 +533,12 @@ mod tests {
         assert_eq!(first.seq, 1);
         let attachment = AttachmentId::from_u128(9);
         journal
-            .append(Note {
-                initiator: Initiator::Mind { attachment },
-                companion: None,
-                kind: JournalKind::Command { name: "attach" },
-                outcome: Outcome::Pending,
-            })
+            .append(Note::command(
+                Initiator::Mind { attachment },
+                None,
+                "attach",
+                Outcome::Pending,
+            ))
             .expect("append");
         let text = std::fs::read_to_string(dir.join(JOURNAL_FILE)).expect("read");
         let lines: Vec<Value> = text

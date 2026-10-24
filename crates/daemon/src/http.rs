@@ -20,9 +20,13 @@
 //!    live feed's places or read the lobby through a browser that lets it;
 //! 5. `/mcp` refuses any browser evidence at all (`Origin`, `Referer` or a
 //!    `Sec-Fetch-*` header). Attaching requires the per-install attach secret
-//!    as a bearer token; every later frame and the detach require the token
-//!    the daemon gave that one attachment, so the install secret crosses the
-//!    port once per attachment, only after the shim verified the listener.
+//!    as a bearer token; every later frame, the notice stream and the detach
+//!    require the token the daemon gave that one attachment, so the install
+//!    secret crosses the port once per attachment, only after the shim
+//!    verified the listener;
+//! 6. `/signin/<kind>/return` is where a provider sends the sponsor's browser
+//!    back after a sign-in; it completes only a sign-in the lobby started and
+//!    waits for, once, and its page echoes nothing it was sent.
 //!
 //! Every response is sent with `Cache-Control: no-store`,
 //! `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`. Only
@@ -30,8 +34,11 @@
 //! browser leaves out everything that identifies the install.
 //!
 //! Commands run on a blocking thread, since they write the state file and the
-//! journal before they answer. `GET /api/events` is the live feed the manager
-//! page follows, as server-sent events.
+//! journal before they answer, and some call an adapter. `GET /api/events` is
+//! the live feed the manager page follows, as server-sent events. `GET /mcp`
+//! is an attachment's notice stream, also server-sent events: one
+//! `notifications/tools/list_changed` frame each time the companion's tools
+//! change, which the shim relays to the host.
 //!
 //! `POST /api/stop` stops accepting connections, ends the live feeds, lets
 //! every accepted request finish, and only then lets the process exit.
@@ -53,20 +60,24 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
-use lobby_contracts::{AttachmentId, Companion, CompanionId, Outcome};
+use lobby_contracts::{
+    Attachment, AttachmentId, Companion, CompanionId, ConnectionId, CredentialId, Outcome,
+    ToolResult,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, Semaphore, broadcast, mpsc, watch};
 
 use crate::discovery::{DISCOVERY_PATH, Discovery};
-use crate::domain::{Lobby, Refusal, Rename, Snapshot};
+use crate::domain::{CallRefusal, Grant, Lobby, Refusal, Rename, Snapshot};
 use crate::home;
 use crate::journal::{PAGE_DEFAULT, PageProblem};
 use crate::keyring::{AttachSecret, AttachmentToken};
 use crate::lock::{DaemonLock, DaemonRecord, LockProblem};
 use crate::manager;
-use crate::projections::companion_json;
+use crate::projections::{Reached, companion_json, connection_json, credential_json};
+use crate::registry::Registry;
 use crate::{discovery, mcp, trace};
 
 mod feed_body;
@@ -97,6 +108,8 @@ pub const ATTACHMENT_HEADER: &str = "lobby-attachment";
 pub const FEED_CLIENT_LIMIT: usize = 16;
 /// The live feed's path.
 pub const FEED_PATH: &str = "/api/events";
+/// The MCP path: frames are posted to it and the notice stream is read from it.
+pub const MCP_PATH: &str = "/mcp";
 /// How often a quiet live feed sends a comment, so a vanished page is noticed.
 pub const FEED_KEEPALIVE: Duration = Duration::from_secs(15);
 
@@ -178,7 +191,7 @@ pub fn run() -> Result<(), String> {
     let command = std::env::current_exe()
         .map(|exe| home::display_path(&exe))
         .map_err(|error| format!("cannot read this executable's path: {error}"))?;
-    let lobby = Lobby::open(&dir, &command).map_err(|problem| {
+    let lobby = Lobby::open(&dir, &command, Registry::compiled_in()).map_err(|problem| {
         trace::line(&format!("start refused: {problem}"));
         format!("{problem} (in {shown})")
     })?;
@@ -266,9 +279,10 @@ async fn bind(port: u16) -> Result<TcpListener, String> {
 /// process can take the port while this daemon still holds the lock and its
 /// record names it; it closes only once the drain is over.
 ///
-/// A live feed is not drained. It never finishes on its own, and a page that
-/// stopped reading it leaves frames the connection can never flush, so once
-/// a stop is requested the feed's connection is dropped rather than awaited.
+/// A live feed is not drained, nor is an attachment's notice stream. Neither
+/// finishes on its own, and a reader that stopped reading leaves frames the
+/// connection can never flush, so once a stop is requested such a connection
+/// is dropped rather than awaited.
 pub async fn serve(listener: TcpListener, app: Arc<App>) {
     let graceful = GracefulShutdown::new();
     loop {
@@ -279,7 +293,7 @@ pub async fn serve(listener: TcpListener, app: Arc<App>) {
                     let service = service_fn({
                         let app = app.clone();
                         move |request: Request<Incoming>| {
-                            if request.uri().path() == FEED_PATH {
+                            if is_stream(&request) {
                                 marks_feed.send_replace(true);
                             }
                             handle(app.clone(), request)
@@ -317,6 +331,12 @@ pub async fn serve(listener: TcpListener, app: Arc<App>) {
 }
 
 type Reply = Response<BoxBody<Bytes, Infallible>>;
+
+/// Whether `request` opens a stream that never finishes on its own.
+fn is_stream(request: &Request<Incoming>) -> bool {
+    let path = request.uri().path();
+    path == FEED_PATH || (path == MCP_PATH && request.method() == Method::GET)
+}
 
 async fn handle(app: Arc<App>, request: Request<Incoming>) -> Result<Reply, Infallible> {
     let Ok(_admitted) = app.admission.try_acquire() else {
@@ -371,6 +391,27 @@ fn header_text(headers: &HeaderMap, name: impl header::AsHeaderName) -> Option<&
 fn companion_in(path: &str) -> Option<CompanionId> {
     path.strip_prefix("/api/companions/")
         .and_then(CompanionId::parse)
+}
+
+/// The credential an `/api/credentials/<id>/revoke` path names.
+fn credential_revoked_in(path: &str) -> Option<CredentialId> {
+    path.strip_prefix("/api/credentials/")
+        .and_then(|rest| rest.strip_suffix("/revoke"))
+        .and_then(CredentialId::parse)
+}
+
+/// The connection an `/api/connections/<id>/revoke` path names.
+fn connection_revoked_in(path: &str) -> Option<ConnectionId> {
+    path.strip_prefix("/api/connections/")
+        .and_then(|rest| rest.strip_suffix("/revoke"))
+        .and_then(ConnectionId::parse)
+}
+
+/// The provider kind a `/signin/<kind>/return` path names.
+fn sign_in_return_in(path: &str) -> Option<&str> {
+    path.strip_prefix("/signin/")
+        .and_then(|rest| rest.strip_suffix("/return"))
+        .filter(|kind| !kind.is_empty() && !kind.contains('/'))
 }
 
 async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
@@ -458,6 +499,58 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
                 Err(refused) => refused.reply(),
             }
         }
+        (&Method::POST, "/api/sign-ins") => match operator_body(app, request).await {
+            Ok(body) => {
+                let origin = discovery::manager_origin(app.port);
+                blocking(app, move |lobby| begin_sign_in(lobby, &origin, &body)).await
+            }
+            Err(refused) => refused.reply(),
+        },
+        (&Method::GET, returned) if sign_in_return_in(returned).is_some() => {
+            let kind = sign_in_return_in(returned)
+                .unwrap_or_else(|| unreachable!("checked above"))
+                .to_owned();
+            let pairs = query_pairs(&query);
+            blocking(app, move |lobby| complete_sign_in(lobby, &kind, pairs)).await
+        }
+        (&Method::POST, revoked) if credential_revoked_in(revoked).is_some() => {
+            let id =
+                credential_revoked_in(revoked).unwrap_or_else(|| unreachable!("checked above"));
+            match operator_body(app, request).await {
+                Ok(_) => {
+                    blocking(app, move |lobby| match lobby.revoke_credential(id) {
+                        Ok(credential) => json_reply(
+                            StatusCode::OK,
+                            json!({ "credential": credential_json(&credential) }),
+                        ),
+                        Err(refusal) => refusal_reply(&refusal),
+                    })
+                    .await
+                }
+                Err(refused) => refused.reply(),
+            }
+        }
+        (&Method::POST, "/api/connections") => match operator_body(app, request).await {
+            Ok(body) => blocking(app, move |lobby| grant_connection(lobby, &body)).await,
+            Err(refused) => refused.reply(),
+        },
+        (&Method::POST, revoked) if connection_revoked_in(revoked).is_some() => {
+            let id =
+                connection_revoked_in(revoked).unwrap_or_else(|| unreachable!("checked above"));
+            match operator_body(app, request).await {
+                Ok(_) => {
+                    blocking(app, move |lobby| match lobby.revoke_connection(id) {
+                        Ok(connection) => json_reply(
+                            StatusCode::OK,
+                            json!({ "connection": connection_json(&connection) }),
+                        ),
+                        Err(refusal) => refusal_reply(&refusal),
+                    })
+                    .await
+                }
+                Err(refused) => refused.reply(),
+            }
+        }
         (&Method::POST, "/api/stop") => match operator_body(app, request).await {
             Ok(_) => {
                 trace::line("stop requested over HTTP");
@@ -481,33 +574,60 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
             let id = detach_path["/mcp/attach/".len()..].to_owned();
             blocking(app, move |lobby| detach(lobby, presented.as_deref(), &id)).await
         }
-        (&Method::POST, "/mcp") => {
+        (&Method::POST, MCP_PATH) => {
             let (attachment, presented) = match attachment_guard(request.headers()) {
                 Ok(proof) => proof,
                 Err(refused) => return *refused,
             };
-            let found = with_lobby(app, move |lobby| {
-                lobby
-                    .attachment(attachment, &presented)
-                    .map(|(_, companion)| companion)
-            })
-            .await;
-            let companion = match found {
-                Ok(Ok(companion)) => companion,
+            let checked = presented.clone();
+            let found = with_lobby(app, move |lobby| lobby.attachment(attachment, &checked)).await;
+            match found {
+                Ok(Ok(_)) => {}
                 Ok(Err(refusal)) => return refusal_reply(&refusal),
                 Err(failed) => return *failed,
-            };
+            }
             match json_body(request).await {
-                Ok(body) => mcp_reply(&companion, &body),
+                Ok(body) => {
+                    blocking(app, move |lobby| {
+                        match lobby.attachment(attachment, &presented) {
+                            Ok((attachment, companion)) => {
+                                mcp_reply(lobby, attachment, &companion, &body)
+                            }
+                            Err(refusal) => refusal_reply(&refusal),
+                        }
+                    })
+                    .await
+                }
                 Err(refused) => refused.reply(),
+            }
+        }
+        (&Method::GET, MCP_PATH) => {
+            let (attachment, presented) = match attachment_guard(request.headers()) {
+                Ok(proof) => proof,
+                Err(refused) => return *refused,
+            };
+            let changes = with_lobby(app, move |lobby| {
+                lobby.catalog_changes(attachment, &presented)
+            })
+            .await;
+            match changes {
+                Ok(Ok(changes)) => notices(app, changes),
+                Ok(Err(refusal)) => refusal_reply(&refusal),
+                Err(failed) => *failed,
             }
         }
         (
             _,
             DISCOVERY_PATH | "/api/lobby" | "/api/companions" | "/api/journal" | FEED_PATH
-            | "/api/stop" | "/mcp/attach" | "/mcp",
+            | "/api/stop" | "/mcp/attach" | MCP_PATH | "/api/sign-ins" | "/api/connections",
         ) => method_not_allowed(),
-        (_, other) if manager::is_page_path(other) || companion_in(other).is_some() => {
+        (_, other)
+            if manager::is_page_path(other)
+                || companion_in(other).is_some()
+                || credential_revoked_in(other).is_some()
+                || connection_revoked_in(other).is_some()
+                || sign_in_return_in(other).is_some() =>
+        {
             method_not_allowed()
         }
         _ => not_found(),
@@ -709,6 +829,8 @@ async fn attach_body(app: &App, request: Request<Incoming>) -> Result<Bytes, Pro
 fn snapshot_json(lobby: &Lobby) -> Value {
     let Snapshot {
         companions,
+        credentials,
+        connections,
         store_id,
         epoch,
         position,
@@ -722,6 +844,8 @@ fn snapshot_json(lobby: &Lobby) -> Value {
             .iter()
             .map(|view| companion_json(view, lobby.command()))
             .collect::<Vec<_>>(),
+        "credentials": credentials.iter().map(credential_json).collect::<Vec<_>>(),
+        "connections": connections.iter().map(connection_json).collect::<Vec<_>>(),
         "journal": { "healthy": journal_healthy, "highWater": journal_high_water },
     })
 }
@@ -812,6 +936,148 @@ fn remove_companion(lobby: &Lobby, id: CompanionId, body: &[u8]) -> Reply {
             json_reply(
                 StatusCode::OK,
                 json!({ "removed": id.to_string(), "endedAttachments": ended }),
+            )
+        }
+        Err(refusal) => refusal_reply(&refusal),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BeginSignIn {
+    companion: String,
+    kind: String,
+    hint: String,
+}
+
+fn begin_sign_in(lobby: &Lobby, origin: &str, body: &[u8]) -> Reply {
+    let Some((request, companion)) = serde_json::from_slice::<BeginSignIn>(body)
+        .ok()
+        .and_then(|request| CompanionId::parse(&request.companion).map(|id| (request, id)))
+    else {
+        return problem(
+            StatusCode::BAD_REQUEST,
+            Outcome::InvalidInput,
+            "Send {\"companion\": <id>, \"kind\": ..., \"hint\": ...} and nothing else.",
+        );
+    };
+    match lobby.begin_sign_in(companion, &request.kind, &request.hint, origin) {
+        Ok(start) => json_reply(StatusCode::CREATED, json!({ "url": start.url })),
+        Err(refusal) => refusal_reply(&refusal),
+    }
+}
+
+/// The page the sponsor's browser lands on after a sign-in. It says what
+/// happened in the lobby's words and echoes nothing the provider sent.
+fn complete_sign_in(lobby: &Lobby, kind: &str, pairs: Vec<(String, String)>) -> Reply {
+    let (status, said) = match lobby.complete_sign_in(kind, pairs) {
+        Ok(credential) => {
+            trace::line(&format!("credential {} signed in", credential.id));
+            (
+                StatusCode::OK,
+                "Signed in. You can close this tab and return to the manager page.".to_owned(),
+            )
+        }
+        Err(refusal) => (
+            match refusal.outcome {
+                Outcome::NotFound => StatusCode::NOT_FOUND,
+                Outcome::Conflict => StatusCode::CONFLICT,
+                Outcome::TemporarilyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::FORBIDDEN,
+            },
+            refusal.message,
+        ),
+    };
+    let page = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Companion Lobby</title></head><body><p>{}</p></body></html>",
+        html_escape(&said)
+    );
+    let mut reply = with_hygiene(Response::new(Full::new(Bytes::from(page)).boxed()), status);
+    let headers = reply.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'"),
+    );
+    reply
+}
+
+/// The pairs of a query string, percent-decoded, `+` read as a space.
+fn query_pairs(query: &str) -> Vec<(String, String)> {
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (percent_decode(name), percent_decode(value))
+        })
+        .collect()
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let hex = |byte: u8| (byte as char).to_digit(16);
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                if let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                    out.push((high * 16 + low) as u8);
+                    index += 3;
+                    continue;
+                }
+                out.push(b'%');
+            }
+            b'+' => out.push(b' '),
+            byte => out.push(byte),
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GrantConnection {
+    companion: String,
+    credential: String,
+    service: String,
+    address: String,
+    label: String,
+}
+
+fn grant_connection(lobby: &Lobby, body: &[u8]) -> Reply {
+    let Some((request, companion, credential)) = serde_json::from_slice::<GrantConnection>(body)
+        .ok()
+        .and_then(|request| {
+            let companion = CompanionId::parse(&request.companion)?;
+            let credential = CredentialId::parse(&request.credential)?;
+            Some((request, companion, credential))
+        })
+    else {
+        return problem(
+            StatusCode::BAD_REQUEST,
+            Outcome::InvalidInput,
+            "Send {\"companion\", \"credential\", \"service\", \"address\", \"label\"} and nothing else.",
+        );
+    };
+    let grant = Grant {
+        companion,
+        credential,
+        service: &request.service,
+        address: &request.address,
+        label: &request.label,
+    };
+    match lobby.grant_connection(grant) {
+        Ok(connection) => {
+            trace::line(&format!("connection {} established", connection.id));
+            json_reply(
+                StatusCode::CREATED,
+                json!({ "connection": connection_json(&connection) }),
             )
         }
         Err(refusal) => refusal_reply(&refusal),
@@ -962,6 +1228,41 @@ async fn stop_requested(stopped: &mut watch::Receiver<bool>) {
     let _ = stopped.wait_for(|&stop| stop).await;
 }
 
+/// An attachment's notice stream: a comment when it opens, then one
+/// `notifications/tools/list_changed` frame each time the attachment's tools
+/// change, with a keepalive comment while nothing does. It ends when the
+/// attachment ends, the reader goes away or the daemon stops.
+fn notices(app: &Arc<App>, mut changes: watch::Receiver<u64>) -> Reply {
+    let (sender, frames) = mpsc::channel::<Bytes>(16);
+    let mut stopped = app.stopped.subscribe();
+    tokio::spawn(async move {
+        if !deliver(&sender, &mut stopped, Bytes::from_static(b": open\n\n")).await {
+            return;
+        }
+        loop {
+            let frame = tokio::select! {
+                changed = changes.changed() => match changed {
+                    Ok(()) => Bytes::from(format!("data: {}\n\n", mcp::list_changed())),
+                    // The attachment ended.
+                    Err(_) => return,
+                },
+                () = tokio::time::sleep(FEED_KEEPALIVE) => manager::keepalive_frame(),
+                () = stop_requested(&mut stopped) => return,
+                () = sender.closed() => return,
+            };
+            if !deliver(&sender, &mut stopped, frame).await {
+                return;
+            }
+        }
+    });
+    let mut reply = with_hygiene(Response::new(FeedBody(frames).boxed()), StatusCode::OK);
+    reply.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream; charset=utf-8"),
+    );
+    reply
+}
+
 /// Frees a live feed's place when its stream ends, however it ends.
 struct FeedSlot(Arc<App>);
 
@@ -1044,14 +1345,35 @@ fn detach(lobby: &Lobby, presented: Option<&str>, id: &str) -> Reply {
     }
 }
 
-fn mcp_reply(companion: &Companion, body: &[u8]) -> Reply {
+/// The lobby, as one attachment's tools.
+struct Attached<'a> {
+    lobby: &'a Lobby,
+    attachment: Attachment,
+}
+
+impl mcp::Toolbox for Attached<'_> {
+    fn reached(&self) -> Vec<Reached> {
+        self.lobby.reached(self.attachment.companion)
+    }
+
+    fn call(
+        &self,
+        name: &str,
+        arguments: serde_json::Map<String, Value>,
+    ) -> Result<ToolResult, CallRefusal> {
+        self.lobby.call_tool(&self.attachment, name, arguments)
+    }
+}
+
+fn mcp_reply(lobby: &Lobby, attachment: Attachment, companion: &Companion, body: &[u8]) -> Reply {
     let Ok(message) = serde_json::from_slice::<Value>(body) else {
         return json_reply(
             StatusCode::OK,
             mcp::rpc_error(&Value::Null, mcp::PARSE_ERROR, "Parse error"),
         );
     };
-    match mcp::handle(companion, &message) {
+    let tools = Attached { lobby, attachment };
+    match mcp::handle(companion, &tools, &message) {
         Some(answer) => json_reply(StatusCode::OK, answer),
         None => empty_reply(StatusCode::ACCEPTED),
     }
@@ -1237,6 +1559,45 @@ mod tests {
             html_escape("<a href='x'>&\""),
             "&lt;a href=&#39;x&#39;&gt;&amp;&quot;"
         );
+    }
+
+    #[test]
+    fn credential_connection_and_return_paths_name_what_they_act_on() {
+        let credential = CredentialId::from_u128(7);
+        let connection = ConnectionId::from_u128(8);
+        assert_eq!(
+            credential_revoked_in(&format!("/api/credentials/{credential}/revoke")),
+            Some(credential)
+        );
+        assert_eq!(
+            credential_revoked_in(&format!("/api/credentials/{credential}")),
+            None
+        );
+        assert_eq!(
+            connection_revoked_in(&format!("/api/connections/{connection}/revoke")),
+            Some(connection)
+        );
+        assert_eq!(connection_revoked_in("/api/connections/x/revoke"), None);
+        assert_eq!(
+            sign_in_return_in("/signin/passbook/return"),
+            Some("passbook")
+        );
+        assert_eq!(sign_in_return_in("/signin//return"), None);
+        assert_eq!(sign_in_return_in("/signin/a/b/return"), None);
+    }
+
+    #[test]
+    fn query_pairs_are_decoded() {
+        assert_eq!(
+            query_pairs("state=a%2Fb&code=c+d&empty=&bare"),
+            [
+                ("state".to_owned(), "a/b".to_owned()),
+                ("code".to_owned(), "c d".to_owned()),
+                ("empty".to_owned(), String::new()),
+                ("bare".to_owned(), String::new()),
+            ]
+        );
+        assert_eq!(percent_decode("%zz%4"), "%zz%4");
     }
 
     #[test]

@@ -14,13 +14,15 @@
 //! * what is projected from them and holds no truth ([`projections`]): the
 //!   catalog a mind sees ([`mcp`]), and the manager page with its live feed
 //!   ([`manager`]);
-//! * the data directory and the attach secret ([`home`], [`keyring`]), the
+//! * the data directory, the attach secret and the sealed material and issued
+//!   data adapters hand the daemon ([`home`], [`keyring`]), the
 //!   daemon's own trace log ([`trace`]) and, on Windows, the crate's one module
-//!   allowed `unsafe` (`win32`).
-//!
-//! The modules [`calls`], [`broker`] and [`registry`] hold no code yet; each
-//! says what it will own when the adapters arrive, which will run
-//! synchronously on blocking threads with no lock held.
+//!   allowed `unsafe` (`win32`);
+//! * the adapters the daemon runs with ([`registry`]), the broker through
+//!   which a service adapter asks a credential adapter for authorizations
+//!   ([`broker`]), and tool calls pinned by a ticket and settled against the
+//!   connection as it is when the service answers ([`calls`]). Adapters run
+//!   synchronously on blocking threads with no lock held.
 //!
 //! The `companion-lobby` binary is a thin front over [`cli`].
 

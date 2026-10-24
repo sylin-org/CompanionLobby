@@ -61,13 +61,20 @@ writes a new one.
 | `daemon.lock` | the daemon | Nothing; the running daemon holds an exclusive OS lock on it, and the shim, `open` and `stop` learn whether a daemon runs by taking it for an instant. The daemon waits out such a probe when it starts. The OS releases both locks when the process dies, so a daemon killed outright never blocks the next start. |
 | `daemon.json` | the lock holder | `pid`, `port` and `buildId` of the process holding the lock. Read only while the lock is held. |
 | `trace.log`, `trace.1.log` | the daemon | Its own operational log: start, stop, refusals, attachments, journal failures, panics. Rotated at 1 MiB, two generations. No secrets, no content. |
+| `<credential id>.material` | the daemon | One credential's material, as its credential adapter encoded it, sealed. Deleted when the credential is revoked or its companion removed. |
+| `<connection id>.issued` | the daemon | What a service issued for one connection, as its service adapter encoded it, sealed. Deleted when the connection is revoked or its companion removed. |
 
 The record lives beside the lock rather than in it because, on Windows, an
 exclusive lock also stops other processes from reading the locked file.
-Files the daemon replaces (`lobby.json`, `attach.secret`, `daemon.json`) are
-written to a temporary file named `<file>.<pid>-<n>.tmp` first; such a file
-left by a crash counts as the lobby's own. The daemon reads no other file in
-the directory.
+Files the daemon replaces (`lobby.json`, `attach.secret`, `daemon.json`, and
+the material and issued files) are written to a temporary file named
+`<file>.<pid>-<n>.tmp` first; such a file left by a crash counts as the
+lobby's own. The daemon reads no other file in the directory.
+
+Material and issued files are sealed like the attach secret: with DPAPI in
+the current user's scope on Windows, each kind for its own purpose so a file
+of one kind never opens as the other, and mode 0600 elsewhere. The daemon
+never decodes either: only the adapter that encoded a blob reads it.
 
 ## The state file
 
@@ -80,6 +87,15 @@ the directory.
   "revision": 3,
   "companions": [
     { "id": "<32 hex digits>", "moniker": "ada", "displayName": "Ada", "revision": 1 }
+  ],
+  "credentials": [
+    { "id": "<32 hex digits>", "companion": "<companion id>", "kind": "<provider kind>",
+      "account": "<account key>", "state": "ready" }
+  ],
+  "connections": [
+    { "id": "<32 hex digits>", "companion": "<companion id>", "credential": "<credential id>",
+      "service": "<service name>", "address": "https://service.test", "label": "front",
+      "state": "ready", "revision": 1 }
   ]
 }
 ```
@@ -87,13 +103,22 @@ the directory.
 The store id is minted once per install and names the journal's entries.
 `revision` advances on every commit; each companion's own `revision`
 advances whenever it changes, and a rename or removal names the revision it
-read. Live attachments are runtime facts and are not written.
+read. A credential is `ready` or `revoked`; a connection is `ready` or
+`revoked`, and its `revision` advances on every change, so a call pinned to
+one revision can tell that the connection changed while it ran. Material and
+what services issued are kept beside the file, never in it. Live
+attachments and the sign-ins the lobby waits on are runtime facts and are
+not written.
 
 - **Refused, never rewritten.** A file that is empty, does not parse, names
   no schema or another one, carries a field schema 1 does not have, or holds
   a value its rules refuse (a duplicate id or moniker, an identifier of the
-  wrong shape) stops the daemon with the reason, and the file stays exactly
-  as it was. There is no decoder for any file this product did not write.
+  wrong shape, a credential of a companion the file does not hold, one
+  account signed in for two companions, two ready credentials of one kind
+  for one companion, a ready connection through a revoked credential, or one
+  label naming two ready connections of a service) stops the daemon with the
+  reason, and the file stays exactly as it was. There is no decoder for any
+  file this product did not write.
 - **Forward policy.** Each release reads its own schema and the predecessors
   it documents here, writes only its own, and refuses a newer one. Schema 1
   has no predecessor.
@@ -124,8 +149,17 @@ name, a fixed lobby word or an outcome code:
 `initiator` is `sponsor` (the manager page), `mind` (with the attachment it
 acted through) or `lobby` (the lobby reacting to an event, or refusing an
 attach that named no companion, since no attachment came to exist). `kind` is
-`command` (with the command's fixed name) here, and `invoked` and `settled`
-for the external calls adapters make. Fields that do not apply are absent.
+`command` (with the command's fixed name), or `invoked` and `settled` for a
+tool call: an `invoked` entry with outcome `pending` is written before the
+service is reached (no entry, no call), and a `settled` entry with the call's
+outcome after it. Both name the attachment, the companion, the `connection`
+the call went through, the `service` and the `tool`; neither holds the
+arguments or the answer. Commands on a connection name it and its service
+too. Fields that do not apply are absent:
+
+```json
+{"id":"<storeId>:9","seq":9,"at":1767225600000,"initiator":"mind","attachment":"<32 hex digits>","companion":"<32 hex digits>","connection":"<32 hex digits>","service":"board","tool":"post","kind":"settled","outcome":"done"}
+```
 
 - **Numbers.** `seq` only grows: a daemon that opens the journal continues
   after the highest number any generation holds, so numbers stay monotone
@@ -167,23 +201,83 @@ one command pipeline:
    reports it healthy again;
 5. **emit**: the command's events go to the event pipeline.
 
+A command that needs an adapter is split around it: validation and the
+pending entry under the lobby, the adapter on a blocking thread with nothing
+held, then a re-check of what the command pinned, the commit and the settled
+entry under the lobby again. What changed while the adapter ran wins.
+
 The event pipeline runs every event through small handlers, in order, before
 the next command starts. The feed handler turns it into an item of the live
-feed. The cascade handler ends the attachments of a removed companion, each
+feed. The catalog handler tells every attachment of a companion whose
+connections changed that its tools changed (see the notice stream below).
+The cascade handler ends the attachments of a removed companion, each
 journaled as a `detach` initiated by the lobby, pending and then settled. The
 companion is already gone, so an attachment ends even when its pending entry
-cannot be written; the journal's health says so.
+cannot be written; the journal's health says so. No handler calls an
+adapter.
 
-The commands are `create_companion`, `rename_companion` and
-`remove_companion`, which only the sponsor issues through the operator API,
-and `attach` and `detach`, which a mind issues through its shim; the lobby
-itself issues `detach` in the cascade and `renew_attach_secret` when it
-starts. A rename or
+The commands are `create_companion`, `rename_companion`,
+`remove_companion`, `begin_sign_in`, `complete_sign_in`,
+`revoke_credential`, `grant_connection` and `revoke_connection`, which only
+the sponsor issues through the operator API, and `attach` and `detach`, which
+a mind issues through its shim; the lobby itself issues `detach` in the
+cascade and `renew_attach_secret` when it starts. Removing a companion
+removes its credentials and connections and deletes what they kept. A rename or
 removal that names a revision the companion has moved past is refused with
 409. A removal while minds are attached as the companion is refused with 409
 unless it confirms the cascade. A mind attached by moniker stays attached
 through a rename, because an attachment is bound to the companion's id; a
 host configuration that names the old moniker reaches nothing afterwards.
+
+## Credentials, connections and calls
+
+The daemon runs with the adapters its registry lists, and nothing else: a
+credential or connection whose adapter is not installed stays in the state
+file, unused, and reaches no catalog. A plain or release build lists the
+product's adapters; the test build also compiles in the test kit's passbook
+credential adapter and board service adapter, through the `synthetic`
+feature that only the daemon's own dev-dependency turns on, so the host is
+proven through adapters whose words belong to no real provider or service.
+
+- **Signing in.** `POST /api/sign-ins` names a companion, a provider kind and
+  a hint (what the sponsor typed). The lobby refuses a companion that already
+  holds a ready credential of that kind, asks the credential adapter where
+  the browser goes, and remembers the sign-in for 10 minutes under a random
+  `state` (at most 32 wait at once). The provider sends the browser back to
+  `/signin/<kind>/return` with that `state`; a return the lobby is not
+  waiting for is refused unjournaled, since nothing proves who sent it, and
+  each sign-in completes once. The adapter completes it and names the account
+  the provider authenticated, whatever the hint said. An account belongs to
+  one companion, and stays reserved to it after its credential is revoked;
+  signing it in for another companion is refused with 409. The material is
+  sealed into the keyring before the credential is committed.
+- **Connecting.** `POST /api/connections` names a companion, one of its
+  credentials, a service, an address and a label. The lobby checks that the
+  credential is ready and of a kind the service accepts, that the address is
+  one origin the service may reach, and that no ready connection of that
+  companion and service has the label; then the service adapter establishes
+  the connection with no lock held. When it needs to prove who it acts for it
+  asks the lobby's broker, which hands the ask to the credential's adapter
+  with a slot that re-checks, at the read, that the credential is still ready
+  and reads only its material; what the adapter mints goes back to the
+  service adapter exactly as minted. A credential adapter refuses an ask it
+  cannot answer before it reads anything or reaches the provider, and the
+  connection is refused with that outcome. The connection is committed only
+  when the credential is still ready and the label still free; it keeps only
+  what the service issued.
+- **Revoking.** Revoking a connection deletes what the service issued for it.
+  Revoking a credential revokes every connection made from it in the same
+  commit, under one `revoke_credential` entry, and deletes the material and
+  everything those connections kept.
+- **Calls.** A service tool call resolves the connection the mind named with
+  `at` among its companion's ready connections to that service, journals the
+  call as invoked, and pins the connection's revision. The call runs with no
+  lock held. When it settles the connection is read again: if it was revoked
+  or changed meanwhile, the late result never reaches the mind; a read
+  answers `revoked`, and a write, which the service may have carried out,
+  answers `outcome_unknown` so the mind reads before it retries. A tool the
+  companion cannot use is not in its catalog, and calling it is "Unknown
+  tool" (-32602) without reaching any service.
 
 ## The manager page and the live feed
 
@@ -198,8 +292,8 @@ naming the companion by its immutable id, and a rename of the moniker warns
 that configurations naming the moniker stop working.
 
 `GET /api/events` is the live feed as server-sent events. Each item is one
-JSON object (`companion`, `companion_removed`, `journal` or
-`journal_health`) with the id `<epoch>:<seq>`, where the epoch is fresh at
+JSON object (`companion`, `companion_removed`, `credential`, `connection`,
+`journal` or `journal_health`) with the id `<epoch>:<seq>`, where the epoch is fresh at
 every start of the daemon. A page that connects without a position, or with
 one this feed cannot continue (another epoch, a position ahead of the feed,
 or one older than the 512 items or 512 KiB the feed keeps), first receives
@@ -269,16 +363,22 @@ state file and the journal before it answers.
 | `GET`, `OPTIONS /api/discovery` | Host | The discovery document; the only response with cross-origin headers. |
 | `GET /`, `/companion/<id>`, `/journal` | Host | The manager page. |
 | `GET /manager.css`, `/manager.js` | Host | Its stylesheet and script. |
-| `GET /api/lobby` | Host | `{"storeId", "feed": {"epoch", "position"}, "companions": [...], "journal": {"healthy", "highWater"}}`, one consistent picture. |
+| `GET /api/lobby` | Host | `{"storeId", "feed": {"epoch", "position"}, "companions": [...], "credentials": [...], "connections": [...], "journal": {"healthy", "highWater"}}`, one consistent picture. A credential is `{"id", "companion", "kind", "account", "state"}` and a connection `{"id", "companion", "credential", "service", "address", "label", "state", "revision"}`; neither ever carries material or what a service issued. |
 | `GET /api/companions` | Host | `{"companions": [{"id", "moniker", "displayName", "revision", "attachments", "hostConfig"}]}`. |
 | `GET /api/journal?before=<cursor>&limit=<n>` | Host | `{"entries", "upper", "next"}`, newest first; 409 for a cursor of another journal. |
 | `GET /api/events` | Host | The live feed, as server-sent events. |
 | `POST /api/companions` | operator write | Creates a companion from `{"moniker", "displayName"}`: 201 with `{"companion"}`, or 400 for an invalid name, 409 for a moniker in use. |
 | `PATCH /api/companions/<id>` | operator write | Renames from `{"expectedRevision", "moniker", "displayName"}` (either name may be left out): 200 with `{"companion"}`, or 400, 404, or 409 for a moved revision or a moniker in use. |
 | `DELETE /api/companions/<id>` | operator write | Removes from `{"expectedRevision", "cascade"}`: 200 with `{"removed", "endedAttachments"}`, or 404, or 409 for a moved revision or live attachments without `"cascade": true`. |
+| `POST /api/sign-ins` | operator write | Starts a sign-in from `{"companion", "kind", "hint"}`: 201 with `{"url"}`, where the sponsor's browser goes; or 404 for an unknown companion or kind, 409 when the companion already holds a ready credential of that kind. |
+| `GET /signin/<kind>/return` | Host | Where a provider sends the browser back. Completes a sign-in the lobby waits for: 200 with a page saying so, 404 for a return it is not waiting for, 409 for an account another companion holds. The page echoes nothing it was sent and loads nothing. |
+| `POST /api/credentials/<id>/revoke` | operator write | Revokes the credential and every connection made from it: 200 with `{"credential"}`, or 404, or 409 when it is already revoked. |
+| `POST /api/connections` | operator write | Establishes a connection from `{"companion", "credential", "service", "address", "label"}`: 201 with `{"connection"}`; or 400 for an address or label the rules refuse, 404, 409 for a label in use or a revoked credential, or the outcome the adapters answered (`unsupported` is 403). |
+| `POST /api/connections/<id>/revoke` | operator write | Revokes the connection: 200 with `{"connection"}`, or 404, or 409 when it is already revoked. |
 | `POST /api/stop` | operator write | 202, then the daemon stops accepting connections, ends every live feed, lets accepted requests finish (at most 10 seconds), closes its listener, releases the lock and exits. |
 | `POST /mcp/attach` | attachment, install secret | Attaches as `{"companion": "<id or moniker>"}`: 201 with `{"attachment", "token", "companion"}`, or 404 for an unknown companion. |
 | `POST /mcp` | attachment, its token | One JSON-RPC message for the attachment named in the `Lobby-Attachment` header: 200 with the answer, 202 for a notification, 404 when the attachment is not live. |
+| `GET /mcp` | attachment, its token | The attachment's notice stream, as server-sent events: a comment when it opens, then a `notifications/tools/list_changed` frame each time the companion's tools change, with a keepalive comment every 15 seconds. It ends when the attachment ends or the daemon stops; a stop drops it rather than waiting for it. |
 | `DELETE /mcp/attach/<id>` | attachment, its token | Ends the attachment: 204, or 404. |
 
 Refusals are JSON, `{"outcome": "<code>", "message": "<sentence>"}`, with an
@@ -333,9 +433,13 @@ A host configuration names `companion-lobby attach <companion>`. The shim:
    its listener and another process taken the port, but a connection, once
    made, cannot move to another process. Otherwise it writes nothing and says
    the secret was not sent;
-7. attaches as the named companion with the install secret, relays each host
-   frame to `POST /mcp` with the attachment's token and writes each answer
-   back as one line, and detaches with the token when the host closes stdin.
+7. attaches as the named companion with the install secret, opens the
+   attachment's notice stream before it reads the host's first frame, relays
+   each host frame to `POST /mcp` with the attachment's token and writes each
+   answer back as one line, writes each notification the stream carries as
+   one line too, and detaches with the token when the host closes stdin. A
+   notice stream that ends while the shim is attached is opened again, for
+   the attachment of the moment.
 
 The shim attaches again, once, in exactly two cases: the daemon answers 404
 (it has forgotten the attachment, because it was restarted), or nothing
@@ -396,11 +500,23 @@ secret. Whatever a host says about itself in `clientInfo` is attribution,
 never authority.
 
 The catalog is projected, never declared: a mind sees `reach`, plus the native
-tools of its companion's ready connections as `<service>_<tool>`. A tool that
-the companion cannot use is absent, not present and refusing. `reach` reports
-the companion and the live tool set, so a mind can rely on it even when its
-host ignores tool list changes. The tool list does not change while an
-attachment lives, so `initialize` declares `listChanged: false`.
+tools of every service its companion holds a ready connection to, as
+`<service>_<tool>`. Each such tool takes one more argument, `at`, whose
+values are the sponsor's labels for the companion's connections to that
+service: it may be left out while there is one and is required once there
+are more. Names, descriptions and schemas are the adapter's words and the
+sponsor's labels, never text a service sent. A tool that the companion
+cannot use is absent, not present and refusing. `reach` reports the
+companion, each service it reaches with the labels and addresses of its
+connections, and the live tool set, so a mind can rely on it even when its
+host ignores tool list changes. `initialize` declares `listChanged: true`,
+and the shim relays a `notifications/tools/list_changed` each time the
+companion's connections change.
+
+A tool call answers the tool's result, whose text marks third-party passages
+as quoted strings, or an error result (`isError: true`) whose text is the
+lobby's own sentence for the outcome and whose `structuredContent` is
+`{"outcome": "<code>"}`.
 
 ## Stopping and rebuilding
 

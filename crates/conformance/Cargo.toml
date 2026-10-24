@@ -11,7 +11,9 @@ publish = false
 [dependencies]
 lobby-contracts.workspace = true
 lobby-daemon.workspace = true
+lobby-outbound.workspace = true
 lobby-testkit.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

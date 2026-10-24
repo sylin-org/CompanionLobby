@@ -2,14 +2,20 @@
 //!
 //! `lobby.json` in the data directory holds what the lobby remembers across
 //! restarts: the store id that names this install's journal, a revision that
-//! every commit advances, and the companions, each with its own revision.
-//! Live attachments are runtime facts and never reach it.
+//! every commit advances, the companions, each with its own revision, their
+//! credentials, and their connections, each with its own revision. Material
+//! and what services issued never reach it: the keyring keeps those, sealed,
+//! beside it. Live attachments are runtime facts and never reach it either.
 //!
 //! The file is schema 1: camelCase JSON with unknown fields refused. A file
 //! that is empty, does not parse, names no schema or another schema, or holds
 //! a value its own rules refuse (a duplicate moniker, an identifier of the
-//! wrong shape) is refused, and the daemon does not start on it. A refused
-//! file is never rewritten: the daemon writes only a schema it reads.
+//! wrong shape, a credential of a companion it does not hold, an account
+//! signed in for two companions, two ready credentials of one kind for one
+//! companion, a ready connection through a revoked credential or one label
+//! naming two ready connections of a service) is refused, and the daemon
+//! does not start on it. A refused file is never rewritten: the daemon writes
+//! only a schema it reads.
 //!
 //! Every write is atomic ([`atomic_write`]): the new bytes go to a temporary
 //! file with a name unique to the call, are flushed to the disk, and replace
@@ -26,7 +32,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use lobby_contracts::{Companion, CompanionId, DisplayName, Moniker, Sponsor};
+use lobby_contracts::{
+    AccountKey, Address, AddressPolicy, Companion, CompanionId, Connection, ConnectionId,
+    ConnectionState, Credential, CredentialId, CredentialState, DisplayName, Label, Moniker,
+    ProviderKind, ServiceName, Sponsor,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -57,6 +67,10 @@ pub struct State {
     pub revision: u64,
     /// The companions, oldest first.
     pub companions: Vec<CompanionRecord>,
+    /// The credentials, oldest first.
+    pub credentials: Vec<Credential>,
+    /// The connections, oldest first.
+    pub connections: Vec<Connection>,
 }
 
 impl State {
@@ -65,6 +79,8 @@ impl State {
             store_id: uuid::Uuid::now_v7().simple().to_string(),
             revision: 0,
             companions: Vec::new(),
+            credentials: Vec::new(),
+            connections: Vec::new(),
         }
     }
 
@@ -73,6 +89,95 @@ impl State {
         self.companions
             .iter()
             .find(|record| record.companion.id == id)
+    }
+
+    /// The credential with `id`, if any.
+    pub fn credential(&self, id: CredentialId) -> Option<&Credential> {
+        self.credentials
+            .iter()
+            .find(|credential| credential.id == id)
+    }
+
+    /// The connection with `id`, if any.
+    pub fn connection(&self, id: ConnectionId) -> Option<&Connection> {
+        self.connections
+            .iter()
+            .find(|connection| connection.id == id)
+    }
+
+    /// Why this state breaks a rule of the file, if it does.
+    pub fn problem(&self) -> Option<&'static str> {
+        let mut companions = std::collections::HashSet::new();
+        for record in &self.companions {
+            if !companions.insert(record.companion.id)
+                || self
+                    .companions
+                    .iter()
+                    .filter(|other| other.companion.moniker == record.companion.moniker)
+                    .count()
+                    > 1
+            {
+                return Some("holds two companions with one id or one moniker");
+            }
+        }
+        for (index, credential) in self.credentials.iter().enumerate() {
+            if self.credentials[..index]
+                .iter()
+                .any(|other| other.id == credential.id)
+            {
+                return Some("holds two credentials with one id");
+            }
+            if self.companion(credential.companion).is_none() {
+                return Some("holds a credential of a companion it does not hold");
+            }
+            if self.credentials.iter().any(|other| {
+                other.kind == credential.kind
+                    && other.account == credential.account
+                    && other.companion != credential.companion
+            }) {
+                return Some("holds one account signed in for two companions");
+            }
+            if credential.state == CredentialState::Ready
+                && self.credentials[..index].iter().any(|other| {
+                    other.state == CredentialState::Ready
+                        && other.kind == credential.kind
+                        && other.companion == credential.companion
+                })
+            {
+                return Some("holds two ready credentials of one kind for one companion");
+            }
+        }
+        for (index, connection) in self.connections.iter().enumerate() {
+            if self.connections[..index]
+                .iter()
+                .any(|other| other.id == connection.id)
+            {
+                return Some("holds two connections with one id");
+            }
+            let Some(credential) = self.credential(connection.credential) else {
+                return Some("holds a connection through a credential it does not hold");
+            };
+            if credential.companion != connection.companion {
+                return Some("holds a connection through another companion's credential");
+            }
+            if connection.revision == 0 {
+                return Some("holds a connection at revision 0");
+            }
+            if connection.state == ConnectionState::Ready {
+                if credential.state != CredentialState::Ready {
+                    return Some("holds a ready connection through a revoked credential");
+                }
+                if self.connections[..index].iter().any(|other| {
+                    other.state == ConnectionState::Ready
+                        && other.companion == connection.companion
+                        && other.service == connection.service
+                        && other.label == connection.label
+                }) {
+                    return Some("holds one label naming two ready connections of a service");
+                }
+            }
+        }
+        None
     }
 }
 
@@ -84,6 +189,8 @@ struct FileForm {
     store_id: String,
     revision: u64,
     companions: Vec<CompanionForm>,
+    credentials: Vec<CredentialForm>,
+    connections: Vec<ConnectionForm>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -93,6 +200,36 @@ struct CompanionForm {
     moniker: String,
     display_name: String,
     revision: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CredentialForm {
+    id: String,
+    companion: String,
+    kind: String,
+    account: String,
+    state: StateForm,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConnectionForm {
+    id: String,
+    companion: String,
+    credential: String,
+    service: String,
+    address: String,
+    label: String,
+    state: StateForm,
+    revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum StateForm {
+    Ready,
+    Revoked,
 }
 
 /// Why the state file could not be used.
@@ -175,6 +312,37 @@ fn encode(state: &State) -> Vec<u8> {
                 revision: record.revision,
             })
             .collect(),
+        credentials: state
+            .credentials
+            .iter()
+            .map(|credential| CredentialForm {
+                id: credential.id.to_string(),
+                companion: credential.companion.to_string(),
+                kind: credential.kind.as_str().to_owned(),
+                account: credential.account.as_str().to_owned(),
+                state: match credential.state {
+                    CredentialState::Ready => StateForm::Ready,
+                    CredentialState::Revoked => StateForm::Revoked,
+                },
+            })
+            .collect(),
+        connections: state
+            .connections
+            .iter()
+            .map(|connection| ConnectionForm {
+                id: connection.id.to_string(),
+                companion: connection.companion.to_string(),
+                credential: connection.credential.to_string(),
+                service: connection.service.as_str().to_owned(),
+                address: connection.address.as_str().to_owned(),
+                label: connection.label.as_str().to_owned(),
+                state: match connection.state {
+                    ConnectionState::Ready => StateForm::Ready,
+                    ConnectionState::Revoked => StateForm::Revoked,
+                },
+                revision: connection.revision,
+            })
+            .collect(),
     };
     let mut bytes = serde_json::to_vec_pretty(&form).unwrap_or_default();
     bytes.push(b'\n');
@@ -215,12 +383,6 @@ fn decode(bytes: &[u8]) -> Result<State, String> {
             .map_err(|problem| format!("holds a moniker that is refused: {problem}"))?;
         let display_name = DisplayName::new(&entry.display_name)
             .map_err(|problem| format!("holds a display name that is refused: {problem}"))?;
-        if companions
-            .iter()
-            .any(|known| known.companion.id == id || known.companion.moniker == moniker)
-        {
-            return Err("holds two companions with one id or one moniker".to_owned());
-        }
         if entry.revision == 0 {
             return Err("holds a companion at revision 0".to_owned());
         }
@@ -234,11 +396,57 @@ fn decode(bytes: &[u8]) -> Result<State, String> {
             revision: entry.revision,
         });
     }
-    Ok(State {
+    let credentials = form
+        .credentials
+        .into_iter()
+        .map(|entry| {
+            Some(Credential {
+                id: CredentialId::parse(&entry.id)?,
+                companion: CompanionId::parse(&entry.companion)?,
+                kind: ProviderKind::new(&entry.kind)?,
+                account: AccountKey::new(&entry.account)?,
+                state: match entry.state {
+                    StateForm::Ready => CredentialState::Ready,
+                    StateForm::Revoked => CredentialState::Revoked,
+                },
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "holds a credential with a value its rules refuse".to_owned())?;
+    let connections = form
+        .connections
+        .into_iter()
+        .map(|entry| {
+            Some(Connection {
+                id: ConnectionId::parse(&entry.id)?,
+                companion: CompanionId::parse(&entry.companion)?,
+                credential: CredentialId::parse(&entry.credential)?,
+                service: ServiceName::new(&entry.service)?,
+                // The policy of the service that established it was applied
+                // then; this one admits every address an adapter can.
+                address: Address::parse(&entry.address, AddressPolicy::LoopbackAllowed)
+                    .filter(|address| address.as_str() == entry.address)?,
+                label: Label::new(&entry.label).ok()?,
+                state: match entry.state {
+                    StateForm::Ready => ConnectionState::Ready,
+                    StateForm::Revoked => ConnectionState::Revoked,
+                },
+                revision: entry.revision,
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "holds a connection with a value its rules refuse".to_owned())?;
+    let state = State {
         store_id: form.store_id,
         revision: form.revision,
         companions,
-    })
+        credentials,
+        connections,
+    };
+    match state.problem() {
+        Some(problem) => Err(problem.to_owned()),
+        None => Ok(state),
+    }
 }
 
 /// A temporary name beside `path` that no other call, in this process or
@@ -399,16 +607,17 @@ mod tests {
 
     #[test]
     fn a_file_this_build_does_not_read_is_refused_and_left_as_it_is() {
-        let valid = r#"{"schema":1,"storeId":"0123456789abcdef0123456789abcdef","revision":0,"companions":[]}"#;
+        let valid = r#"{"schema":1,"storeId":"0123456789abcdef0123456789abcdef","revision":0,"companions":[],"credentials":[],"connections":[]}"#;
         let company = r#"{"id":"0123456789abcdef0123456789abcdef","moniker":"ada","displayName":"Ada","revision":1}"#;
+        let stray = r#"{"id":"0123456789abcdef0123456789abcde0","companion":"0123456789abcdef0123456789abcde1","kind":"passbook","account":"holder-1","state":"ready"}"#;
         for (bytes, why) in [
             (String::new(), "is empty"),
             ("  \n".to_owned(), "is empty"),
             ("{".to_owned(), "is not JSON"),
+            (valid.replace("\"schema\":1,", ""), "names no schema"),
             (
-                r#"{"storeId":"0123456789abcdef0123456789abcdef","revision":0,"companions":[]}"#
-                    .to_owned(),
-                "names no schema",
+                valid.replace(",\"credentials\":[],\"connections\":[]", ""),
+                "does not follow schema 1",
             ),
             (
                 valid.replace("\"schema\":1", "\"schema\":2"),
@@ -423,21 +632,34 @@ mod tests {
                 "does not follow schema 1",
             ),
             (
+                valid.replace("\"credentials\":[]", &format!("\"credentials\":[{stray}]")),
+                "credential of a companion",
+            ),
+            (
                 valid.replace("0123456789abcdef0123", "0123456789ABCDEF0123"),
                 "store id",
             ),
             (
-                valid.replace("[]", &format!("[{company},{company}]")),
+                valid.replace(
+                    "\"companions\":[]",
+                    &format!("\"companions\":[{company},{company}]"),
+                ),
                 "two companions",
             ),
             (
-                valid.replace("[]", &format!("[{}]", company.replace("ada", "Ada!"))),
+                valid.replace(
+                    "\"companions\":[]",
+                    &format!("\"companions\":[{}]", company.replace("ada", "Ada!")),
+                ),
                 "moniker",
             ),
             (
                 valid.replace(
-                    "[]",
-                    &format!("[{}]", company.replace("\"revision\":1", "\"revision\":0")),
+                    "\"companions\":[]",
+                    &format!(
+                        "\"companions\":[{}]",
+                        company.replace("\"revision\":1", "\"revision\":0")
+                    ),
                 ),
                 "revision 0",
             ),

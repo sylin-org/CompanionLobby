@@ -15,11 +15,18 @@ path = "src/lib.rs"
 name = "companion-lobby"
 path = "src/main.rs"
 
+[features]
+# Compiles the test kit's synthetic adapters into the registry. Only test
+# builds turn it on, through the dev-dependency on this crate below, so a
+# plain or release build never ships them.
+synthetic = ["dep:lobby-testkit"]
+
 [dependencies]
 lobby-contracts.workspace = true
 lobby-outbound.workspace = true
 lobby-credential-atproto.workspace = true
 lobby-service-tangent.workspace = true
+lobby-testkit = { workspace = true, optional = true }
 bytes.workspace = true
 getrandom.workspace = true
 http-body-util.workspace = true
@@ -39,6 +46,8 @@ dirs.workspace = true
 windows-sys.workspace = true
 
 [dev-dependencies]
+lobby-conformance.workspace = true
+lobby-daemon = { workspace = true, features = ["synthetic"] }
 lobby-testkit.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
