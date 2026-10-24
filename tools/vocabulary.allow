@@ -13,3 +13,5 @@ docs/adr/0001-seven-nouns.md	provider-tangent	The founding ADR names the first s
 docs/adr/0001-seven-nouns.md	provider-atproto	The founding ADR names the first credential adapter, its crate and the owner's account kind.
 docs/adr/0001-seven-nouns.md	provider-bluesky	The founding ADR names the second service adapter that follows the ship line.
 crates/daemon/tests/remember_journey.rs	stale-files	The journey plants a file of that name to show the daemon never reads it.
+crates/daemon/src/http/feed_body.rs	identifiers	Implementing hyper's Body names the standard library's std::task::Context; it is no lobby handle.
+crates/daemon/src/http/feed_body.rs	context	Implementing hyper's Body names the standard library's std::task::Context; it is no lobby handle.

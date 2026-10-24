@@ -39,16 +39,14 @@
 use std::convert::Infallible;
 use std::io;
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::body::{Body, Frame, Incoming};
+use hyper::body::Incoming;
 use hyper::header::{self, HeaderMap, HeaderValue};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -70,6 +68,9 @@ use crate::lock::{DaemonLock, DaemonRecord, LockProblem};
 use crate::manager;
 use crate::projections::companion_json;
 use crate::{discovery, mcp, trace};
+
+mod feed_body;
+use feed_body::FeedBody;
 
 /// Request head limit: the request line plus every header.
 pub const HEADER_LIMIT: usize = 8 * 1024;
@@ -897,25 +898,6 @@ fn events(app: &Arc<App>, headers: &HeaderMap) -> Reply {
         HeaderValue::from_static("text/event-stream; charset=utf-8"),
     );
     reply
-}
-
-/// A live feed's body: the frames its task sends, ending when the task ends.
-/// The connection drops it when the page goes away, which closes the task's
-/// sender.
-struct FeedBody(mpsc::Receiver<Bytes>);
-
-impl Body for FeedBody {
-    type Data = Bytes;
-    type Error = Infallible;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
-        self.0
-            .poll_recv(context)
-            .map(|frame| frame.map(|bytes| Ok(Frame::data(bytes))))
-    }
 }
 
 /// Frees a live feed's place when its stream ends, however it ends.
