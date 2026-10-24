@@ -599,6 +599,12 @@ fn other_build(home: &Path) -> PathBuf {
     let mut bytes = std::fs::read(EXE).expect("read the binary");
     bytes.extend_from_slice(b"\0another build\0");
     std::fs::write(&copy, bytes).expect("write the copy");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755))
+            .expect("make it executable");
+    }
     copy
 }
 
