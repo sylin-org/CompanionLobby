@@ -12,9 +12,13 @@ use lobby_conformance::host;
 const EXE: &str = env!("CARGO_BIN_EXE_companion-lobby-synthetic");
 const PRODUCT: &str = env!("CARGO_BIN_EXE_companion-lobby");
 
-/// The format tag the passbook writes into its material; a binary that
-/// carries the passbook adapter carries this text.
-const PASSBOOK_MATERIAL_TAG: &[u8] = b"passbook-1";
+/// Text only the synthetic adapters carry: the passbook's material tag, and
+/// the sentences of their own kind and name.
+const SYNTHETIC_MARKERS: [&[u8]; 3] = [
+    b"passbook-1",
+    b"passbook is a provider kind",
+    b"board is a service name",
+];
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
@@ -25,15 +29,18 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 #[test]
 fn the_product_binary_carries_no_synthetic_adapter() {
     let synthetic = std::fs::read(EXE).expect("read the synthetic binary");
-    assert!(
-        contains(&synthetic, PASSBOOK_MATERIAL_TAG),
-        "the tag is findable in a binary that has the passbook"
-    );
     let product = std::fs::read(PRODUCT).expect("read the product binary");
-    assert!(
-        !contains(&product, PASSBOOK_MATERIAL_TAG),
-        "companion-lobby carries the passbook adapter"
-    );
+    for marker in SYNTHETIC_MARKERS {
+        let shown = String::from_utf8_lossy(marker);
+        assert!(
+            contains(&synthetic, marker),
+            "{shown} is findable in a binary that has the synthetic adapters"
+        );
+        assert!(
+            !contains(&product, marker),
+            "companion-lobby carries {shown}"
+        );
+    }
 }
 
 #[test]
