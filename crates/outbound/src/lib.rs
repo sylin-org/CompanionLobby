@@ -9,7 +9,9 @@
 //!   [`AddressPolicy`] inside the resolver, once, so the connection goes to an
 //!   address that was checked and nothing can point the name elsewhere in between;
 //! * no redirect is followed and no proxy is taken from the environment;
-//! * a connection has 10 seconds to open and every read and write 30;
+//! * a connection has 10 seconds to open and every read and write 30, and
+//!   the whole request, from resolving the name to the last byte of the
+//!   body, has [`DEADLINE`] unless the request names a shorter one;
 //! * a body is read up to a limit the request names
 //!   ([`DEFAULT_LIMIT`] unless a route needs more), and a longer one is
 //!   refused rather than cut;
@@ -31,6 +33,9 @@ use lobby_contracts::{Address, AddressPolicy};
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long any one read or write may take.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a whole request may take, from resolving the name to reading the
+/// last byte of the body, when the request names no shorter deadline.
+pub const DEADLINE: Duration = Duration::from_secs(60);
 /// The longest body read when a request names no other limit.
 pub const DEFAULT_LIMIT: usize = 256 * 1024;
 
@@ -47,6 +52,8 @@ pub struct Request<'a> {
     pub json: Option<Vec<u8>>,
     /// The longest response body accepted.
     pub limit: usize,
+    /// How long the whole request may take.
+    pub deadline: Duration,
 }
 
 impl<'a> Request<'a> {
@@ -58,6 +65,7 @@ impl<'a> Request<'a> {
             headers: Vec::new(),
             json: None,
             limit: DEFAULT_LIMIT,
+            deadline: DEADLINE,
         }
     }
 
@@ -79,6 +87,13 @@ impl<'a> Request<'a> {
     #[must_use]
     pub fn limit(mut self, limit: usize) -> Self {
         self.limit = limit;
+        self
+    }
+
+    /// Gives the whole request `deadline`, never more than [`DEADLINE`].
+    #[must_use]
+    pub fn within(mut self, deadline: Duration) -> Self {
+        self.deadline = deadline.min(DEADLINE);
         self
     }
 }
@@ -141,6 +156,7 @@ impl Outbound {
             .timeout_connect(CONNECT_TIMEOUT)
             .timeout_read(IO_TIMEOUT)
             .timeout_write(IO_TIMEOUT)
+            .timeout(DEADLINE)
             .resolver(PolicyResolver { policy })
             .build();
         Self { agent }
@@ -153,7 +169,8 @@ impl Outbound {
         }
         let mut call = self
             .agent
-            .request(request.method, &address.url(request.path));
+            .request(request.method, &address.url(request.path))
+            .timeout(request.deadline);
         for (name, value) in &request.headers {
             call = call.set(name, value);
         }
@@ -320,6 +337,64 @@ mod tests {
             .expect_err("too long");
         assert_eq!(failure, Failure::Interrupted);
         server.join().expect("server");
+    }
+
+    #[test]
+    fn a_body_that_trickles_past_the_deadline_is_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0
+                && line
+                    != "
+"
+            {
+                line.clear();
+            }
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK
+Content-Length: 40
+Connection: close
+
+",
+            );
+            // Each byte arrives well within the read timeout; the whole body
+            // takes far longer than the request's deadline.
+            for _ in 0..40 {
+                if stream
+                    .write_all(b"x")
+                    .and_then(|()| stream.flush())
+                    .is_err()
+                {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let started = std::time::Instant::now();
+        let failure = Outbound::new(AddressPolicy::LoopbackAllowed)
+            .send(
+                &loopback(port),
+                Request::new("GET", "/").within(Duration::from_millis(500)),
+            )
+            .expect_err("past the deadline");
+        assert_eq!(failure, Failure::Interrupted);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the deadline ended the request: {:?}",
+            started.elapsed()
+        );
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn a_deadline_is_never_longer_than_the_agents() {
+        let request = Request::new("GET", "/").within(Duration::from_secs(3600));
+        assert_eq!(request.deadline, DEADLINE);
+        assert_eq!(Request::new("GET", "/").deadline, DEADLINE);
     }
 
     #[test]
