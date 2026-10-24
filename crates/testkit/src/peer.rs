@@ -1,5 +1,6 @@
 //! The stdio peer: a test standing where an MCP host stands.
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -15,12 +16,14 @@ pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(20);
 /// A spawned stdio MCP server driven line by line.
 ///
 /// Every stdout line is kept, so a test can assert that stdout carried
-/// nothing but JSON-RPC. The child is killed and reaped on drop.
+/// nothing but JSON-RPC. A frame read while waiting for another is kept too,
+/// for whoever waits for it next. The child is killed and reaped on drop.
 pub struct Peer {
     child: Child,
     lines: Receiver<String>,
     stderr: Receiver<String>,
     seen: Vec<String>,
+    unclaimed: VecDeque<Value>,
     stdout_closed: bool,
 }
 
@@ -44,6 +47,7 @@ impl Peer {
             lines,
             stderr,
             seen: Vec::new(),
+            unclaimed: VecDeque::new(),
             stdout_closed: false,
         }
     }
@@ -90,13 +94,49 @@ impl Peer {
             .unwrap_or_else(|_| panic!("stdout carried a non-JSON line: {line}"))
     }
 
-    /// The answer whose id equals `id`; other frames are kept but skipped.
+    /// The answer whose id equals `id`; other frames are kept for later.
     pub fn answer(&mut self, id: &Value) -> Value {
+        self.claim(ANSWER_TIMEOUT, |frame| frame.get("id") == Some(id))
+            .unwrap_or_else(|| panic!("no answer to request {id}"))
+    }
+
+    /// The next notification named `method`; other frames are kept for later.
+    pub fn notification(&mut self, method: &str) -> Value {
+        self.notification_within(method, ANSWER_TIMEOUT)
+            .unwrap_or_else(|| panic!("no {method} notification"))
+    }
+
+    /// The next notification named `method` that arrives within `limit`.
+    pub fn notification_within(&mut self, method: &str, limit: Duration) -> Option<Value> {
+        self.claim(limit, |frame| {
+            frame.get("id").is_none() && frame.get("method").and_then(Value::as_str) == Some(method)
+        })
+    }
+
+    /// The first frame, kept or arriving within `limit`, that `wanted`
+    /// accepts; every other frame is kept.
+    fn claim(&mut self, limit: Duration, wanted: impl Fn(&Value) -> bool) -> Option<Value> {
+        if let Some(index) = self.unclaimed.iter().position(&wanted) {
+            return self.unclaimed.remove(index);
+        }
+        let deadline = Instant::now() + limit;
         loop {
-            let frame = self.next_frame();
-            if frame.get("id") == Some(id) {
-                return frame;
+            let left = deadline.saturating_duration_since(Instant::now());
+            let line = match self.lines.recv_timeout(left) {
+                Ok(line) => line,
+                Err(RecvTimeoutError::Timeout) => return None,
+                Err(_) => {
+                    self.stdout_closed = true;
+                    return None;
+                }
+            };
+            self.seen.push(line.clone());
+            let frame: Value = serde_json::from_str(&line)
+                .unwrap_or_else(|_| panic!("stdout carried a non-JSON line: {line}"));
+            if wanted(&frame) {
+                return Some(frame);
             }
+            self.unclaimed.push_back(frame);
         }
     }
 

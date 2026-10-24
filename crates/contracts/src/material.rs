@@ -1,36 +1,79 @@
 //! Sealed material and the slot that guards it.
 //!
 //! Credential material and service-issued data are opaque byte blobs: only the
-//! adapter that wrote one decodes it. The daemon implements [`MaterialSlot`]
-//! so an adapter can read its material, mark it as rotating before a
-//! single-use refresh, and commit the rotated material with a compare-and-swap
-//! that never widens permissions.
+//! adapter that wrote one decodes it, and the daemon only keeps it, sealed at
+//! rest, beside the record it belongs to. The daemon implements
+//! [`MaterialSlot`] so a credential adapter reads its material through the
+//! daemon, which re-checks, at the moment of the read, that the credential is
+//! still the one the call was pinned to.
+
+use std::fmt;
 
 use crate::Outcome;
 
-/// Credential material sealed by its credential adapter.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct SealedMaterial {}
+/// Credential material, encoded by its credential adapter and opaque to
+/// everyone else. Its `Debug` never prints the bytes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SealedMaterial(Vec<u8>);
 
-/// Data a service issued for a connection, sealed by its service adapter.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct SealedIssued {}
+/// Data a service issued for a connection, encoded by its service adapter and
+/// opaque to everyone else. Its `Debug` never prints the bytes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SealedIssued(Vec<u8>);
 
-/// A compare-and-swap replacement of credential material.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct MaterialUpdate {}
+impl SealedMaterial {
+    /// Wraps the bytes an adapter encoded.
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// The bytes, for the adapter that encoded them and for the keyring.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl SealedIssued {
+    /// Wraps the bytes an adapter encoded.
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// The bytes, for the adapter that encoded them and for the keyring.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SealedMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SealedMaterial({} bytes)", self.0.len())
+    }
+}
+
+impl fmt::Debug for SealedIssued {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SealedIssued({} bytes)", self.0.len())
+    }
+}
 
 /// The daemon's guard around one credential's material.
 pub trait MaterialSlot: Send + Sync {
-    /// Reads the current sealed material.
+    /// Reads the material, when the credential is still the one this slot was
+    /// handed out for.
     fn read(&self) -> Result<SealedMaterial, Outcome>;
+}
 
-    /// Records, durably, that a rotation is about to be sent to the provider.
-    fn mark_rotating(&self) -> Result<(), Outcome>;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    /// Commits rotated material if the stored revision is still the expected one.
-    fn commit(&self, update: MaterialUpdate) -> Result<(), Outcome>;
+    #[test]
+    fn sealed_bytes_never_print() {
+        let material = SealedMaterial::new(b"key-0123".to_vec());
+        let issued = SealedIssued::new(b"badge-0123".to_vec());
+        assert_eq!(format!("{material:?}"), "SealedMaterial(8 bytes)");
+        assert_eq!(format!("{issued:?}"), "SealedIssued(10 bytes)");
+        assert_eq!(material.as_bytes(), b"key-0123");
+    }
 }

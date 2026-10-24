@@ -16,8 +16,10 @@
 //!
 //! The two contracts are [`CredentialAdapter`] and [`ServiceAdapter`]. Both are
 //! synchronous and `Send + Sync`; the daemon runs them on blocking threads. The
-//! daemon implements [`MaterialSlot`], [`Authority`] and [`Ingress`] so adapters
-//! never touch the store directly.
+//! daemon implements [`MaterialSlot`] and [`Authority`], so adapters never
+//! touch the store directly: a service adapter asks the [`Authority`] for an
+//! [`Authorization`] in the shape it needs, and the credential adapter mints it
+//! from material only it decodes.
 //!
 //! A type enters this crate only when both synthetic adapters in the test kit
 //! need it in the same change.
@@ -31,28 +33,23 @@ mod journal;
 mod material;
 mod mind;
 mod outcome;
-mod permission;
 mod service;
 mod sponsor;
 mod tool;
 
 pub use address::{Address, AddressPolicy};
-pub use authorization::{Authorization, AuthorizationAsk};
+pub use authorization::{Authorization, AuthorizationAsk, Secret};
 pub use companion::{Companion, CompanionId, DisplayName, Moniker, NameProblem};
-pub use connection::{Connection, ConnectionId};
+pub use connection::{Connection, ConnectionId, ConnectionState, Label};
 pub use credential::{
-    Credential, CredentialAdapter, CredentialDescription, CredentialId, Portrait, ProviderKind,
+    AccountKey, Credential, CredentialAdapter, CredentialId, CredentialState, ProviderKind,
     SignInRequest, SignInReturn, SignInStart, SignedIn,
 };
 pub use journal::{Initiator, JournalEntry, JournalKind};
-pub use material::{MaterialSlot, MaterialUpdate, SealedIssued, SealedMaterial};
+pub use material::{MaterialSlot, SealedIssued, SealedMaterial};
 pub use mind::{Attachment, AttachmentId};
 pub use outcome::{Outcome, Retry};
-pub use permission::{PermissionSet, VerifiedPermissions};
-pub use service::{
-    Authority, AuthorityFacts, CallContext, Ingress, IngressItem, ServiceAdapter,
-    ServiceDescription, ServiceName,
-};
+pub use service::{Authority, ServiceAdapter, ServiceDescription, ServiceName};
 pub use sponsor::Sponsor;
 pub use tool::{Effect, Passage, ToolArguments, ToolDescriptor, ToolName, ToolResult};
 
@@ -68,6 +65,5 @@ mod tests {
         shareable::<dyn ServiceAdapter>();
         shareable::<dyn MaterialSlot>();
         shareable::<dyn Authority>();
-        shareable::<dyn Ingress>();
     }
 }

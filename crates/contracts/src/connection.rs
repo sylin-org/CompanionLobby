@@ -1,14 +1,16 @@
 //! The Connection noun.
 //!
 //! A connection is the sponsor's decision that a companion may reach a service
-//! at an address using one credential. It carries a state (ready, needs sign-in,
-//! revoked), a health fact (ok, unavailable, refused by the service, credential
-//! quarantined), the service-issued sealed data, the credential epoch and the
-//! issued revision it was established under, and its own revision.
+//! at an address using one credential, under a label the sponsor chose. It
+//! exists only because the service adapter established it, and the only data
+//! it holds is what the service issued, kept sealed beside the record. Its
+//! revision advances on every change, so a call pinned to one revision can
+//! tell that the connection changed while it ran.
 
 use std::fmt;
 
 use crate::companion::parse_hex_id;
+use crate::{Address, CompanionId, CredentialId, Moniker, NameProblem, ServiceName};
 
 /// Identifier of a connection: a UUIDv7 rendered as 32 lowercase hex digits.
 ///
@@ -34,10 +36,60 @@ impl fmt::Display for ConnectionId {
     }
 }
 
+/// The sponsor's name for one connection, which a mind passes as `at` to say
+/// where a tool acts. It follows the moniker rule, so it is never text a
+/// service wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Label(String);
+
+impl Label {
+    /// Checks `text` against the label rule, which is the moniker rule.
+    pub fn new(text: &str) -> Result<Self, NameProblem> {
+        Moniker::new(text).map(|moniker| Self(moniker.as_str().to_owned()))
+    }
+
+    /// The label as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Label {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Whether a connection can be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConnectionState {
+    /// Established; its tools are in its companion's catalog.
+    Ready,
+    /// The sponsor revoked it, or its credential: its tools are gone and what
+    /// the service issued for it is deleted.
+    Revoked,
+}
+
 /// A connection record as the state file holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Connection {}
+pub struct Connection {
+    /// The immutable identifier.
+    pub id: ConnectionId,
+    /// The companion that reaches the service through it.
+    pub companion: CompanionId,
+    /// The credential it was established with.
+    pub credential: CredentialId,
+    /// The service it reaches.
+    pub service: ServiceName,
+    /// Where the service is.
+    pub address: Address,
+    /// The sponsor's name for it.
+    pub label: Label,
+    /// Whether it can be used.
+    pub state: ConnectionState,
+    /// Advances on every change to this connection.
+    pub revision: u64,
+}
 
 #[cfg(test)]
 mod tests {
@@ -49,5 +101,12 @@ mod tests {
         assert_eq!(id.to_string(), format!("{:032x}", 42));
         assert_eq!(ConnectionId::parse(&id.to_string()), Some(id));
         assert_eq!(ConnectionId::parse("42"), None);
+    }
+
+    #[test]
+    fn labels_follow_the_moniker_rule() {
+        assert_eq!(Label::new("front").expect("label").as_str(), "front");
+        assert_eq!(Label::new("Front"), Err(NameProblem::Character));
+        assert_eq!(Label::new(""), Err(NameProblem::Empty));
     }
 }

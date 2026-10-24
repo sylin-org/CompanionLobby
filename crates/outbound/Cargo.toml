@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 lobby-contracts.workspace = true
+ureq.workspace = true
 
 [lints]
 workspace = true

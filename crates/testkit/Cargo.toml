@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 lobby-contracts.workspace = true
+lobby-outbound.workspace = true
 serde_json.workspace = true
 
 [lints]

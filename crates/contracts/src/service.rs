@@ -1,17 +1,27 @@
 //! The Service noun and the service adapter contract.
 //!
 //! A service adapter speaks one service in that service's own words. It
-//! declares which provider kinds and permissions it accepts and whether a
-//! companion holds one connection or many (one per address), establishes a
-//! connection by asking the daemon's [`Authority`] for authorizations, declares
-//! a catalog of typed tools, says which tools the connection's authority makes
-//! available, and performs calls. A service adapter may also push events into
-//! the daemon through [`Ingress`].
+//! declares which provider kinds it accepts and which addresses it may reach,
+//! establishes a connection by asking the daemon's [`Authority`] for the
+//! authorization the service wants, declares a catalog of typed tools, and
+//! performs calls with what the service issued for the connection. It never
+//! holds credential material: whatever it needs to prove, the credential
+//! adapter mints for it on demand.
 
 use crate::{
-    Address, Authorization, AuthorizationAsk, Outcome, SealedIssued, ToolArguments, ToolDescriptor,
-    ToolName, ToolResult,
+    Address, AddressPolicy, Authorization, AuthorizationAsk, Outcome, ProviderKind, SealedIssued,
+    ToolArguments, ToolDescriptor, ToolName, ToolResult,
 };
+
+/// Whether `text` is a short lowercase name: `[a-z][a-z0-9]{1,15}`.
+pub(crate) fn is_short_name(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    (2..=ServiceName::MAX_BYTES).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+}
 
 /// A service name: `[a-z][a-z0-9]{1,15}`, so that `<service>_<tool>` fits in 64 characters.
 ///
@@ -26,13 +36,7 @@ impl ServiceName {
 
     /// Checks `text` against the service name rule.
     pub fn new(text: &str) -> Option<Self> {
-        let bytes = text.as_bytes();
-        let valid = (2..=Self::MAX_BYTES).contains(&bytes.len())
-            && bytes[0].is_ascii_lowercase()
-            && bytes[1..]
-                .iter()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
-        valid.then(|| Self(text.to_owned()))
+        is_short_name(text).then(|| Self(text.to_owned()))
     }
 
     /// The name as text.
@@ -47,74 +51,57 @@ impl std::fmt::Display for ServiceName {
     }
 }
 
-/// The accepted credential kinds with their permissions, the addressing mode and the push flag.
+/// What a service adapter accepts.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct ServiceDescription {}
-
-/// Facts a connection learned about what its authority allows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct AuthorityFacts {}
-
-/// What a call is pinned to: the attachment, the connection, its sealed issued data and the ticket.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct CallContext {}
-
-/// One event a service pushed for a connection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct IngressItem {}
-
-/// The daemon's broker: mints authorizations from the connection's credential.
-pub trait Authority: Send + Sync {
-    /// Asks the connection's credential adapter for one authorization.
-    fn authorize(&self, ask: AuthorizationAsk) -> Result<Authorization, Outcome>;
+pub struct ServiceDescription {
+    /// The provider kinds whose credentials can establish a connection.
+    pub accepts: Vec<ProviderKind>,
+    /// Which addresses a connection may name.
+    pub addresses: AddressPolicy,
 }
 
-/// The daemon's intake for events a service pushes.
-pub trait Ingress: Send + Sync {
-    /// Hands one pushed event to the daemon's event pipeline.
-    fn push(&self, item: IngressItem) -> Result<(), Outcome>;
+/// The daemon's broker for one connection being established: it mints
+/// authorizations from the connection's credential, through that
+/// credential's own adapter.
+pub trait Authority: Send + Sync {
+    /// Asks the credential adapter for one authorization in the shape `ask`
+    /// names, and hands back exactly what it minted.
+    fn authorize(&self, ask: &AuthorizationAsk) -> Result<Authorization, Outcome>;
 }
 
 /// The contract every service adapter implements.
 ///
 /// Calls are synchronous and may block on the network; the daemon runs them on
-/// a blocking thread with no lock held.
+/// a blocking thread with no lock held. A read that fails answers an outcome
+/// that says so; a write whose effect is uncertain answers
+/// [`Outcome::Unknown`], never a success and never a plain failure.
 pub trait ServiceAdapter: Send + Sync {
     /// The service's name, which prefixes every tool it declares.
     fn name(&self) -> ServiceName;
 
-    /// What the service accepts and how it is addressed.
+    /// What the service accepts.
     fn describe(&self) -> ServiceDescription;
 
-    /// Establishes a connection at `address`, minting what it needs through `authority`.
+    /// Establishes a connection at `address`, asking `authority` for what
+    /// the service wants, and returns what the service issued for it.
     fn establish(
         &self,
         address: &Address,
         authority: &dyn Authority,
     ) -> Result<SealedIssued, Outcome>;
 
-    /// Every tool this adapter can offer.
+    /// Every tool this adapter offers, named without the service prefix.
     fn catalog(&self) -> Vec<ToolDescriptor>;
 
-    /// The tools a connection with these authority facts may call.
-    fn available(&self, facts: &AuthorityFacts) -> Vec<ToolName>;
-
-    /// Performs one tool call.
+    /// Performs one tool call through the connection at `address` that the
+    /// service issued `issued` for.
     fn call(
         &self,
         tool: &ToolName,
-        arguments: ToolArguments,
-        pinned: CallContext,
+        arguments: &ToolArguments,
+        address: &Address,
+        issued: &SealedIssued,
     ) -> Result<ToolResult, Outcome>;
-
-    /// Opens a push stream for a connection, for services that push events.
-    fn open_stream(&self, _pinned: CallContext, _ingress: &dyn Ingress) -> Result<(), Outcome> {
-        Err(Outcome::Unsupported)
-    }
 }
 
 #[cfg(test)]

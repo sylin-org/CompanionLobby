@@ -26,6 +26,7 @@ lobby-testkit = { path = "crates/testkit" }
 lobby-credential-atproto = { path = "crates/credentials/atproto" }
 lobby-service-tangent = { path = "crates/services/tangent" }
 lobby-daemon = { path = "crates/daemon" }
+lobby-conformance = { path = "crates/conformance" }
 
 bytes = "=1.12.1"
 dirs = "=6.0.0"
@@ -38,6 +39,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 sha2 = "=0.10.9"
 tokio = { version = "=1.53.3", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+ureq = { version = "=2.12.1", default-features = false }
 uuid = { version = "=1.28.0", features = ["v7"] }
 win32job = "=2.0.3"
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Console", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_Shell"] }
