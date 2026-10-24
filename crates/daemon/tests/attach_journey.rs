@@ -115,6 +115,30 @@ impl Install {
     fn stop(&self) -> Output {
         self.command(&self.exe, &["stop"])
     }
+
+    /// The initiator and outcome of every `command` entry on the journal's
+    /// newest page, newest first.
+    fn journaled(&self, command: &str) -> Vec<(String, String)> {
+        let answer = loopback::send(
+            self.port,
+            &Call::get("/api/journal?limit=100", Duration::from_secs(10)),
+        )
+        .expect("read the journal");
+        assert_eq!(answer.status, 200);
+        let page: Value = serde_json::from_slice(&answer.body).expect("JSON");
+        page["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .filter(|entry| entry["command"] == command)
+            .map(|entry| {
+                (
+                    entry["initiator"].as_str().expect("initiator").to_owned(),
+                    entry["outcome"].as_str().expect("outcome").to_owned(),
+                )
+            })
+            .collect()
+    }
 }
 
 impl Drop for Install {
@@ -1178,6 +1202,7 @@ fn a_secret_planted_while_the_data_directory_was_open_never_attaches_anyone() {
     );
     let trace = std::fs::read_to_string(install.dir().join("trace.log")).expect("trace.log");
     assert!(trace.contains("did not unseal"), "{trace}");
+    assert_renewal_journaled(&install);
     install.create("bea", "Bea");
     assert_eq!(attach_status(&install, planted, "bea"), 401);
     let mut host = install.attach("bea");
@@ -1226,6 +1251,83 @@ fn a_secret_planted_while_the_data_directory_was_open_never_attaches_anyone() {
         planted.as_bytes()
     );
     assert!(install.discovery().is_none(), "no daemon started");
+}
+
+/// The lobby replaced the attach secret once since the install began, and
+/// journaled it pending, then done.
+fn assert_renewal_journaled(install: &Install) {
+    let lobby = |outcome: &str| ("lobby".to_owned(), outcome.to_owned());
+    assert_eq!(
+        install.journaled("renew_attach_secret"),
+        [lobby("done"), lobby("pending")]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_secret_planted_while_the_data_directory_was_open_never_attaches_anyone() {
+    use lobby_testkit::PLANTED_ATTACH_SECRET;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    let planted = PLANTED_ATTACH_SECRET.trim();
+    let install = Install::new("planted");
+    install.open();
+    install.create("ada", "Ada");
+    assert_eq!(mode(&install.dir()), 0o700);
+    let secret_file = install.dir().join("attach.secret");
+    let first = install.secret();
+    assert!(install.stop().status.success());
+
+    // While no daemon runs, someone opens the directory to everyone and
+    // plants a secret they know, readable by everyone.
+    std::fs::set_permissions(install.dir(), std::fs::Permissions::from_mode(0o755))
+        .expect("open the directory");
+    std::fs::write(&secret_file, planted).expect("plant a secret");
+    std::fs::set_permissions(&secret_file, std::fs::Permissions::from_mode(0o644))
+        .expect("open the secret");
+
+    // The daemon narrows the directory, then will not use what it found.
+    install.open();
+    assert_eq!(
+        mode(&install.dir()),
+        0o700,
+        "the directory is owner-only again"
+    );
+    let renewed = install.secret();
+    assert_ne!(renewed.expose(), planted);
+    assert_ne!(renewed, first);
+    assert_eq!(
+        mode(&secret_file) & 0o077,
+        0,
+        "the new secret is owner-only"
+    );
+    let trace = std::fs::read_to_string(install.dir().join("trace.log")).expect("trace.log");
+    assert!(
+        trace.contains("granted access to someone other than its owner"),
+        "{trace}"
+    );
+    assert_renewal_journaled(&install);
+    install.create("bea", "Bea");
+    assert_eq!(attach_status(&install, planted, "bea"), 401);
+    let mut host = install.attach("bea");
+    assert_eq!(
+        host.ask(&initialize(0))["result"]["serverInfo"]["name"],
+        "companion-lobby"
+    );
+    host.close_stdin();
+    assert_eq!(
+        host.wait_exit(Duration::from_secs(20))
+            .and_then(|s| s.code()),
+        Some(0)
+    );
 }
 
 #[test]
