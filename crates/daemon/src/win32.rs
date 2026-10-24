@@ -1,6 +1,6 @@
 //! Windows calls the standard library has no safe form for.
 //!
-//! This is the daemon crate's one use of `unsafe`, and it holds four things:
+//! This is the daemon crate's one use of `unsafe`, and it holds five things:
 //!
 //! * **Standard handles a started daemon must not inherit.** An MCP host
 //!   gives the attach shim inheritable pipe handles as its standard streams.
@@ -21,13 +21,18 @@
 //! * **An exclusive listening port.** The listener is bound with
 //!   `SO_EXCLUSIVEADDRUSE`, so no other socket can share the port while the
 //!   daemon runs.
+//! * **Where the data directory lives.** The Local AppData known folder and
+//!   the profile root Windows records for the current user, both read through
+//!   the process token, so the one can be checked to lie under the other
+//!   whatever the process environment says.
 #![allow(unsafe_code)]
 
+use std::ffi::OsString;
 use std::ffi::c_void;
 use std::io;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, AsRawSocket};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
@@ -45,12 +50,16 @@ use windows_sys::Win32::Security::{
     CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid,
     GetSecurityDescriptorControl, GetTokenInformation, INHERITED_ACE, InitializeAcl,
     OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_INFORMATION_CLASS, TOKEN_OWNER,
-    TOKEN_QUERY, TOKEN_USER, TokenOwner, TokenUser,
+    PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_ACCESS_MASK, TOKEN_IMPERSONATE,
+    TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenOwner, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::UI::Shell::{
+    FOLDERID_LocalAppData, GetUserProfileDirectoryW, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+};
 
 /// Marks this process's stdin, stdout and stderr as not inheritable.
 pub fn keep_std_handles_from_children() {
@@ -379,6 +388,91 @@ fn crypt(input: &[u8], purpose: &[u8], seal: bool) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// The Local AppData known folder for the user the process token names,
+/// resolved with `SHGetKnownFolderPath`. Windows stores that folder as a path
+/// under `%USERPROFILE%`, so the answer can still follow the variable; the
+/// data directory is checked against [`profile_root`] as well.
+pub fn local_app_data() -> io::Result<PathBuf> {
+    let token = ProcessToken::open(TOKEN_QUERY | TOKEN_IMPERSONATE)?;
+    let mut path: windows_sys::core::PWSTR = null_mut();
+    // SAFETY: the folder id is a static GUID, `token` is a live handle opened
+    // with the access the call needs, and `path` receives a CoTaskMemAlloc'd
+    // NUL-terminated string that is freed below, also on failure.
+    let status = unsafe {
+        SHGetKnownFolderPath(
+            &FOLDERID_LocalAppData,
+            KF_FLAG_DEFAULT as u32,
+            token.0,
+            &mut path,
+        )
+    };
+    let result = if status == 0 && !path.is_null() {
+        // SAFETY: on success `path` is a valid NUL-terminated UTF-16 string.
+        let units = unsafe {
+            let length = (0..).take_while(|&i| *path.add(i) != 0).count();
+            std::slice::from_raw_parts(path, length)
+        };
+        Ok(PathBuf::from(OsString::from_wide(units)))
+    } else {
+        Err(io::Error::from_raw_os_error(status))
+    };
+    // SAFETY: `path` is null or was allocated by the call above, freed once.
+    unsafe {
+        CoTaskMemFree(path.cast());
+    }
+    result
+}
+
+/// The root of the current user's profile as Windows records it for the
+/// user's SID, read through the process token and never from `USERPROFILE`.
+pub fn profile_root() -> io::Result<PathBuf> {
+    let token = ProcessToken::open(TOKEN_QUERY)?;
+    let mut needed = 0u32;
+    // SAFETY: a size query with no buffer; `needed` is a local.
+    unsafe {
+        GetUserProfileDirectoryW(token.0, null_mut(), &mut needed);
+    }
+    if needed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut buffer = vec![0u16; needed as usize];
+    // SAFETY: `buffer` holds `needed` writable UTF-16 units, the size the
+    // query above asked for.
+    let filled = unsafe { GetUserProfileDirectoryW(token.0, buffer.as_mut_ptr(), &mut needed) };
+    if filled == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let length = buffer
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(buffer.len());
+    Ok(PathBuf::from(OsString::from_wide(&buffer[..length])))
+}
+
+/// The current process's token, closed when dropped.
+struct ProcessToken(HANDLE);
+
+impl ProcessToken {
+    fn open(access: TOKEN_ACCESS_MASK) -> io::Result<Self> {
+        let mut token: HANDLE = null_mut();
+        // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no
+        // closing; `token` receives a real handle closed on drop.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), access, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(token))
+    }
+}
+
+impl Drop for ProcessToken {
+    fn drop(&mut self) {
+        // SAFETY: the handle was opened by `open` and is closed exactly once.
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
 /// One piece of the current process's token, read into an aligned buffer.
 struct TokenInformation {
     /// The structure the class names, followed by the SID it points to, 8-byte aligned.
@@ -387,35 +481,25 @@ struct TokenInformation {
 
 impl TokenInformation {
     fn query(class: TOKEN_INFORMATION_CLASS) -> io::Result<Self> {
-        let mut token: HANDLE = null_mut();
-        // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no
-        // closing; `token` receives a real handle closed below.
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let token = ProcessToken::open(TOKEN_QUERY)?;
         let mut needed = 0u32;
         // SAFETY: a size query with no buffer; `needed` is a local.
         unsafe {
-            GetTokenInformation(token, class, null_mut(), 0, &mut needed);
+            GetTokenInformation(token.0, class, null_mut(), 0, &mut needed);
         }
         let mut buffer = vec![0u64; (needed as usize).div_ceil(size_of::<u64>())];
         // SAFETY: `buffer` holds at least `needed` writable bytes.
         let filled = unsafe {
             GetTokenInformation(
-                token,
+                token.0,
                 class,
                 buffer.as_mut_ptr().cast(),
                 needed,
                 &mut needed,
             )
         };
-        let error = io::Error::last_os_error();
-        // SAFETY: `token` was opened above and is closed exactly once.
-        unsafe {
-            CloseHandle(token);
-        }
         if filled == 0 || buffer.is_empty() {
-            return Err(error);
+            return Err(io::Error::last_os_error());
         }
         Ok(Self { buffer })
     }

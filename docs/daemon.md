@@ -9,11 +9,12 @@ page, `stop` drains it.
 
 The data directory is resolved as `README.md` describes; `LOBBY_DATA_DIR`
 overrides it and a path that leads into a `.companion-lobby` directory is
-refused. On Windows the base folder comes from the known-folder API alone: a
-process whose `LOCALAPPDATA` or `APPDATA` says otherwise still resolves the
-same folder, and one whose `USERPROFILE` Windows does not recognize gets no
-folder and refuses until `LOBBY_DATA_DIR` names one, rather than using
-another. Whoever creates the directory restricts it to its owner. On every
+refused. On Windows the base folder comes from the known-folder API, asked
+for the process token, and must lie under the profile root Windows records
+for the user's account, which no environment variable moves: a process whose
+`LOCALAPPDATA`, `APPDATA` or `USERPROFILE` says otherwise still resolves the
+same folder, and a folder that resolves outside that root is refused until
+`LOBBY_DATA_DIR` names one, rather than used. Whoever creates the directory restricts it to its owner. On every
 start, before it writes anything there, the daemon checks that the directory
 is still owner-only. If it is not, the daemon narrows it again only when
 everything inside is a file the daemon itself writes, owned by the current

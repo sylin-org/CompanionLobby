@@ -3,8 +3,10 @@
 //! Where the daemon keeps its files:
 //!
 //! * Windows: the Local AppData known folder, resolved with
-//!   `SHGetKnownFolderPath` and never from environment variables, followed by
-//!   `CompanionLobby`;
+//!   `SHGetKnownFolderPath` for the process token and never from environment
+//!   variables, followed by `CompanionLobby`; the folder must lie under the
+//!   profile root Windows records for the user, or the daemon refuses to
+//!   start;
 //! * macOS: `~/Library/Application Support/CompanionLobby`;
 //! * elsewhere: `$XDG_STATE_HOME/companion-lobby`;
 //! * `LOBBY_DATA_DIR` overrides all of them.
@@ -40,6 +42,14 @@ const REFUSED_COMPONENT: &str = ".companion-lobby";
 pub enum HomeProblem {
     /// The platform reported no base folder.
     NoBaseFolder,
+    /// The base folder does not lie under the profile root Windows records
+    /// for the current user.
+    Unanchored {
+        /// The folder the platform reported.
+        folder: PathBuf,
+        /// The profile root it should lie under.
+        profile: PathBuf,
+    },
     /// The path is, or lies inside, a directory this product never uses.
     Refused(PathBuf),
     /// The directory could not be created or restricted.
@@ -51,6 +61,12 @@ impl fmt::Display for HomeProblem {
         match self {
             Self::NoBaseFolder => f.write_str(
                 "the platform reported no folder for application data; set LOBBY_DATA_DIR",
+            ),
+            Self::Unanchored { folder, profile } => write!(
+                f,
+                "the Local AppData folder resolves to {}, outside the profile at {}; set LOBBY_DATA_DIR",
+                display_path(folder),
+                display_path(profile)
             ),
             Self::Refused(path) => write!(
                 f,
@@ -69,19 +85,18 @@ impl std::error::Error for HomeProblem {}
 /// Resolves the data directory from `LOBBY_DATA_DIR` or the platform folder.
 pub fn resolve() -> Result<PathBuf, HomeProblem> {
     let override_dir = std::env::var_os(DATA_DIR_ENV).filter(|value| !value.is_empty());
-    choose(override_dir.map(PathBuf::from), platform_base())
+    choose(override_dir.map(PathBuf::from), platform_base)
 }
 
-/// The pure decision behind [`resolve`].
+/// The pure decision behind [`resolve`]: the platform folder is asked for
+/// only when nothing overrides it.
 pub fn choose(
     override_dir: Option<PathBuf>,
-    platform_base: Option<PathBuf>,
+    platform_base: impl FnOnce() -> Result<PathBuf, HomeProblem>,
 ) -> Result<PathBuf, HomeProblem> {
     let path = match override_dir {
         Some(path) => path,
-        None => platform_base
-            .ok_or(HomeProblem::NoBaseFolder)?
-            .join(platform_leaf()),
+        None => platform_base()?.join(platform_leaf()),
     };
     if refused(&path) {
         return Err(HomeProblem::Refused(path));
@@ -138,22 +153,50 @@ fn is_refused_name(name: &OsStr) -> bool {
         .eq_ignore_ascii_case(REFUSED_COMPONENT)
 }
 
+/// FOLDERID_LocalAppData through SHGetKnownFolderPath for the process
+/// token, accepted only under the profile root Windows records for the
+/// user's SID. Windows stores the folder as a path under `%USERPROFILE%`, so
+/// the root, which no variable moves, is what anchors it.
 #[cfg(windows)]
-fn platform_base() -> Option<PathBuf> {
-    // FOLDERID_LocalAppData through SHGetKnownFolderPath.
-    dirs::data_local_dir()
+fn platform_base() -> Result<PathBuf, HomeProblem> {
+    let folder = crate::win32::local_app_data().map_err(|_| HomeProblem::NoBaseFolder)?;
+    let profile = crate::win32::profile_root().map_err(|_| HomeProblem::NoBaseFolder)?;
+    anchored(folder, profile)
 }
 
 #[cfg(target_os = "macos")]
-fn platform_base() -> Option<PathBuf> {
+fn platform_base() -> Result<PathBuf, HomeProblem> {
     // ~/Library/Application Support
-    dirs::data_dir()
+    dirs::data_dir().ok_or(HomeProblem::NoBaseFolder)
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-fn platform_base() -> Option<PathBuf> {
+fn platform_base() -> Result<PathBuf, HomeProblem> {
     // $XDG_STATE_HOME, or ~/.local/state when it is unset.
-    dirs::state_dir()
+    dirs::state_dir().ok_or(HomeProblem::NoBaseFolder)
+}
+
+/// `folder` when it lies under `profile`, compared the way Windows compares
+/// paths: after `.` and `..` are folded, and without case.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn anchored(folder: PathBuf, profile: PathBuf) -> Result<PathBuf, HomeProblem> {
+    let inside = {
+        let folder = lexical(&folder);
+        let profile = lexical(&profile);
+        let mut folder = folder.components();
+        profile.components().all(|part| {
+            folder.next().is_some_and(|other| {
+                part.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&other.as_os_str().to_string_lossy())
+            })
+        })
+    };
+    if inside {
+        Ok(folder)
+    } else {
+        Err(HomeProblem::Unanchored { folder, profile })
+    }
 }
 
 const fn platform_leaf() -> &'static str {
@@ -373,15 +416,49 @@ mod tests {
 
     #[test]
     fn the_override_wins_over_the_platform_folder() {
-        let chosen = choose(
-            Some(PathBuf::from("/srv/lobby")),
-            Some(PathBuf::from("/base")),
-        )
+        let chosen = choose(Some(PathBuf::from("/srv/lobby")), || {
+            panic!("the platform folder is not asked for")
+        })
         .expect("override");
         assert_eq!(chosen, PathBuf::from("/srv/lobby"));
-        let platform = choose(None, Some(PathBuf::from("/base"))).expect("platform");
+        let platform = choose(None, || Ok(PathBuf::from("/base"))).expect("platform");
         assert_eq!(platform, PathBuf::from("/base").join(platform_leaf()));
-        assert!(matches!(choose(None, None), Err(HomeProblem::NoBaseFolder)));
+        assert!(matches!(
+            choose(None, || Err(HomeProblem::NoBaseFolder)),
+            Err(HomeProblem::NoBaseFolder)
+        ));
+    }
+
+    #[test]
+    fn a_base_folder_outside_the_profile_root_is_refused() {
+        let profile = PathBuf::from("/profiles/sponsor");
+        for inside in [
+            "/profiles/sponsor/AppData/Local",
+            "/Profiles/SPONSOR/AppData/Local",
+            "/profiles/sponsor/./AppData/Local",
+        ] {
+            assert_eq!(
+                anchored(PathBuf::from(inside), profile.clone()).expect(inside),
+                PathBuf::from(inside)
+            );
+        }
+        for outside in [
+            "/elsewhere/AppData/Local",
+            "/profiles/sponsor-other/AppData/Local",
+            "/profiles/sponsor/../other/AppData/Local",
+            "/profiles",
+        ] {
+            let refused = anchored(PathBuf::from(outside), profile.clone());
+            assert!(
+                matches!(refused, Err(HomeProblem::Unanchored { .. })),
+                "{outside}"
+            );
+        }
+        let problem = choose(None, || {
+            anchored(PathBuf::from("/elsewhere"), profile.clone())
+        })
+        .expect_err("refused");
+        assert!(problem.to_string().contains("LOBBY_DATA_DIR"), "{problem}");
     }
 
     /// The line [`report_the_platform_folder`] prints its answer on.
@@ -416,29 +493,44 @@ mod tests {
     }
 
     /// Every process resolves the same folder, the shim a host started with a
-    /// rewritten environment included: the folder comes from the known
-    /// folder, never from the variables that usually mirror it, and a profile
-    /// path Windows does not recognize yields no folder at all, which the
-    /// daemon refuses, rather than another one.
+    /// rewritten environment included: the folder comes from the known folder
+    /// for the process token, anchored to the profile root Windows records
+    /// for the user, never from the variables that usually mirror them. A
+    /// `USERPROFILE` naming a profile-shaped scratch folder, with
+    /// `AppData\Local` inside it, does not move the directory, and neither
+    /// does one that names nothing.
     #[cfg(windows)]
     #[test]
     fn the_platform_folder_comes_from_the_known_folder_never_the_environment() {
         let here = platform_base().expect("this process has a platform folder");
-        let misleading = std::env::temp_dir().join("lobby-misleading-environment");
-        let misleading = misleading.as_os_str();
+        let scratch = temp_dir("misleading-profile");
+        std::fs::create_dir_all(scratch.join("AppData").join("Local")).expect("scratch profile");
+        let misleading = scratch.as_os_str();
         let mirrored = platform_folder_with(&[
             ("LOCALAPPDATA", misleading),
             ("APPDATA", misleading),
             ("HOMEDRIVE", OsStr::new("Q:")),
             ("HOMEPATH", OsStr::new(r"\misleading")),
         ]);
-        assert_eq!(mirrored, Some(here), "the mirroring variables are ignored");
+        assert_eq!(
+            mirrored.as_ref(),
+            Some(&here),
+            "the mirroring variables are ignored"
+        );
         let profile = platform_folder_with(&[("USERPROFILE", misleading)]);
-        assert_eq!(profile, None, "no folder rather than another one");
-        assert!(matches!(
-            choose(None, profile),
-            Err(HomeProblem::NoBaseFolder)
-        ));
+        assert_eq!(
+            profile.as_ref(),
+            Some(&here),
+            "USERPROFILE does not move it"
+        );
+        let nowhere = platform_folder_with(&[("USERPROFILE", OsStr::new(r"Q:\nowhere"))]);
+        assert_eq!(
+            nowhere.as_ref(),
+            Some(&here),
+            "nor does a profile that is not there"
+        );
+        assert!(!here.starts_with(&scratch));
+        let _ = std::fs::remove_dir_all(scratch);
     }
 
     /// Run only by the test above, in a child process with a misleading
@@ -448,8 +540,8 @@ mod tests {
     #[ignore = "run by the_platform_folder_comes_from_the_known_folder_never_the_environment"]
     fn report_the_platform_folder() {
         match platform_base() {
-            Some(base) => println!("{PLATFORM_FOLDER_LINE}{}", base.display()),
-            None => println!("{PLATFORM_FOLDER_LINE}none"),
+            Ok(base) => println!("{PLATFORM_FOLDER_LINE}{}", base.display()),
+            Err(_) => println!("{PLATFORM_FOLDER_LINE}none"),
         }
     }
 
@@ -468,7 +560,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    choose(Some(PathBuf::from(path)), None),
+                    choose(Some(PathBuf::from(path)), || Err(HomeProblem::NoBaseFolder)),
                     Err(HomeProblem::Refused(_))
                 ),
                 "{path}"
