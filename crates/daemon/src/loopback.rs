@@ -71,9 +71,20 @@ pub fn unreachable(error: &io::Error) -> bool {
 
 /// Sends `call` to the daemon on `port` and reads the whole answer.
 pub fn send(port: u16, call: &Call<'_>) -> io::Result<Answer> {
+    send_checked(port, call, |_| Ok(()))
+}
+
+/// Sends `call` like [`send`], but only after `check` accepted the connection
+/// it is about to travel on; when `check` refuses, nothing is written.
+pub fn send_checked(
+    port: u16,
+    call: &Call<'_>,
+    check: impl FnOnce(&TcpStream) -> io::Result<()>,
+) -> io::Result<Answer> {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let mut stream = TcpStream::connect_timeout(&address, call.timeout)
         .map_err(|error| io::Error::new(error.kind(), Unreachable(error)))?;
+    check(&stream)?;
     stream.set_read_timeout(Some(call.timeout))?;
     stream.set_write_timeout(Some(call.timeout))?;
     stream.set_nodelay(true)?;

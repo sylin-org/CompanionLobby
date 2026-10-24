@@ -297,7 +297,8 @@ fn detach(attached: &Attached) {
 }
 
 /// Attaches once as `companion`. This is the one call that carries the
-/// install's attach secret, and `daemon` was verified just before it.
+/// install's attach secret: `daemon` was verified just before it, and the
+/// secret is written only on a connection whose far end is the lock holder.
 fn attach_once(daemon: &Daemon, companion: &str) -> Result<Attached, String> {
     let bearer = format!("Bearer {}", daemon.secret.expose());
     let body = serde_json::to_vec(&json!({ "companion": companion })).unwrap_or_default();
@@ -308,8 +309,17 @@ fn attach_once(daemon: &Daemon, companion: &str) -> Result<Attached, String> {
         body: &body,
         timeout: contact::PROBE_TIMEOUT,
     };
-    let answer = loopback::send(daemon.port, &call)
-        .map_err(|error| format!("cannot reach the daemon to attach: {error}"))?;
+    let holder = daemon.discovery.lock_holder_pid;
+    let answer = loopback::send_checked(daemon.port, &call, |stream| {
+        contact::held_by(stream, daemon.port, holder)
+    })
+    .map_err(|error| match error.kind() {
+        io::ErrorKind::PermissionDenied => format!(
+            "refusing the process on 127.0.0.1:{}: {error}; the attach secret was not sent",
+            daemon.port
+        ),
+        _ => format!("cannot reach the daemon to attach: {error}"),
+    })?;
     let value: Value = serde_json::from_slice(&answer.body).unwrap_or(Value::Null);
     if answer.status != 201 {
         let message = value

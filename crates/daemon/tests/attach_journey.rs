@@ -1226,6 +1226,63 @@ fn a_secret_planted_while_the_data_directory_was_open_never_attaches_anyone() {
     assert!(install.discovery().is_none(), "no daemon started");
 }
 
+#[test]
+fn the_port_stays_bound_until_a_stopping_daemon_has_drained() {
+    let install = Install::new("bound");
+    install.open();
+    install.create("ada", "Ada");
+    let (attachment, token) = attach_directly(&install, "ada");
+    let port = install.port;
+    let ping = r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#;
+    let (first, rest) = ping.split_at(ping.len() / 2);
+
+    // A frame still arriving keeps the daemon draining once it is stopped.
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("timeout");
+    stream
+        .write_all(
+            format!(
+                "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nLobby-Attachment: {attachment}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{first}",
+                ping.len()
+            )
+            .as_bytes(),
+        )
+        .expect("write the head and half the body");
+    std::thread::sleep(Duration::from_millis(300));
+    let mut command = Command::new(&install.exe);
+    command.arg("stop").stdin(Stdio::null());
+    for (name, value) in install.environment() {
+        command.env(name, value);
+    }
+    let stopper = std::thread::spawn(move || command.output().expect("run stop"));
+    std::thread::sleep(Duration::from_millis(1000));
+    assert!(!stopper.is_finished(), "the daemon is still draining");
+
+    // While it drains, the daemon still holds the lock and its record names
+    // the port, so nothing else may take the port.
+    assert!(lobby_daemon::lock::is_held(&install.dir()).expect("lock probe"));
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_err(),
+        "another process took the port of a daemon that still holds the lock"
+    );
+
+    stream.write_all(rest.as_bytes()).expect("write the rest");
+    let mut bytes = Vec::new();
+    let _ = stream.read_to_end(&mut bytes);
+    assert_eq!(loopback::parse(&bytes).expect("an answer").status, 200);
+    let stopped = stopper.join().expect("stop");
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    // Once the daemon let go of everything, the port is free.
+    let taken = std::net::TcpListener::bind(("127.0.0.1", port));
+    assert!(taken.is_ok(), "the port is free after the stop");
+}
+
 /// Attaches as `companion` the way the shim does, returning the attachment id and its token.
 fn attach_directly(install: &Install, companion: &str) -> (String, String) {
     let bearer = format!("Bearer {}", install.secret().expose());

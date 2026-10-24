@@ -214,6 +214,9 @@ async fn bind(port: u16) -> Result<TcpListener, String> {
 }
 
 /// Serves `listener` until a stop is requested, then drains accepted requests.
+/// The listener stays bound through the drain, accepting nothing, so no other
+/// process can take the port while this daemon still holds the lock and its
+/// record names it; it closes only once the drain is over.
 pub async fn serve(listener: TcpListener, app: Arc<App>) {
     let graceful = GracefulShutdown::new();
     loop {
@@ -239,7 +242,6 @@ pub async fn serve(listener: TcpListener, app: Arc<App>) {
             () = app.stopping.notified() => break,
         }
     }
-    drop(listener);
     trace::line("stop requested; draining accepted requests");
     if tokio::time::timeout(DRAIN_LIMIT, graceful.shutdown())
         .await
@@ -247,6 +249,7 @@ pub async fn serve(listener: TcpListener, app: Arc<App>) {
     {
         trace::line("drain limit reached; exiting with requests still open");
     }
+    drop(listener);
 }
 
 type Reply = Response<Full<Bytes>>;

@@ -247,6 +247,61 @@ pub fn listener_pids(port: u16) -> Result<Vec<u32>, String> {
     Ok(pids)
 }
 
+/// How many times the far end of a fresh connection is looked up before it
+/// counts as missing, and the pause between lookups.
+const CONNECTION_LOOKUPS: u32 = 20;
+const CONNECTION_LOOKUP_PAUSE: Duration = Duration::from_millis(10);
+
+/// Accepts `stream`, a connection to 127.0.0.1:`port`, only when the process
+/// at its far end is `holder`. Verifying the listener beforehand cannot
+/// promise this on its own: the listener may close and another process take
+/// the port between that check and the connection. The connection, once made,
+/// cannot move to another process, so the check that counts is made on it.
+pub fn held_by(stream: &std::net::TcpStream, port: u16, holder: u32) -> std::io::Result<()> {
+    let local = stream.local_addr()?.port();
+    for _ in 0..CONNECTION_LOOKUPS {
+        let owners = connection_owners(port, local).map_err(std::io::Error::other)?;
+        if !owners.is_empty() {
+            return if owners.iter().all(|pid| *pid == holder) {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "the connection reached a process other than the lock holder",
+                ))
+            };
+        }
+        std::thread::sleep(CONNECTION_LOOKUP_PAUSE);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "the process at the far end of the connection could not be identified",
+    ))
+}
+
+/// The pids owning the far end of the connection from local port `local` to
+/// 127.0.0.1:`port`.
+fn connection_owners(port: u16, local: u16) -> Result<Vec<u32>, String> {
+    use netstat2::{AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState};
+    let sockets = netstat2::get_sockets_info(AddressFamilyFlags::IPV4, ProtocolFlags::TCP)
+        .map_err(|error| format!("cannot read the TCP connection table: {error}"))?;
+    let mut pids: Vec<u32> = sockets
+        .into_iter()
+        .filter(|socket| {
+            matches!(&socket.protocol_socket_info, ProtocolSocketInfo::Tcp(tcp)
+                if tcp.state != TcpState::Listen
+                    && tcp.local_port == port
+                    && tcp.remote_port == local
+                    && tcp.local_addr.is_loopback()
+                    && tcp.remote_addr.is_loopback())
+        })
+        .flat_map(|socket| socket.associated_pids)
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    Ok(pids)
+}
+
 /// Asks the daemon on `port` to drain and exit.
 pub fn request_stop(port: u16) -> Result<(), String> {
     let origin = discovery::manager_origin(port);
@@ -350,6 +405,48 @@ mod tests {
         let port = listener.local_addr().expect("address").port();
         let pids = listener_pids(port).expect("table");
         assert_eq!(pids, vec![std::process::id()]);
+    }
+
+    #[test]
+    fn nothing_is_written_on_a_connection_whose_far_end_is_not_the_holder() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let me = std::process::id();
+        let stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        assert!(
+            held_by(&stream, port, me).is_ok(),
+            "this process is the far end"
+        );
+        let refused = held_by(&stream, port, me.wrapping_add(1)).expect_err("another pid");
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let call = Call {
+            method: "POST",
+            path: "/mcp/attach",
+            headers: &[("Authorization", "Bearer not-to-be-sent")],
+            body: b"{}",
+            timeout: PROBE_TIMEOUT,
+        };
+        let sent = loopback::send_checked(port, &call, |stream| {
+            held_by(stream, port, me.wrapping_add(1))
+        });
+        assert_eq!(
+            sent.expect_err("refused").kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let (_first, _) = listener.accept().expect("the first connection");
+        let (mut second, _) = listener.accept().expect("the refused connection");
+        second
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
+        let mut received = Vec::new();
+        let _ = second.read_to_end(&mut received);
+        assert!(
+            received.is_empty(),
+            "the refused connection carried nothing"
+        );
+        drop(stream);
     }
 
     #[test]
