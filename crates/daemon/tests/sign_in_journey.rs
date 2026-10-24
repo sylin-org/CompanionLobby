@@ -13,10 +13,9 @@
 //! completed.
 
 use std::path::Path;
-use std::time::Duration;
 
 use lobby_conformance::host::{Install, body, split_url, text};
-use lobby_daemon::loopback::{self, Answer, Call};
+use lobby_daemon::loopback::Answer;
 use lobby_testkit::atproto::{AtprotoWorld, base64url_decode};
 use lobby_testkit::listener::{Listener, Reply};
 use lobby_testkit::{percent_decode, percent_encode, secrets_in};
@@ -64,8 +63,7 @@ fn return_page(install: &Install, location: &str) -> Answer {
     let (lobby, target) = split_url(location);
     assert_eq!(lobby.port(), install.port(), "back to this lobby");
     assert!(target.starts_with("/signin/atproto/return?"), "{target}");
-    loopback::send(install.port(), &Call::get(&target, Duration::from_secs(30)))
-        .expect("the return page")
+    install.arrive(location)
 }
 
 /// Signs `companion` in all the way through and returns the return page.
@@ -142,7 +140,7 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
     let page = return_page(&install, &location);
     assert_eq!(page.status, 200, "{}", text(&page));
     let said = text(&page);
-    assert!(said.contains("Signed in"), "{said}");
+    assert!(said.contains("The account is signed in"), "{said}");
     for echoed in [
         query_value(&location, "code"),
         query_value(&location, "state"),
@@ -326,14 +324,13 @@ fn a_return_that_does_not_prove_the_sign_in_signs_nothing_in() {
     let ada = install.create("ada");
 
     // A state the lobby never minted.
-    let forged = loopback::send(
-        install.port(),
-        &Call::get(
-            "/signin/atproto/return?code=forged-code&state=forged-state&iss=http%3A%2F%2F127.0.0.1%3A1",
-            Duration::from_secs(10),
+    let forged = return_page(
+        &install,
+        &format!(
+            "http://127.0.0.1:{}/signin/atproto/return?code=forged-code&state=forged-state&iss=http%3A%2F%2F127.0.0.1%3A1",
+            install.port()
         ),
-    )
-    .expect("the return page");
+    );
     assert_eq!(forged.status, 404, "{}", text(&forged));
     assert!(!text(&forged).contains("forged"));
 
@@ -354,7 +351,10 @@ fn a_return_that_does_not_prove_the_sign_in_signs_nothing_in() {
 
     // A cancelled sign-in signs nothing in when the browser comes back.
     let started = begin(&install, &ada, "");
-    assert_eq!(started.status, 201, "a refused sign-in has ended, so another may start");
+    assert_eq!(
+        started.status, 201,
+        "a refused sign-in has ended, so another may start"
+    );
     let id = body(&started)["signIn"]["id"]
         .as_str()
         .expect("id")
@@ -364,8 +364,7 @@ fn a_return_that_does_not_prove_the_sign_in_signs_nothing_in() {
     assert_eq!(cancelled.status, 200, "{}", text(&cancelled));
     assert_eq!(body(&cancelled)["signIn"]["status"], "cancelled");
     let late = return_page(&install, &world.approve(&url));
-    assert_eq!(late.status, 404);
-    assert!(text(&late).contains("cancelled"), "{}", text(&late));
+    assert_eq!(late.status, 404, "{}", text(&late));
     assert_eq!(world.server().count("/oauth/token"), 0);
     assert!(credentials(&install).is_empty());
     let again = install.operator("POST", &format!("/api/sign-ins/{id}/cancel"), &json!({}));

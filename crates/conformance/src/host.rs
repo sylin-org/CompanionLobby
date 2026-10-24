@@ -175,10 +175,30 @@ impl Install {
             .expect("the authority answers");
         assert_eq!(approved.status, 302, "the authority sends the browser back");
         let back = approved.header("location").expect("a location").to_owned();
-        let (lobby, target) = split_url(&back);
+        self.arrive(&back)
+    }
+
+    /// The sponsor's browser arriving at `location`, a sign-in's return
+    /// route on this lobby: the route sends it straight on, carrying only
+    /// the outcome, and this answers the page it is sent to.
+    pub fn arrive(&self, location: &str) -> Answer {
+        let (lobby, target) = split_url(location);
         assert_eq!(lobby.port(), self.port, "back to this lobby");
-        loopback::send(self.port, &Call::get(&target, Duration::from_secs(30)))
-            .expect("the return page")
+        let returned = Outbound::new(AddressPolicy::LoopbackAllowed)
+            .send(&lobby, Request::new("GET", &target))
+            .expect("the return route answers");
+        assert_eq!(returned.status, 303, "the browser is sent straight on");
+        assert!(returned.body.is_empty());
+        let onward = returned.header("location").expect("a location").to_owned();
+        assert!(
+            onward.starts_with("/signin/")
+                && onward.contains("/done?outcome=")
+                && !onward.contains("state")
+                && !onward.contains("code"),
+            "nothing the provider sent rides on: {onward}"
+        );
+        loopback::send(self.port, &Call::get(&onward, Duration::from_secs(10)))
+            .expect("the page that says how it ended")
     }
 
     /// Signs `companion` in and returns the new credential's id.

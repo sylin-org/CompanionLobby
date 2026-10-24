@@ -26,7 +26,10 @@
 //!    verified the listener;
 //! 6. `/signin/<kind>/return` is where a provider sends the sponsor's browser
 //!    back after a sign-in; it completes only a sign-in the lobby started and
-//!    waits for, once, and its page echoes nothing it was sent.
+//!    waits for, once, and sends the browser on to `/signin/<kind>/done`,
+//!    which says how it ended from the outcome alone, so the code and the
+//!    `state` leave the address bar at once and no page echoes anything the
+//!    provider sent.
 //!
 //! Every response is sent with `Cache-Control: no-store`,
 //! `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`. Only
@@ -417,6 +420,13 @@ fn sign_in_cancelled_in(path: &str) -> Option<&str> {
         .filter(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
+/// The provider kind a `/signin/<kind>/done` path names.
+fn sign_in_done_in(path: &str) -> Option<&str> {
+    path.strip_prefix("/signin/")
+        .and_then(|rest| rest.strip_suffix("/done"))
+        .filter(|kind| !kind.is_empty() && !kind.contains('/'))
+}
+
 /// The provider kind a `/signin/<kind>/return` path names.
 fn sign_in_return_in(path: &str) -> Option<&str> {
     path.strip_prefix("/signin/")
@@ -533,6 +543,7 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
                 Err(refused) => refused.reply(),
             }
         }
+        (&Method::GET, done) if sign_in_done_in(done).is_some() => sign_in_done(&query),
         (&Method::GET, returned) if sign_in_return_in(returned).is_some() => {
             let kind = sign_in_return_in(returned)
                 .unwrap_or_else(|| unreachable!("checked above"))
@@ -654,6 +665,7 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
                 || credential_revoked_in(other).is_some()
                 || connection_revoked_in(other).is_some()
                 || sign_in_cancelled_in(other).is_some()
+                || sign_in_done_in(other).is_some()
                 || sign_in_return_in(other).is_some() =>
         {
             method_not_allowed()
@@ -1005,25 +1017,58 @@ fn begin_sign_in(lobby: &Lobby, origin: &str, body: &[u8]) -> Reply {
     }
 }
 
-/// The page the sponsor's browser lands on after a sign-in. It says what
-/// happened in the lobby's words and echoes nothing the provider sent.
+/// Completes a sign-in from what the provider sent back, then sends the
+/// browser straight on to the page that says how it ended, so the code and
+/// the `state` leave the address bar and the history at once. The redirect
+/// carries only the outcome's wire name.
 fn complete_sign_in(lobby: &Lobby, kind: &str, pairs: Vec<(String, String)>) -> Reply {
-    let (status, said) = match lobby.complete_sign_in(kind, pairs) {
+    let outcome = match lobby.complete_sign_in(kind, pairs) {
         Ok(credential) => {
             trace::line(&format!("credential {} signed in", credential.id));
-            (
-                StatusCode::OK,
-                "Signed in. You can close this tab and return to the manager page.".to_owned(),
-            )
+            Outcome::Done
         }
-        Err(refusal) => (
-            match refusal.outcome {
-                Outcome::NotFound => StatusCode::NOT_FOUND,
-                Outcome::Conflict => StatusCode::CONFLICT,
-                Outcome::TemporarilyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-                _ => StatusCode::FORBIDDEN,
-            },
-            refusal.message,
+        Err(refusal) => refusal.outcome,
+    };
+    let mut reply = empty_reply(StatusCode::SEE_OTHER);
+    if let Ok(value) =
+        HeaderValue::from_str(&format!("/signin/{kind}/done?outcome={}", outcome.code()))
+    {
+        reply.headers_mut().insert(header::LOCATION, value);
+    }
+    reply
+}
+
+/// The page that says how a sign-in ended, from the outcome's wire name
+/// alone; the manager page says more. It loads nothing.
+fn sign_in_done(query: &str) -> Reply {
+    let outcome = query_pairs(query)
+        .into_iter()
+        .find(|(name, _)| name == "outcome")
+        .map(|(_, value)| value);
+    let (status, said) = match outcome.as_deref() {
+        Some("done") => (
+            StatusCode::OK,
+            "The account is signed in. You can close this tab and return to the manager page.",
+        ),
+        Some("not_found") => (
+            StatusCode::NOT_FOUND,
+            "Nothing was signed in: the lobby was not waiting for this sign-in. It may have been cancelled, expired or already finished; the manager page says which.",
+        ),
+        Some("conflict") => (
+            StatusCode::CONFLICT,
+            "Nothing was signed in: that account is signed in for another companion, or this companion already holds an account of this kind.",
+        ),
+        Some("temporarily_unavailable" | "rate_limited") => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Nothing was signed in: the provider could not be reached, or asked the lobby to slow down. Try again from the manager page.",
+        ),
+        Some("refused" | "invalid_input") => (
+            StatusCode::FORBIDDEN,
+            "Nothing was signed in: the provider's answer did not prove the sign-in the lobby started. Start it again from the manager page.",
+        ),
+        _ => (
+            StatusCode::FORBIDDEN,
+            "Nothing was signed in. The trace log in the data directory says why.",
         ),
     };
     let page = format!(
