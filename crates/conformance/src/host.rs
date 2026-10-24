@@ -496,7 +496,9 @@ pub fn another_companion_sees_none_of_the_first_ones_tools(exe: &Path) {
 
 /// A call is journaled as invoked, pending, before the service is reached,
 /// and as settled after, with the attachment, the connection it went
-/// through, the service and the tool, and with no content.
+/// through, the service and the tool, and with no content. The board holds
+/// the call as it arrives, and the journal read while the board holds it
+/// already has the pending entry and nothing settled.
 pub fn a_call_is_journaled_pending_then_settled_through_its_connection(exe: &Path) {
     let authority = PassbookAuthority::start();
     let board = BoardServer::start(&authority);
@@ -507,12 +509,32 @@ pub fn a_call_is_journaled_pending_then_settled_through_its_connection(exe: &Pat
     let connection = install.connected(&ada, &credential, &board, "front");
     let mut peer = install.attach("ada");
     initialize(&mut peer);
-    let posted = call(
-        &mut peer,
+    let held = board.listener().hold("/posts");
+    peer.send(&call_frame(
         1,
         "board_post",
         json!({ "text": "words only the board keeps" }),
+    ));
+    board.listener().wait_for("/posts", 1);
+    let in_flight: Vec<(String, String)> = install
+        .journal()
+        .iter()
+        .filter(|entry| entry["tool"] == "post")
+        .map(|entry| {
+            (
+                entry["kind"].as_str().expect("kind").to_owned(),
+                entry["outcome"].as_str().expect("outcome").to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        in_flight,
+        [("invoked".to_owned(), "pending".to_owned())],
+        "the pending entry is written before the board answers, and nothing is settled yet"
     );
+    assert!(board.posts().is_empty(), "the board has not acted yet");
+    drop(held);
+    let posted = peer.answer(&json!(1));
     assert_eq!(posted["result"]["isError"], false, "{posted}");
     assert_eq!(board.posts().len(), 1);
 
