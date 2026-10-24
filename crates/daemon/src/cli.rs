@@ -1,16 +1,15 @@
 //! The command line of `companion-lobby`.
 //!
-//! Subcommands: `run` (the default), `attach <companion>` where the companion
-//! is its id or its moniker, `open` and `stop`. Each subcommand describes what
-//! it will do; the daemon, the shim, the opener and the drain arrive in later
-//! slices.
+//! Subcommands: `run` (the default), `attach <companion> [--log <file>]`
+//! where the companion is its id or its moniker, `open` and `stop`.
 
 use std::fmt;
+use std::path::PathBuf;
 
 /// The usage text printed for `help` and after a usage problem.
 pub const USAGE: &str = "\
 usage: companion-lobby [run]
-       companion-lobby attach <companion>
+       companion-lobby attach <companion> [--log <file>]
        companion-lobby open
        companion-lobby stop";
 
@@ -23,6 +22,8 @@ pub enum Command {
     Attach {
         /// The companion's id or moniker, as the host configuration names it.
         companion: String,
+        /// Where to append a record of every relayed frame, if anywhere.
+        log: Option<PathBuf>,
     },
     /// Open the manager page in the default browser.
     Open,
@@ -46,6 +47,8 @@ pub enum UsageError {
     UnknownSubcommand(String),
     /// `attach` was given no companion.
     MissingCompanion,
+    /// `--log` was given no file.
+    MissingLogFile,
     /// A subcommand was given an argument it does not take.
     UnexpectedArgument(String),
 }
@@ -55,6 +58,7 @@ impl fmt::Display for UsageError {
         match self {
             Self::UnknownSubcommand(word) => write!(f, "unknown subcommand: {word}"),
             Self::MissingCompanion => f.write_str("attach needs a companion id or moniker"),
+            Self::MissingLogFile => f.write_str("--log needs a file"),
             Self::UnexpectedArgument(word) => write!(f, "unexpected argument: {word}"),
         }
     }
@@ -73,35 +77,29 @@ impl Command {
             None | Some("run") => Command::Run,
             Some("open") => Command::Open,
             Some("stop") => Command::Stop,
-            Some("attach") => match arguments.next() {
-                Some(companion) if !companion.is_empty() => Command::Attach { companion },
-                _ => return Err(UsageError::MissingCompanion),
-            },
+            Some("attach") => {
+                let companion = match arguments.next() {
+                    Some(companion) if !companion.is_empty() && !companion.starts_with('-') => {
+                        companion
+                    }
+                    _ => return Err(UsageError::MissingCompanion),
+                };
+                let log = match arguments.next().as_deref() {
+                    None => None,
+                    Some("--log") => match arguments.next() {
+                        Some(file) if !file.is_empty() => Some(PathBuf::from(file)),
+                        _ => return Err(UsageError::MissingLogFile),
+                    },
+                    Some(other) => return Err(UsageError::UnexpectedArgument(other.to_owned())),
+                };
+                Command::Attach { companion, log }
+            }
             Some("help" | "-h" | "--help") => return Ok(Parsed::Help),
             Some(other) => return Err(UsageError::UnknownSubcommand(other.to_owned())),
         };
         match arguments.next() {
             Some(extra) => Err(UsageError::UnexpectedArgument(extra)),
             None => Ok(Parsed::Command(command)),
-        }
-    }
-
-    /// One sentence saying what this subcommand will do once its slice lands.
-    pub fn plan(&self) -> String {
-        match self {
-            Self::Run => "run: will hold daemon.lock in the data directory and serve the manager \
-                          page and the MCP endpoint on 127.0.0.1; this build serves nothing."
-                .to_owned(),
-            Self::Attach { companion } => format!(
-                "attach {companion}: will relay this host's MCP frames to the daemon as \
-                 companion {companion}, starting the daemon if needed; this build relays nothing."
-            ),
-            Self::Open => "open: will open the manager page in the default browser; this build \
-                           opens nothing."
-                .to_owned(),
-            Self::Stop => "stop: will ask the running daemon to drain and exit; this build stops \
-                           nothing."
-                .to_owned(),
         }
     }
 }
@@ -124,8 +122,24 @@ mod tests {
         assert_eq!(
             parse(&["attach", "ada"]),
             Ok(Parsed::Command(Command::Attach {
-                companion: "ada".to_owned()
+                companion: "ada".to_owned(),
+                log: None,
             }))
+        );
+        assert_eq!(
+            parse(&["attach", "ada", "--log", "frames.jsonl"]),
+            Ok(Parsed::Command(Command::Attach {
+                companion: "ada".to_owned(),
+                log: Some(PathBuf::from("frames.jsonl")),
+            }))
+        );
+        assert_eq!(
+            parse(&["attach", "ada", "--log"]),
+            Err(UsageError::MissingLogFile)
+        );
+        assert_eq!(
+            parse(&["attach", "--log"]),
+            Err(UsageError::MissingCompanion)
         );
         assert_eq!(parse(&["attach"]), Err(UsageError::MissingCompanion));
         assert_eq!(

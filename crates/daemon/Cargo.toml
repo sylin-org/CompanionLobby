@@ -20,9 +20,27 @@ lobby-contracts.workspace = true
 lobby-outbound.workspace = true
 lobby-credential-atproto.workspace = true
 lobby-service-tangent.workspace = true
+bytes.workspace = true
+dirs.workspace = true
+getrandom.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+netstat2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 [dev-dependencies]
 lobby-testkit.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+win32job.workspace = true
 
 [lints]
 workspace = true

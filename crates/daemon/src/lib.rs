@@ -19,13 +19,17 @@ pub mod broker;
 pub mod browser;
 pub mod calls;
 pub mod cli;
+pub mod contact;
 pub mod discovery;
 pub mod domain;
+#[cfg(windows)]
+pub mod handles;
 pub mod home;
 pub mod http;
 pub mod journal;
 pub mod keyring;
 pub mod lock;
+pub mod loopback;
 pub mod manager;
 pub mod mcp;
 pub mod projections;
