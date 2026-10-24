@@ -85,8 +85,8 @@ daemon, the files it keeps, its loopback boundary and the attach protocol.
 | macOS | `~/Library/Application Support/CompanionLobby` |
 | Others | `$XDG_STATE_HOME/companion-lobby` |
 
-`LOBBY_DATA_DIR` overrides the location. The directory is owner-only, and
-credential material inside it is sealed (DPAPI on Windows).
+`LOBBY_DATA_DIR` overrides the location. The directory is owner-only; the
+attach secret and credential material inside it are sealed (DPAPI on Windows).
 
 ## Out of scope, by decision
 

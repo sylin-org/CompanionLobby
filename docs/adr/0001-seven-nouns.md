@@ -1,7 +1,7 @@
 # ADR 0001: Seven nouns, two contracts, one process
 
-Status: accepted, with the defaults listed at the end awaiting the owner's
-confirmation.
+Status: accepted. Of the defaults listed at the end, 1 and 3 are confirmed by
+the owner; the others await the owner's confirmation.
 
 ## Problem
 
@@ -87,16 +87,22 @@ path and the shim can start the daemon from its own executable.
 - The daemon listens on 127.0.0.1 only. The Host header is checked before a
   body is read.
 - Attaching presents a per-install attach secret, kept in the data directory
-  under an owner-only ACL; it is sealed with DPAPI on Windows together with
-  credential material, and until then the ACL alone protects it. The daemon
+  under an owner-only ACL and sealed with DPAPI in the user's scope on
+  Windows (mode 0600 elsewhere). The daemon replaces a secret that does not
+  unseal as this user's or that anyone but its owner may read, and refuses to
+  narrow a widened directory whose files carry access of their own. The daemon
   answers each attach with a token for that one attachment, held only in its
   memory, and every later frame and the detach present that token, never the
   secret. `/mcp` refuses browser-origin evidence. This keeps journal
   attribution honest.
 - Before sending the secret, the shim verifies that the listener's pid is the
   pid the lock holder recorded in `daemon.json` and that the store
-  fingerprint matches, so a process squatting on the port never receives it;
-  a process that takes the port later receives only tokens no daemon accepts.
+  fingerprint matches, and then that the far end of the very connection it
+  writes on belongs to that pid, so a process squatting on the port never
+  receives it, even one that takes the port between the check and the
+  connection; a process that takes the port later receives only tokens no
+  daemon accepts. A stopping daemon keeps the port bound until it has
+  drained.
 - The manager page and its operator API run under same-machine trust for v1:
   any local user who can reach the loopback port can drive it, as with
   ssh-agent. Mutations require same-origin browser evidence and JSON. An
@@ -127,8 +133,10 @@ path and the shim can start the daemon from its own executable.
   it documents, writes only its own schema, and refuses a newer one. There is
   no decoder for any file the product itself never wrote.
 - The journal is append-only JSON lines. An `invoked` entry precedes every
-  external call (no entry, no call); a `settled` entry follows it. Entries hold
-  no content and no secrets.
+  external call (no entry, no call); a `settled` entry follows it. Every
+  command writes a `pending` entry before it changes anything and an entry
+  with its outcome after; a failure of the second never reports a landed
+  change as an error. Entries hold no content and no secrets.
 
 ### The ship line
 
@@ -150,20 +158,22 @@ come after v0.1.0.
   standard handles' inherit flag, the data directory's DACL and the exclusive
   listening socket. Clippy warnings fail the build.
 
-## Defaults awaiting the owner's confirmation
+## Defaults
 
 Each item below is the recommended answer, taken as the default until the
-owner confirms or changes it.
+owner confirms or changes it. Items marked confirmed are the owner's
+decision.
 
-1. **Reference material stays local.** The read-only reference branch and its
+1. **Reference material stays local.** Confirmed by the owner: the reference
+   material was never published. The read-only reference branch and its
    tags are never pushed; main's pushed history carries none of what they
    hold.
 2. **Linear main.** Main stays linear: the first greenfield commit sits on a
    tree-clearing commit, and nothing is force-pushed.
-3. **Grants held by earlier builds.** The owner revokes the app authorizations
-   for both accounts in the authorization server's connected-apps settings,
-   signs in again through the lobby, and then deletes the files in
-   `~/.companion-lobby` by hand. The lobby never reads that directory; no
+3. **Grants held by earlier builds.** Confirmed by the owner. The owner
+   revokes the app authorizations for both accounts in the authorization
+   server's connected-apps settings, signs in again through the lobby, and
+   then deletes the files in `~/.companion-lobby` by hand. The lobby never reads that directory; no
    one-off tool is built for it.
 4. **Attachment and operator trust.** A per-install attach secret (owner-only
    ACL, DPAPI-sealed) on every attach, and same-machine trust for the operator
