@@ -14,7 +14,11 @@
 //!    same-origin browser evidence: an `Origin` equal to the page's own
 //!    origin (built from the bound port, never from the request), and a
 //!    `Sec-Fetch-Site` that is absent or `same-origin`;
-//! 4. `/mcp` refuses any browser evidence at all (`Origin`, `Referer` or a
+//! 4. reads under `/api/` carry no browser evidence of another origin: an
+//!    `Origin`, when present, is the page's own, and a `Sec-Fetch-Site`, when
+//!    present, is `same-origin` or `none`, so a page elsewhere cannot hold the
+//!    live feed's places or read the lobby through a browser that lets it;
+//! 5. `/mcp` refuses any browser evidence at all (`Origin`, `Referer` or a
 //!    `Sec-Fetch-*` header). Attaching requires the per-install attach secret
 //!    as a bearer token; every later frame and the detach require the token
 //!    the daemon gave that one attachment, so the install secret crosses the
@@ -35,15 +39,16 @@
 use std::convert::Infallible;
 use std::io;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use http_body_util::channel::Channel;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::body::Incoming;
+use hyper::body::{Body, Frame, Incoming};
 use hyper::header::{self, HeaderMap, HeaderValue};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -54,7 +59,7 @@ use lobby_contracts::{AttachmentId, Companion, CompanionId, Outcome};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, Semaphore, broadcast, watch};
+use tokio::sync::{Notify, Semaphore, broadcast, mpsc, watch};
 
 use crate::discovery::{DISCOVERY_PATH, Discovery};
 use crate::domain::{Lobby, Refusal, Rename, Snapshot};
@@ -365,6 +370,13 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let query = request.uri().query().unwrap_or_default().to_owned();
+    if method == Method::GET
+        && path.starts_with("/api/")
+        && path != DISCOVERY_PATH
+        && let Err(refused) = same_origin_read(app, headers)
+    {
+        return refused.reply();
+    }
     match (&method, path.as_str()) {
         (&Method::GET | &Method::OPTIONS, DISCOVERY_PATH) => {
             discovery_reply(app, method == Method::OPTIONS, browser_evidence(headers))
@@ -557,6 +569,25 @@ async fn operator_body(app: &App, request: Request<Incoming>) -> Result<Bytes, P
         ));
     }
     read_body(request).await
+}
+
+/// The read guard: a read under `/api/` from a browser must come from the
+/// page's own origin. A request with no browser evidence passes, since a
+/// browser sends it for every request another origin makes.
+fn same_origin_read(app: &App, headers: &HeaderMap) -> Result<(), Problem> {
+    let origin_ok = header_text(headers, header::ORIGIN)
+        .is_none_or(|origin| origin == discovery::manager_origin(app.port));
+    let fetch_site_ok = header_text(headers, "sec-fetch-site")
+        .is_none_or(|site| site == "same-origin" || site == "none");
+    if origin_ok && fetch_site_ok {
+        Ok(())
+    } else {
+        Err(Problem(
+            StatusCode::FORBIDDEN,
+            Outcome::Refused,
+            "The lobby is read by the manager page itself.",
+        ))
+    }
 }
 
 /// Whether a request carries any sign of having come from a browser.
@@ -814,7 +845,7 @@ fn events(app: &Arc<App>, headers: &HeaderMap) -> Reply {
     }
     let slot = FeedSlot(app.clone());
     let subscription = app.lobby.subscribe(header_text(headers, "last-event-id"));
-    let (mut sender, body) = Channel::<Bytes>::new(64);
+    let (sender, frames) = mpsc::channel::<Bytes>(64);
     let mut stopped = app.stopped.subscribe();
     let app = app.clone();
     tokio::spawn(async move {
@@ -831,7 +862,7 @@ fn events(app: &Arc<App>, headers: &HeaderMap) -> Reply {
                 .map(|item| manager::item_frame(&feed.id_of(item), &item.data)),
         );
         for frame in first {
-            if sender.send_data(frame).await.is_err() {
+            if sender.send(frame).await.is_err() {
                 return;
             }
         }
@@ -844,25 +875,47 @@ fn events(app: &Arc<App>, headers: &HeaderMap) -> Reply {
                 item = receiver.recv() => match item {
                     Ok(item) => manager::item_frame(&feed.id_of(&item), &item.data),
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let _ = sender.send_data(manager::reset_frame("behind")).await;
+                        let _ = sender.send(manager::reset_frame("behind")).await;
                         return;
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
                 },
                 () = tokio::time::sleep(FEED_KEEPALIVE) => manager::keepalive_frame(),
                 _ = stopped.changed() => return,
+                // The page went away: its place is free at once, not at the
+                // next keepalive.
+                () = sender.closed() => return,
             };
-            if sender.send_data(frame).await.is_err() {
+            if sender.send(frame).await.is_err() {
                 return;
             }
         }
     });
-    let mut reply = with_hygiene(Response::new(body.boxed()), StatusCode::OK);
+    let mut reply = with_hygiene(Response::new(FeedBody(frames).boxed()), StatusCode::OK);
     reply.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/event-stream; charset=utf-8"),
     );
     reply
+}
+
+/// A live feed's body: the frames its task sends, ending when the task ends.
+/// The connection drops it when the page goes away, which closes the task's
+/// sender.
+struct FeedBody(mpsc::Receiver<Bytes>);
+
+impl Body for FeedBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+        self.0
+            .poll_recv(context)
+            .map(|frame| frame.map(|bytes| Ok(Frame::data(bytes))))
+    }
 }
 
 /// Frees a live feed's place when its stream ends, however it ends.

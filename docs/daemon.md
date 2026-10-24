@@ -192,7 +192,10 @@ or one older than the 512 items or 512 KiB the feed keeps), first receives
 last item the picture includes; it applies only the items after it. A page
 that reconnects with `Last-Event-ID` receives what it missed. A page that
 falls more than 256 items behind receives a reset and the stream ends. At
-most 16 feeds are served at once. Stopping the daemon ends every feed.
+most 16 feeds are served at once, and a page that goes away frees its place
+at once. A page whose feed is refused or ends still loads the lobby, and
+opens the feed again a few seconds later. Stopping the daemon ends every
+feed.
 
 ## The loopback boundary
 
@@ -221,7 +224,12 @@ Every request passes these rules in order, before any body is read:
    equal to `http://127.0.0.1:<port>`, built from the port the daemon is
    bound to and never from the request, and a `Sec-Fetch-Site` that is absent
    or `same-origin`. Anything else is 403.
-4. **Attachments** (`/mcp...`) must carry no browser evidence at all: an
+4. **Reads** (`GET` under `/api/`, the discovery document aside) carry no
+   evidence of another origin: an `Origin`, when present, is the page's own,
+   and a `Sec-Fetch-Site`, when present, is `same-origin` or `none`. Anything
+   else is 403, so a page elsewhere cannot hold the live feed's places, and a
+   browser that lets it read across origins reads nothing.
+5. **Attachments** (`/mcp...`) must carry no browser evidence at all: an
    `Origin`, `Referer` or any `Sec-Fetch-Site`, `Sec-Fetch-Mode` or
    `Sec-Fetch-Dest` header is 403. Attaching presents the install's attach
    secret as `Authorization: Bearer <secret>`. The answer carries a token for

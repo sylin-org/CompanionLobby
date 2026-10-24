@@ -874,3 +874,97 @@ fn reads_need_no_origin_and_changes_do() {
         assert_eq!(answer.status, 405, "{method} {path}");
     }
 }
+
+/// Sends a read with `headers` and returns its status line's code, leaving
+/// the connection open for a stream that does not end.
+fn read_status(port: u16, path: &str, headers: &str) -> (u16, TcpStream) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("timeout");
+    stream
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{headers}\r\n").as_bytes(),
+        )
+        .expect("write");
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    while !line.ends_with(b"\r\n") {
+        assert_eq!(stream.read(&mut byte).expect("read the status"), 1);
+        line.push(byte[0]);
+    }
+    let text = String::from_utf8_lossy(&line).into_owned();
+    let status = text
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("no status in {text}"));
+    (status, stream)
+}
+
+/// A page on another origin reads nothing and holds no place in the live
+/// feed, and a page that goes away frees its place at once.
+#[test]
+fn a_page_elsewhere_reads_nothing_and_a_closed_feed_frees_its_place() {
+    use lobby_daemon::http::{FEED_CLIENT_LIMIT, FEED_KEEPALIVE};
+    let install = Install::new("elsewhere");
+    install.open();
+    let port = install.port;
+    let own = format!("Origin: http://127.0.0.1:{port}\r\n");
+    for path in [
+        "/api/lobby",
+        "/api/journal",
+        "/api/companions",
+        "/api/events",
+    ] {
+        for evidence in [
+            "Origin: http://evil.test\r\n".to_owned(),
+            "Origin: http://127.0.0.1\r\n".to_owned(),
+            "Sec-Fetch-Site: cross-site\r\n".to_owned(),
+            "Sec-Fetch-Site: same-site\r\n".to_owned(),
+            format!("{own}Sec-Fetch-Site: cross-site\r\n"),
+        ] {
+            let (status, _) = read_status(port, path, &format!("{evidence}Connection: close\r\n"));
+            assert_eq!(status, 403, "{path} {evidence:?}");
+        }
+        for evidence in [
+            format!("{own}Sec-Fetch-Site: same-origin\r\n"),
+            "Sec-Fetch-Site: none\r\n".to_owned(),
+        ] {
+            let (status, _) = read_status(port, path, &format!("{evidence}Connection: close\r\n"));
+            assert_eq!(status, 200, "{path} {evidence:?}");
+        }
+    }
+
+    let feeds: Vec<TcpStream> = (0..FEED_CLIENT_LIMIT)
+        .map(|_| {
+            let (status, stream) = read_status(port, "/api/events", "");
+            assert_eq!(status, 200);
+            stream
+        })
+        .collect();
+    let (status, _) = read_status(port, "/api/events", "Connection: close\r\n");
+    assert_eq!(status, 503, "every place is held");
+    let closed = Instant::now();
+    drop(feeds);
+    let mut reopened = None;
+    while reopened.is_none() {
+        assert!(
+            closed.elapsed() < FEED_KEEPALIVE,
+            "a place came free only at a keepalive"
+        );
+        let (status, stream) = read_status(port, "/api/events", "");
+        if status == 200 {
+            reopened = Some(stream);
+        } else {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    assert!(
+        closed.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        closed.elapsed()
+    );
+    drop(reopened);
+    assert!(install.stop().status.success());
+}
