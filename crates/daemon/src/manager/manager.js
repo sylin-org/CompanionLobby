@@ -391,7 +391,7 @@ function waitingLine(companion, signIn) {
 function signInForm(companion, kind) {
   const form = element("form");
   form.setAttribute("aria-label", "Sign " + companion.displayName + " in with " + kind);
-  const account = field("Account (optional)", "", "What the provider calls the account, such as its handle. Leave it empty to choose the account on the provider's own page.");
+  const account = field("Account with " + kind + " (optional)", "", "What the provider calls the account, such as its handle. Leave it empty to choose the account on the provider's own page.");
   const go = element("button", "primary", "Sign in with " + kind);
   go.type = "submit";
   const actions = element("div", "actions");
@@ -434,14 +434,14 @@ function renderSignIn(companionId, signInId) {
   const back = link("/companion/" + encodeURIComponent(companion.id), "", companion.displayName);
   const heading = element("h1", "", "Sign " + companion.displayName + " in with " + signIn.kind);
   const meant = handoff && handoff.hint
-    ? "The account: " + handoff.hint + ". The provider asks you to sign in as it."
+    ? "The account: " + handoff.hint + ". Sign in as it on the provider's page; another account signs nothing in."
     : "The account: the one you choose on the provider's page.";
   const parts = [back, heading, element("p", "", meant)];
   const signedIn = credentialsOf(companion).find(credential => credential.kind === signIn.kind && credential.state === "ready");
   if (waitingNow(signIn)) {
     parts.push(element("p", "muted", "Waiting for the provider to send you back, until " + new Date(signIn.expiresAt).toLocaleTimeString() + "."));
     const actions = element("div", "actions");
-    if (handoff) {
+    if (handoff && handoff.url) {
       const onward = element("a", "button primary", "Continue to " + new URL(handoff.url).host);
       onward.href = handoff.url;
       onward.target = "_blank";
@@ -459,7 +459,7 @@ function renderSignIn(companionId, signInId) {
         return;
       }
       lobby.signIns.set(signIn.id, result.body.signIn);
-      lobby.handoffs.delete(signIn.id);
+      if (handoff) handoff.url = null;
       note("The sign-in was cancelled.");
       refresh(true);
     }, "Keep waiting");
