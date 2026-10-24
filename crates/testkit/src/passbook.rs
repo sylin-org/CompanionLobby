@@ -5,10 +5,10 @@
 //! whichever holder the test scripted and sends the browser back to the
 //! lobby with a one-use code; the adapter exchanges the code for the holder's
 //! name and a key. The key is the credential's material. With it the adapter
-//! asks the authority for stamps: short-lived tokens, plain or for one
-//! audience and method, which a service checks with the authority. The
-//! authority cannot prove a single request, so the adapter refuses that ask
-//! before it reads its material or reaches the authority.
+//! asks the authority for stamps: short-lived tokens for one audience and
+//! method, which a service checks with the authority. The authority never
+//! mints a plain stamp that any service would take, so the adapter refuses a
+//! bearer ask before it reads its material or reaches the authority.
 //!
 //! Neither half ships in the product: the daemon compiles them in only for
 //! tests, to prove the host through adapters whose words are not those of any
@@ -41,10 +41,10 @@ pub struct Minted {
     pub stamp: String,
     /// The holder it speaks for.
     pub holder: String,
-    /// The audience it is for, when it is not a plain stamp.
-    pub audience: Option<String>,
-    /// The method it allows, when it is for an audience.
-    pub method: Option<String>,
+    /// The audience it is for.
+    pub audience: String,
+    /// The method it allows there.
+    pub method: String,
 }
 
 #[derive(Debug, Default)]
@@ -172,11 +172,19 @@ fn answer(book: &Mutex<Book>, request: &Received) -> Reply {
             else {
                 return Reply::json(401, &json!({ "error": "unknown key" }));
             };
+            let (Some(audience), Some(method)) =
+                (body["audience"].as_str(), body["method"].as_str())
+            else {
+                return Reply::json(
+                    400,
+                    &json!({ "error": "a stamp names an audience and a method" }),
+                );
+            };
             let minted = Minted {
                 stamp: unique_token("stamp"),
                 holder,
-                audience: body["audience"].as_str().map(str::to_owned),
-                method: body["method"].as_str().map(str::to_owned),
+                audience: audience.to_owned(),
+                method: method.to_owned(),
             };
             book.minted.push(minted.clone());
             Reply::json(200, &json!({ "stamp": minted.stamp }))
@@ -318,8 +326,7 @@ impl CredentialAdapter for Passbook {
         // An ask the authority cannot answer is refused before the material
         // is read or the authority is reached.
         let mut body = match ask {
-            AuthorizationAsk::ProvedRequest { .. } => return Err(Outcome::Unsupported),
-            AuthorizationAsk::Bearer => json!({}),
+            AuthorizationAsk::Bearer => return Err(Outcome::Unsupported),
             AuthorizationAsk::ServiceProof {
                 audience, method, ..
             } => json!({ "audience": audience, "method": method }),

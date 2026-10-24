@@ -425,7 +425,7 @@ pub fn two_boards_are_reached_through_one_set_of_tools(exe: &Path) {
         assert_eq!(presented.len(), 1, "one admission");
         let stamp = presented[0].strip_prefix("Bearer ").expect("a stamp");
         let minted = authority.verify(stamp).expect("the authority minted it");
-        assert_eq!(minted.audience.as_deref(), Some(board.audience().as_str()));
+        assert_eq!(minted.audience, board.audience());
         assert_eq!(minted.holder, "holder-ada");
     }
 
@@ -744,14 +744,14 @@ pub fn revoking_the_credential_cascades_to_its_connections(exe: &Path) {
     assert_eq!(again.status, 409);
 }
 
-/// A board that wants a proof of every request asks for something the
-/// passbook cannot give: the establishment is refused as unsupported before
-/// the authority is asked for anything, nothing reaches the board's
-/// admission, and no connection exists.
+/// A board that wants a plain bearer token asks for something the passbook
+/// never gives: the establishment is refused as unsupported before the
+/// authority is asked for anything, nothing reaches the board's admission,
+/// and no connection exists.
 pub fn an_unsupported_ask_is_refused_before_the_provider_is_reached(exe: &Path) {
     let authority = PassbookAuthority::start();
     let board = BoardServer::start(&authority);
-    board.admit_with(Admission::EveryRequest);
+    board.admit_with(Admission::Plain);
     let install = Install::new(exe, "unsupported");
     install.open();
     let ada = install.create("ada");
@@ -776,12 +776,13 @@ pub fn an_unsupported_ask_is_refused_before_the_provider_is_reached(exe: &Path) 
         .collect();
     assert_eq!(grants, ["pending", "unsupported"]);
 
-    board.admit_with(Admission::Plain);
+    board.admit_with(Admission::Audience);
     install.connected(&ada, &credential, &board, "front");
     let minted = authority.minted();
     assert_eq!(minted.len(), 1);
     assert_eq!(
-        minted[0].audience, None,
-        "a plain stamp for a board that asks for one"
+        minted[0].audience,
+        board.audience(),
+        "a stamp for the board's own audience once it asks for one"
     );
 }

@@ -34,8 +34,8 @@ pub trait CredentialFixture {
     fn requests(&self) -> usize;
     /// The asks the adapter answers.
     fn supported_asks(&self) -> Vec<AuthorizationAsk>;
-    /// An ask the adapter does not support.
-    fn unsupported_ask(&self) -> AuthorizationAsk;
+    /// The asks the adapter does not support.
+    fn unsupported_asks(&self) -> Vec<AuthorizationAsk>;
 }
 
 /// A slot holding fixed material that counts its reads.
@@ -122,14 +122,15 @@ pub fn run(adapter: &dyn CredentialAdapter, fixture: &dyn CredentialFixture) {
 
     // An unsupported ask is refused before the material or the provider.
     let before = fixture.requests();
-    let slot = CountingSlot::new(Ok(signed.material.clone()));
-    assert_eq!(
-        adapter
-            .authorize(&slot, &fixture.unsupported_ask())
-            .map(|_| ()),
-        Err(Outcome::Unsupported)
-    );
-    assert_eq!(slot.reads(), 0, "the material was not read");
+    for ask in fixture.unsupported_asks() {
+        let slot = CountingSlot::new(Ok(signed.material.clone()));
+        assert_eq!(
+            adapter.authorize(&slot, &ask).map(|_| ()),
+            Err(Outcome::Unsupported),
+            "{ask:?} is unsupported"
+        );
+        assert_eq!(slot.reads(), 0, "the material was not read");
+    }
     assert_eq!(fixture.requests(), before, "the provider was not reached");
 
     // Foreign material, and a slot the lobby closed, are refused unreached.

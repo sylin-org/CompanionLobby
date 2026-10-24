@@ -59,21 +59,15 @@ impl CredentialFixture for PassbookFixture {
     }
 
     fn supported_asks(&self) -> Vec<AuthorizationAsk> {
-        vec![
-            AuthorizationAsk::Bearer,
-            AuthorizationAsk::ServiceProof {
-                audience: "conformance-audience".to_owned(),
-                method: "conformance.method".to_owned(),
-                lifetime_secs: 60,
-            },
-        ]
+        vec![AuthorizationAsk::ServiceProof {
+            audience: "conformance-audience".to_owned(),
+            method: "conformance.method".to_owned(),
+            lifetime_secs: 60,
+        }]
     }
 
-    fn unsupported_ask(&self) -> AuthorizationAsk {
-        AuthorizationAsk::ProvedRequest {
-            method: "POST".to_owned(),
-            url: "http://127.0.0.1:1/admit".to_owned(),
-        }
+    fn unsupported_asks(&self) -> Vec<AuthorizationAsk> {
+        vec![AuthorizationAsk::Bearer]
     }
 }
 

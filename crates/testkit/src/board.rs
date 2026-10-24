@@ -3,8 +3,8 @@
 //! A board is a list of posts. It admits a member who presents a stamp from
 //! a passbook authority and gives back a badge; with the badge a member reads
 //! the newest posts and posts one. Each board says on its about page what it
-//! wants presented: a stamp for its own audience, a plain stamp, or a proof
-//! of every request, which no passbook can give.
+//! wants presented: a stamp for its own audience, or a plain bearer token,
+//! which no passbook gives.
 //!
 //! The adapter speaks the board in the board's own words: it establishes a
 //! connection by asking the lobby's authority for the stamp the board wants
@@ -49,10 +49,8 @@ pub const POST_MAX: usize = 2000;
 pub enum Admission {
     /// A stamp for the board's own audience.
     Audience,
-    /// A plain stamp.
+    /// A plain bearer token.
     Plain,
-    /// A proof of every request.
-    EveryRequest,
 }
 
 /// One post on a fake board.
@@ -164,7 +162,6 @@ fn answer(floor: &Mutex<Floor>, stamps: &crate::passbook::Verifier, request: &Re
             &match floor.admission {
                 Admission::Audience => json!({ "audience": floor.audience }),
                 Admission::Plain => json!({}),
-                Admission::EveryRequest => json!({ "proofs": "every-request" }),
             },
         ),
         ("POST", "/admit") => {
@@ -178,11 +175,9 @@ fn answer(floor: &Mutex<Floor>, stamps: &crate::passbook::Verifier, request: &Re
                 .and_then(|stamp| stamps.verify(stamp));
             let fits = minted.as_ref().is_some_and(|minted| match floor.admission {
                 Admission::Audience => {
-                    minted.audience.as_deref() == Some(floor.audience.as_str())
-                        && minted.method.as_deref() == Some(ADMIT_METHOD)
+                    minted.audience == floor.audience && minted.method == ADMIT_METHOD
                 }
-                Admission::Plain => minted.audience.is_none(),
-                Admission::EveryRequest => false,
+                Admission::Plain => false,
             });
             match minted.filter(|_| fits) {
                 Some(minted) => {
@@ -410,12 +405,7 @@ impl ServiceAdapter for Board {
         }
         let about: Value =
             serde_json::from_slice(&about.body).map_err(|_| Outcome::TemporarilyUnavailable)?;
-        let ask = if about["proofs"] == "every-request" {
-            AuthorizationAsk::ProvedRequest {
-                method: "POST".to_owned(),
-                url: address.url("/admit"),
-            }
-        } else if let Some(audience) = about["audience"].as_str() {
+        let ask = if let Some(audience) = about["audience"].as_str() {
             AuthorizationAsk::ServiceProof {
                 audience: audience.to_owned(),
                 method: ADMIT_METHOD.to_owned(),

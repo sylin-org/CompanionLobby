@@ -36,8 +36,9 @@ provider text.
 contracts:
 
 - `CredentialAdapter`: kind, begin and complete sign-in, and authorize an
-  ask (a bearer token, a proof for an audience and method, or a proof of one
-  request) against a `MaterialSlot`.
+  ask (a bearer token, or a proof for an audience and method) against a
+  `MaterialSlot`. A proof of one request joins with the first service
+  adapter that asks for it.
 - `ServiceAdapter`: name, describe (the provider kinds it accepts and the
   addresses it may reach), establish a connection at an `Address` through an
   `Authority`, catalog, and call.

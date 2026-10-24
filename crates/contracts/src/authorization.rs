@@ -2,9 +2,8 @@
 //!
 //! A service adapter never holds credential material. When it needs to prove
 //! who it acts for, it asks the daemon's [`Authority`](crate::Authority) for
-//! an authorization in the exact shape the service wants: a bearer token, a
-//! proof for one audience and method, or a proof of one request. The
-//! credential adapter of the connection's credential mints it from material
+//! an authorization in the exact shape the service wants: a bearer token or
+//! a proof for one audience and method. The credential adapter of the connection's credential mints it from material
 //! only it can read, or refuses an ask it does not support before it reads
 //! anything. The answer is a scheme and a [`Secret`] token.
 
@@ -24,13 +23,6 @@ pub enum AuthorizationAsk {
         method: String,
         /// How long the proof may live, in seconds.
         lifetime_secs: u32,
-    },
-    /// A proof bound to one request.
-    ProvedRequest {
-        /// The request's method, such as `POST`.
-        method: String,
-        /// The request's full URL.
-        url: String,
     },
 }
 
