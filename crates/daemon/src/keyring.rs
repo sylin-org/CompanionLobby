@@ -333,7 +333,9 @@ mod tests {
         } else {
             "not a secret".to_owned()
         };
-        std::fs::write(dir.join(ATTACH_SECRET_FILE), &content).expect("plant");
+        // Planted owner-only, as the daemon itself writes it, so only what
+        // the file holds is wrong.
+        crate::store::write_new(&dir.join(ATTACH_SECRET_FILE), content.as_bytes()).expect("plant");
         let refused = AttachSecret::read(&dir).expect_err("the shim refuses it");
         assert_eq!(refused.kind(), io::ErrorKind::InvalidData);
         let (renewed, renewal) = AttachSecret::load_or_renew(&dir).expect("renew");
@@ -365,6 +367,27 @@ mod tests {
         assert_eq!(renewal, Some(Renewal::Exposed));
         assert_ne!(renewed, first);
         assert!(crate::win32::is_private_file(&dir.join(ATTACH_SECRET_FILE)).expect("read"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_others_may_read_is_refused_to_the_shim_and_renewed_by_the_daemon() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = private_dir("exposed");
+        let planted = "ab".repeat(32);
+        let path = dir.join(ATTACH_SECRET_FILE);
+        std::fs::write(&path, &planted).expect("plant");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("open it to others");
+        let refused = AttachSecret::read(&dir).expect_err("the shim refuses it");
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        let (renewed, renewal) = AttachSecret::load_or_renew(&dir).expect("renew");
+        assert_eq!(renewal, Some(Renewal::Exposed));
+        assert!(!renewed.matches(&planted));
+        let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o077, 0, "the renewed secret is owner-only");
+        assert_eq!(AttachSecret::read(&dir).expect("read"), renewed);
         let _ = std::fs::remove_dir_all(dir);
     }
 
