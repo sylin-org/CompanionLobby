@@ -191,7 +191,7 @@ pub fn verify(dir: &Path, port: u16, document: &Discovery) -> Result<AttachSecre
     let record =
         DaemonRecord::read(dir).map_err(|_| not_owner("the lock holder left no record"))?;
     let listeners = listener_pids(port).map_err(|error| not_owner(&error))?;
-    if listeners.is_empty() || listeners.iter().any(|pid| *pid != record.pid) {
+    if !only_the_holder_listens(&listeners, record.pid) {
         return Err(not_owner("the listening process is not the lock holder"));
     }
     if record.port != port || record.pid != document.lock_holder_pid {
@@ -200,6 +200,11 @@ pub fn verify(dir: &Path, port: u16, document: &Discovery) -> Result<AttachSecre
         ));
     }
     Ok(secret)
+}
+
+/// Whether the lock holder `holder` is the one and only process listening.
+pub fn only_the_holder_listens(listeners: &[u32], holder: u32) -> bool {
+    !listeners.is_empty() && listeners.iter().all(|pid| *pid == holder)
 }
 
 /// The pids of every process listening on TCP `port`, on any local address.
@@ -291,6 +296,10 @@ pub fn start(dir: &Path, port: u16) -> std::io::Result<()> {
             Ok(_) => return Ok(()),
             // ERROR_ACCESS_DENIED: the job forbids breakaway; start inside it.
             Err(error) if error.raw_os_error() == Some(5) => {
+                eprintln!(
+                    "companion-lobby: the host runs its servers in a job object that the daemon may not leave; \
+                     the daemon starts inside it and stops when the host exits"
+                );
                 command.creation_flags(DETACHED);
             }
             Err(error) => return Err(error),
@@ -324,16 +333,14 @@ mod tests {
         assert_eq!(pids, vec![std::process::id()]);
     }
 
-    #[cfg(windows)]
     #[test]
-    fn the_daemon_starts_windowless_detached_and_in_its_own_group() {
-        assert_eq!(DETACHED & 0x0800_0000, 0x0800_0000, "CREATE_NO_WINDOW");
-        assert_eq!(DETACHED & 0x0000_0008, 0x0000_0008, "DETACHED_PROCESS");
-        assert_eq!(
-            DETACHED & 0x0000_0200,
-            0x0000_0200,
-            "CREATE_NEW_PROCESS_GROUP"
+    fn only_the_lock_holder_may_be_listening() {
+        assert!(only_the_holder_listens(&[42], 42));
+        assert!(!only_the_holder_listens(&[], 42), "nobody listens");
+        assert!(!only_the_holder_listens(&[7], 42), "someone else listens");
+        assert!(
+            !only_the_holder_listens(&[7, 42], 42),
+            "someone else shares the port"
         );
-        assert_eq!(DETACHED & BREAKAWAY_FROM_JOB, 0);
     }
 }

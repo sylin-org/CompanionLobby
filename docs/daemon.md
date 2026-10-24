@@ -166,8 +166,9 @@ the host's:
   `CREATE_NEW_PROCESS_GROUP`, so no console window appears and a host's Ctrl+C
   never reaches it, and with `CREATE_BREAKAWAY_FROM_JOB`, so a host that kills
   its job object on exit does not take the daemon with it (when the job
-  forbids breakaway, the daemon starts inside it and lives as long as the
-  host);
+  forbids breakaway, the daemon starts inside it, lives only as long as the
+  host, and the shim says so on stderr; both cases are journey tests with a
+  stand-in host that is in its job before the shim starts);
 - on Windows the shim first clears the inherit flag on its own standard
   handles: the host's pipes are inheritable in the shim, and a daemon that
   inherited them would keep the host from ever seeing the shim's stdout close;

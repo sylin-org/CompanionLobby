@@ -332,7 +332,41 @@ fn the_recorded_claude_code_conversation_replays_through_the_shim() {
         );
         assert_eq!(answer["error"]["code"], recorded["error"]["code"]);
         if frame["method"] == "tools/list" {
-            assert_eq!(answer["result"]["tools"], recorded["result"]["tools"]);
+            // What the host relies on: the same tool names, each a projected
+            // name with an object schema and boolean hints. The wording of
+            // descriptions is the lobby's own and may change.
+            let names = |tools: &Value| -> Vec<String> {
+                tools
+                    .as_array()
+                    .expect("tools")
+                    .iter()
+                    .map(|tool| tool["name"].as_str().expect("name").to_owned())
+                    .collect()
+            };
+            assert_eq!(
+                names(&answer["result"]["tools"]),
+                names(&recorded["result"]["tools"])
+            );
+            for tool in answer["result"]["tools"].as_array().expect("tools") {
+                let name = tool["name"].as_str().expect("name");
+                assert!(
+                    !name.is_empty()
+                        && name.bytes().all(|byte| byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || byte == b'_'),
+                    "{name}"
+                );
+                assert_eq!(tool["inputSchema"]["type"], "object", "{name}");
+                assert!(tool["description"].is_string(), "{name}");
+                for hint in [
+                    "readOnlyHint",
+                    "destructiveHint",
+                    "idempotentHint",
+                    "openWorldHint",
+                ] {
+                    assert!(tool["annotations"][hint].is_boolean(), "{name} {hint}");
+                }
+            }
         }
         if frame["method"] == "tools/call" {
             assert_eq!(answer["result"]["isError"], recorded["result"]["isError"]);
@@ -786,6 +820,74 @@ fn a_process_squatting_on_the_port_never_receives_the_secret() {
     }
 }
 
+#[test]
+fn a_listener_that_is_not_the_lock_holder_never_receives_the_secret() {
+    let install = Install::new("impostor");
+    install.open();
+    let secret = install.secret();
+    assert!(install.stop().status.success());
+
+    // Everything checks out except who listens: the lock is held, the record
+    // and the replayed document agree on the port, the pid and the install,
+    // but the record names another process than the one on the port.
+    let held = lobby_daemon::lock::DaemonLock::acquire(&install.dir()).expect("hold the lock");
+    let mut other = Command::new(EXE)
+        .arg("help")
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("another process");
+    let other_pid = other.id();
+    other.wait().expect("it exits");
+    let impostor = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = impostor.local_addr().expect("address").port();
+    let build = lobby_daemon::discovery::build_id_of(Path::new(EXE)).expect("build id");
+    lobby_daemon::lock::DaemonRecord {
+        pid: other_pid,
+        port,
+        build_id: build.clone(),
+    }
+    .write(&install.dir())
+    .expect("record");
+    let mut document = Discovery::new(port, &build, &secret.fingerprint());
+    document.lock_holder_pid = other_pid;
+    let seen = record_requests(
+        impostor,
+        "200 OK",
+        serde_json::to_string(&document).expect("document"),
+    );
+
+    let mut environment = install.environment();
+    environment.retain(|(name, _)| *name != "LOBBY_PORT");
+    environment.push(("LOBBY_PORT", port.to_string()));
+    let pairs: Vec<(&str, &str)> = environment
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    let mut shim = Peer::spawn(Path::new(EXE), &["attach", "ada"], &pairs);
+    let status = shim
+        .wait_exit(Duration::from_secs(20))
+        .expect("the shim exits");
+    assert_eq!(status.code(), Some(1));
+    let stderr = shim.stderr_text();
+    assert!(
+        stderr.contains(
+            "the listening process is not the lock holder; the attach secret was not sent"
+        ),
+        "stderr: {stderr}"
+    );
+    let requests: Vec<String> = seen.try_iter().collect();
+    assert!(!requests.is_empty(), "the shim probed the impostor");
+    for request in &requests {
+        assert!(request.starts_with("GET /api/discovery "), "{request}");
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization"),
+            "{request}"
+        );
+        assert!(!request.contains(secret.expose()));
+    }
+    drop(held);
+}
+
 /// A copy of the binary whose bytes, and so whose build id, differ.
 fn other_build(home: &Path) -> PathBuf {
     let directory = home.join("older");
@@ -860,33 +962,116 @@ fn a_daemon_of_another_build_is_replaced_and_stop_lets_go_of_its_executable() {
     assert!(String::from_utf8_lossy(&again.stdout).contains("no Companion Lobby daemon"));
 }
 
+/// Stands where a Node-based host stands: enters a job object that kills every
+/// process inside it when its last handle closes, launches the shim inside the
+/// job from the start, reports what the shim said, and exits, which closes the
+/// job. The job tests run this test binary again for it, with an install's
+/// environment; run any other way it does nothing.
+#[cfg(windows)]
+fn stand_in_host(allow_breakaway: bool) {
+    use win32job::{ExtendedLimitInfo, Job};
+
+    let Some(dir) = std::env::var_os("LOBBY_DATA_DIR").map(PathBuf::from) else {
+        return;
+    };
+    if !dir.starts_with(std::env::temp_dir()) {
+        return;
+    }
+    let mut limits = ExtendedLimitInfo::new();
+    limits.limit_kill_on_job_close();
+    if allow_breakaway {
+        limits.limit_breakaway_ok();
+    }
+    let job = Job::create_with_limit_info(&limits).expect("job object");
+    job.assign_current_process().expect("enter the job");
+    // Like a host, keep this process's own streams from what its children inherit.
+    lobby_daemon::win32::keep_std_handles_from_children();
+    let shim = Command::new(EXE)
+        .args(["attach", "ada"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run the shim");
+    println!("shim exit: {:?}", shim.status.code());
+    println!("shim stderr: {}", String::from_utf8_lossy(&shim.stderr));
+    // The job's only handle closes when this process exits, and with it
+    // everything still inside the job.
+    Box::leak(Box::new(job));
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "a stand-in host, run by the job object tests"]
+fn stand_in_host_whose_job_allows_breakaway() {
+    stand_in_host(true);
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "a stand-in host, run by the job object tests"]
+fn stand_in_host_whose_job_forbids_breakaway() {
+    stand_in_host(false);
+}
+
+/// Runs the stand-in host `name` against `install` and returns what it printed.
+#[cfg(windows)]
+fn run_stand_in_host(install: &Install, name: &str) -> String {
+    let mut command = Command::new(std::env::current_exe().expect("this test binary"));
+    command
+        .args([
+            "--exact",
+            name,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .stdin(Stdio::null());
+    for (variable, value) in install.environment() {
+        command.env(variable, value);
+    }
+    let output = command.output().expect("run the stand-in host");
+    let printed = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "{printed}");
+    assert!(printed.contains("shim exit: Some(1)"), "{printed}");
+    // Refused only because a fresh daemon has no companions: the shim
+    // started the daemon and reached it.
+    assert!(printed.contains("cannot attach as ada"), "{printed}");
+    printed
+}
+
 #[cfg(windows)]
 #[test]
 fn a_host_that_kills_its_job_on_exit_leaves_the_daemon_running() {
-    use win32job::{ExtendedLimitInfo, Job};
-
     let install = Install::new("job");
-    // A job like the one Node-based hosts put their stdio servers in: closing
-    // it kills every process inside, and breakaway is allowed.
-    let mut limits = ExtendedLimitInfo::new();
-    limits.limit_kill_on_job_close().limit_breakaway_ok();
-    let job = Job::create_with_limit_info(&limits).expect("job object");
-
-    let mut shim = install.attach("ada");
-    job.assign_process(shim.child_handle() as isize)
-        .expect("assign the shim to the job");
-    let status = shim
-        .wait_exit(Duration::from_secs(20))
-        .expect("the shim exits");
-    assert_eq!(status.code(), Some(1));
-    let started = install.discovery().expect("the shim started the daemon");
-
-    drop(job);
+    let printed = run_stand_in_host(&install, "stand_in_host_whose_job_allows_breakaway");
+    assert!(!printed.contains("may not leave"), "{printed}");
+    // The stand-in host has exited and its job is closed.
     std::thread::sleep(Duration::from_millis(500));
-    let after = install
+    let running = install
         .discovery()
         .expect("closing the host's job leaves the daemon running");
-    assert_eq!(after.lock_holder_pid, started.lock_holder_pid);
+    assert_eq!(
+        lobby_daemon::lock::DaemonRecord::read(&install.dir())
+            .expect("record")
+            .pid,
+        running.lock_holder_pid
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_host_whose_job_forbids_breakaway_is_told_the_daemon_ends_with_it() {
+    let install = Install::new("job-closed");
+    let printed = run_stand_in_host(&install, "stand_in_host_whose_job_forbids_breakaway");
+    assert!(
+        printed.contains("the daemon starts inside it and stops when the host exits"),
+        "{printed}"
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        install.discovery().is_none(),
+        "a job that forbids breakaway takes the daemon with it"
+    );
+    assert!(!lobby_daemon::lock::is_held(&install.dir()).expect("lock probe"));
 }
 
 #[cfg(windows)]
