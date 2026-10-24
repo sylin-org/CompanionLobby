@@ -167,9 +167,13 @@ pub fn is_private_file(path: &Path) -> io::Result<bool> {
 
 /// Whether `path` is owned by the current user and every entry of its DACL
 /// is inherited from its directory, so narrowing the directory narrows it too.
+/// A protected DACL takes nothing from its directory, whatever its entries'
+/// flags say, so it never counts.
 pub fn has_only_inherited_entries(path: &Path) -> io::Result<bool> {
     let security = Security::read(path)?;
-    Ok(security.owned_by_current_user()? && security.only_inherited()?)
+    Ok(security.owned_by_current_user()?
+        && !security.is_protected()?
+        && security.only_inherited()?)
 }
 
 /// What one entry of a DACL says.
@@ -452,7 +456,7 @@ fn wide(path: &Path) -> Vec<u16> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -519,6 +523,88 @@ mod tests {
         assert!(
             !has_only_inherited_entries(&file).expect("read"),
             "an explicit entry"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Gives `path` a protected DACL whose one entry lets everyone read it and
+    /// claims to be inherited. `SetFileSecurityW` stores a DACL as given, so
+    /// another account with `WRITE_DAC` on the file could write this one.
+    pub(crate) fn plant_protected_dacl_marked_inherited(path: &Path) {
+        use windows_sys::Win32::Security::{
+            CreateWellKnownSid, InitializeSecurityDescriptor, SECURITY_DESCRIPTOR,
+            SECURITY_MAX_SID_SIZE, SetFileSecurityW, SetSecurityDescriptorControl,
+            SetSecurityDescriptorDacl, WinWorldSid,
+        };
+        use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+        use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
+
+        let mut everyone = vec![0u64; (SECURITY_MAX_SID_SIZE as usize).div_ceil(8)];
+        let mut sid_size = SECURITY_MAX_SID_SIZE;
+        let sid: PSID = everyone.as_mut_ptr().cast();
+        let mut descriptor = vec![0u64; size_of::<SECURITY_DESCRIPTOR>().div_ceil(8)];
+        let descriptor: PSECURITY_DESCRIPTOR = descriptor.as_mut_ptr().cast();
+        let wide = wide(path);
+        // SAFETY: every buffer is live, aligned and as large as stated for the
+        // whole block; `sid` is written by CreateWellKnownSid before it is read.
+        unsafe {
+            assert_ne!(
+                CreateWellKnownSid(WinWorldSid, null_mut(), sid, &mut sid_size),
+                0
+            );
+            let size = size_of::<ACL>() + size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>()
+                + GetLengthSid(sid) as usize;
+            let mut buffer = vec![0u64; size.div_ceil(size_of::<u64>())];
+            let acl = buffer.as_mut_ptr().cast::<ACL>();
+            assert_ne!(InitializeAcl(acl, size as u32, ACL_REVISION), 0);
+            assert_ne!(
+                AddAccessAllowedAceEx(acl, ACL_REVISION, INHERITED_ACE, FILE_GENERIC_READ, sid),
+                0
+            );
+            assert_ne!(
+                InitializeSecurityDescriptor(descriptor, SECURITY_DESCRIPTOR_REVISION),
+                0
+            );
+            assert_ne!(SetSecurityDescriptorDacl(descriptor, 1, acl, 0), 0);
+            assert_ne!(
+                SetSecurityDescriptorControl(descriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED),
+                0
+            );
+            assert_ne!(
+                SetFileSecurityW(wide.as_ptr(), DACL_SECURITY_INFORMATION, descriptor),
+                0,
+                "{}",
+                io::Error::last_os_error()
+            );
+        }
+    }
+
+    #[test]
+    fn a_protected_dacl_never_counts_as_inherited_whatever_its_entries_claim() {
+        let dir = std::env::temp_dir().join(format!(
+            "lobby-protected-acl-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("journal.jsonl");
+        std::fs::write(&file, b"x").expect("file");
+        plant_protected_dacl_marked_inherited(&file);
+        let security = Security::read(&file).expect("read");
+        assert!(
+            security.is_protected().expect("control"),
+            "planted as protected"
+        );
+        assert!(
+            security.only_inherited().expect("entries"),
+            "every entry claims to be inherited"
+        );
+        drop(security);
+        assert!(!has_only_inherited_entries(&file).expect("read"));
+        restrict_to_owner(&dir).expect("restrict");
+        assert!(
+            !is_private_file(&file).expect("read"),
+            "narrowing the directory does not reach a protected file"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

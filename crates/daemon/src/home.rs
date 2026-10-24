@@ -201,11 +201,12 @@ pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
 /// An owner-only directory is left as it is. One that is not is restricted
 /// only when everything in it is a file the lobby itself writes, owned by the
 /// current user and with no access of its own beyond what it inherits from
-/// the directory, and checked again afterwards. A directory holding anything
-/// else is refused untouched: restricting it would rewrite the access of a
-/// folder the lobby does not own, and a lobby file someone else owns or
-/// opened up for themselves while the directory was open may have been
-/// planted or read, which narrowing the directory would hide.
+/// the directory, and checked again afterwards, when on Windows every file
+/// must also grant access to the current user alone. A directory holding
+/// anything else is refused untouched: restricting it would rewrite the
+/// access of a folder the lobby does not own, and a lobby file someone else
+/// owns or opened up for themselves while the directory was open may have
+/// been planted or read, which narrowing the directory would hide.
 pub fn secure(path: &Path) -> io::Result<()> {
     if owner_only(path)? {
         return Ok(());
@@ -219,20 +220,46 @@ pub fn secure(path: &Path) -> io::Result<()> {
         ));
     }
     // A file another account made between the scan and the narrowing keeps
-    // its owner and its own entries through it, so the scan runs again.
+    // its owner and its own entries through it, so the scan runs again, and
+    // then every file must grant access to its owner alone, whatever its
+    // entries claim about where they came from.
     let late = match first_foreign_entry(path)? {
         Some(name) => Some(name),
-        None => first_entry_with_access_of_its_own(path)?,
+        None => match first_entry_with_access_of_its_own(path)? {
+            Some(name) => Some(name),
+            None => first_entry_not_private(path)?,
+        },
     };
     match late {
         None => Ok(()),
         Some(name) => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "{name} appeared in the directory while Companion Lobby narrowed it to its owner, and it was not written by                  Companion Lobby or is owned by another account; remove {name} after checking it, and start again"
+                "{name} still grants access to someone other than its owner after Companion Lobby narrowed the directory, or appeared while it did; remove {name} after checking it, and start again"
             ),
         )),
     }
+}
+
+/// The first entry in `path` that grants access to anyone but the current
+/// user: on Windows, what its DACL actually allows, whatever its entries'
+/// flags say.
+#[cfg(windows)]
+fn first_entry_not_private(path: &Path) -> io::Result<Option<String>> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if !crate::win32::is_private_file(&entry.path())? {
+            return Ok(Some(entry.file_name().to_string_lossy().into_owned()));
+        }
+    }
+    Ok(None)
+}
+
+/// Elsewhere the directory's mode is the narrowing, and the owner check in
+/// [`first_entry_with_access_of_its_own`] is the whole rule for a file.
+#[cfg(unix)]
+fn first_entry_not_private(_path: &Path) -> io::Result<Option<String>> {
+    Ok(None)
 }
 
 /// Refuses a directory holding anything but lobby files the current user
@@ -242,7 +269,7 @@ fn only_plain_lobby_files(path: &Path) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "the directory is not private to its owner and holds {stranger}, which Companion Lobby did not write;                  choose an empty directory for {DATA_DIR_ENV}"
+                "the directory is not private to its owner and holds {stranger}, which Companion Lobby did not write; choose an empty directory for {DATA_DIR_ENV}"
             ),
         ));
     }
@@ -250,7 +277,7 @@ fn only_plain_lobby_files(path: &Path) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "the directory is not private to its owner, and {planted} is owned by another account or carries access entries of its own;                  Companion Lobby left the directory as it is: remove {planted} after checking it, and start again"
+                "the directory is not private to its owner, and {planted} is owned by another account or carries access entries of its own; Companion Lobby left the directory as it is: remove {planted} after checking it, and start again"
             ),
         ));
     }
@@ -586,6 +613,23 @@ mod tests {
         let error = secure(&dir).expect_err("refused");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("attach.secret"), "{error}");
+        assert!(
+            !owner_only(&dir).expect("read"),
+            "the directory is left as it is"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_lobby_file_with_a_protected_dacl_is_refused_untouched() {
+        let dir = temp_dir("protected");
+        std::fs::write(dir.join("trace.log"), b"x").expect("file");
+        std::fs::write(dir.join("journal.jsonl"), b"x").expect("file");
+        crate::win32::tests::plant_protected_dacl_marked_inherited(&dir.join("journal.jsonl"));
+        let error = secure(&dir).expect_err("refused");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("journal.jsonl"), "{error}");
         assert!(
             !owner_only(&dir).expect("read"),
             "the directory is left as it is"

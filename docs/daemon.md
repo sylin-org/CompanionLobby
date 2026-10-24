@@ -18,9 +18,12 @@ start, before it writes anything there, the daemon checks that the directory
 is still owner-only. If it is not, the daemon narrows it again only when
 everything inside is a file the daemon itself writes, owned by the current
 user (by the directory's owner elsewhere) and, on Windows, with no access
-entry of its own beyond what it inherits from the directory; then it checks
-that the narrowing took and that nothing else appeared while it ran. A
-directory holding anything else is refused and left untouched: pointing `LOBBY_DATA_DIR` at a shared folder never rewrites
+entry of its own beyond what it inherits from the directory, and no
+protected DACL, which inherits nothing whatever its entries claim; then it
+checks that the narrowing took, that nothing else appeared while it ran and,
+on Windows, that every file now grants access to the current user alone. A
+directory holding anything else is refused and left untouched: pointing
+`LOBBY_DATA_DIR` at a shared folder never rewrites
 that folder's access, and a lobby file that another account owns or that was
 opened up for someone while the directory was open may have been planted or
 read, which narrowing the directory would hide. On Windows owner-only means
