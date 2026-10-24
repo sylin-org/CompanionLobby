@@ -54,7 +54,7 @@ pub use service::{
     ServiceDescription, ServiceName,
 };
 pub use sponsor::Sponsor;
-pub use tool::{Effect, ToolArguments, ToolDescriptor, ToolName, ToolResult};
+pub use tool::{Effect, Passage, ToolArguments, ToolDescriptor, ToolName, ToolResult};
 
 #[cfg(test)]
 mod tests {

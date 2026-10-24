@@ -166,7 +166,7 @@ fn tools_call(companion: &Companion, id: &Value, params: Option<&Value>) -> Valu
     }
     let answer = projections::reach(companion);
     let mut result = json!({
-        "content": [{ "type": "text", "text": answer.text }],
+        "content": [{ "type": "text", "text": answer.rendered() }],
         "isError": false,
     });
     if let Some(structured) = answer.structured {

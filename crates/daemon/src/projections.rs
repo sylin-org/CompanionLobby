@@ -8,7 +8,7 @@
 //!
 //! Projections hold no truth and can always be rebuilt.
 
-use lobby_contracts::{Companion, Effect, ToolDescriptor, ToolName, ToolResult};
+use lobby_contracts::{Companion, Effect, Passage, ToolDescriptor, ToolName, ToolResult};
 use serde_json::json;
 
 /// The name of the one tool every attachment has.
@@ -52,7 +52,7 @@ pub fn reach(companion: &Companion) -> ToolResult {
         tools = tools.join(", "),
     );
     ToolResult {
-        text,
+        text: vec![Passage::Authored(text)],
         structured: Some(json!({
             "companion": {
                 "id": companion.id.to_string(),
@@ -90,7 +90,8 @@ mod tests {
     #[test]
     fn reach_reports_the_companion_and_the_live_tool_set() {
         let answer = reach(&ada());
-        assert!(answer.text.contains("Ada") && answer.text.contains("reach"));
+        let text = answer.rendered();
+        assert!(text.contains("Ada") && text.contains("reach"));
         let structured = answer.structured.expect("structured");
         assert_eq!(structured["companion"]["moniker"], "ada");
         assert_eq!(structured["tools"], json!(["reach"]));
