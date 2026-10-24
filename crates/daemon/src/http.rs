@@ -174,7 +174,7 @@ impl App {
 }
 
 /// Runs the daemon in the foreground until it is asked to stop.
-pub fn run() -> Result<(), String> {
+pub fn run(registry: Registry) -> Result<(), String> {
     let dir = home::resolve().map_err(|problem| problem.to_string())?;
     home::prepare(&dir).map_err(|problem| problem.to_string())?;
     let shown = home::display_path(&dir);
@@ -191,7 +191,7 @@ pub fn run() -> Result<(), String> {
     let command = std::env::current_exe()
         .map(|exe| home::display_path(&exe))
         .map_err(|error| format!("cannot read this executable's path: {error}"))?;
-    let lobby = Lobby::open(&dir, &command, Registry::compiled_in()).map_err(|problem| {
+    let lobby = Lobby::open(&dir, &command, registry).map_err(|problem| {
         trace::line(&format!("start refused: {problem}"));
         format!("{problem} (in {shown})")
     })?;

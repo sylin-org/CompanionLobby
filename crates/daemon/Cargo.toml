@@ -15,10 +15,16 @@ path = "src/lib.rs"
 name = "companion-lobby"
 path = "src/main.rs"
 
+# The same command with the test kit's synthetic adapters in its registry,
+# for the journeys that prove the host through them. It exists only when
+# the synthetic feature is on, which only the test builds turn on, through
+# the dev-dependency on this crate below; companion-lobby never contains it.
+[[bin]]
+name = "companion-lobby-synthetic"
+path = "src/bin/synthetic.rs"
+required-features = ["synthetic"]
+
 [features]
-# Compiles the test kit's synthetic adapters into the registry. Only test
-# builds turn it on, through the dev-dependency on this crate below, so a
-# plain or release build never ships them.
 synthetic = ["dep:lobby-testkit"]
 
 [dependencies]

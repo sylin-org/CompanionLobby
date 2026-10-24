@@ -236,11 +236,14 @@ host configuration that names the old moniker reaches nothing afterwards.
 
 The daemon runs with the adapters its registry lists, and nothing else: a
 credential or connection whose adapter is not installed stays in the state
-file, unused, and reaches no catalog. A plain or release build lists the
-product's adapters; the test build also compiles in the test kit's passbook
-credential adapter and board service adapter, through the `synthetic`
-feature that only the daemon's own dev-dependency turns on, so the host is
-proven through adapters whose words belong to no real provider or service.
+file, unused, and reaches no catalog. `companion-lobby` runs with the
+product's adapters. The test build also makes `companion-lobby-synthetic`,
+the same command whose registry holds the test kit's passbook credential
+adapter and board service adapter, through the `synthetic` feature that only
+the daemon's own dev-dependency turns on, so the host is proven through
+adapters whose words belong to no real provider or service. The daemon's
+library never names them, and a test checks that `companion-lobby`, built
+beside it with every test feature on, carries no passbook material tag.
 
 - **Signing in.** `POST /api/sign-ins` names a companion, a provider kind and
   a hint (what the sponsor typed). The lobby refuses a companion that already

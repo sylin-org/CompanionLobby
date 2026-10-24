@@ -11,38 +11,9 @@
 
 use std::process::ExitCode;
 
-use lobby_daemon::cli::{Command, Parsed, USAGE};
-use lobby_daemon::{attach, browser, http, stop};
+use lobby_daemon::cli;
+use lobby_daemon::registry::Registry;
 
 fn main() -> ExitCode {
-    match Command::parse(std::env::args().skip(1)) {
-        Ok(Parsed::Help) => {
-            println!("{USAGE}");
-            ExitCode::SUCCESS
-        }
-        Ok(Parsed::Command(Command::Run)) => report(http::run().map(|()| None)),
-        Ok(Parsed::Command(Command::Attach { companion, log })) => {
-            ExitCode::from(attach::run(&companion, log.as_deref()))
-        }
-        Ok(Parsed::Command(Command::Open)) => report(browser::run().map(Some)),
-        Ok(Parsed::Command(Command::Stop)) => report(stop::run().map(Some)),
-        Err(problem) => {
-            eprintln!("{problem}\n\n{USAGE}");
-            ExitCode::from(2)
-        }
-    }
-}
-
-fn report(result: Result<Option<String>, String>) -> ExitCode {
-    match result {
-        Ok(Some(line)) => {
-            println!("{line}");
-            ExitCode::SUCCESS
-        }
-        Ok(None) => ExitCode::SUCCESS,
-        Err(problem) => {
-            eprintln!("companion-lobby: {problem}");
-            ExitCode::FAILURE
-        }
-    }
+    cli::main(Registry::product)
 }
