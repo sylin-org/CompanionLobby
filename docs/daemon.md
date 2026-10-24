@@ -15,7 +15,7 @@ the current user on Windows, mode 0700 elsewhere).
 
 | File | Written by | What it holds |
 | --- | --- | --- |
-| `attach.secret` | the daemon, once per install | 32 random bytes as 64 hex digits. Every attachment presents it. |
+| `attach.secret` | the daemon, once per install | 32 random bytes as 64 hex digits. The shim presents it once per attachment, when it attaches. |
 | `daemon.lock` | the daemon | Nothing; the daemon holds an exclusive OS lock on it for its whole life. The OS releases it when the process dies. |
 | `daemon.json` | the lock holder | `pid`, `port` and `buildId` of the process holding the lock. Read only while the lock is held. |
 | `trace.log`, `trace.1.log` | the daemon | Its own operational log: start, stop, refusals, attachments, panics. Rotated at 1 MiB, two generations. No secrets, no content. |
@@ -32,7 +32,9 @@ The daemon listens on 127.0.0.1 only and trusts the machine it runs on, the
 way ssh-agent does: any local process that can reach the loopback port can
 read the manager page and drive the operator API. Attachments are held to a
 stronger rule, so the journal's attribution stays honest: only a process that
-can read the owner-only data directory holds the attach secret.
+can read the owner-only data directory holds the attach secret. On Windows the
+listener is bound with `SO_EXCLUSIVEADDRUSE`, so no other socket can share the
+port while the daemon runs.
 
 Every request passes these rules in order, before any body is read:
 
@@ -48,8 +50,14 @@ Every request passes these rules in order, before any body is read:
    `Sec-Fetch-Site` that is absent or `same-origin`. Anything else is 403.
 4. **Attachments** (`/mcp...`) must carry no browser evidence at all: an
    `Origin`, `Referer` or any `Sec-Fetch-Site`, `Sec-Fetch-Mode` or
-   `Sec-Fetch-Dest` header is 403. They must present the attach secret as
-   `Authorization: Bearer <secret>`, or get 401.
+   `Sec-Fetch-Dest` header is 403. Attaching presents the install's attach
+   secret as `Authorization: Bearer <secret>`. The answer carries a token for
+   that one attachment, 32 random bytes the daemon keeps only in memory, and
+   every frame and the detach present that token instead; a missing or wrong
+   secret or token is 401. The install secret therefore crosses the port once
+   per attachment, right after the shim verified the listener, and a process
+   that takes the port after the daemon stops receives only tokens that no
+   later daemon accepts.
 
 Every response carries `Cache-Control: no-store`, `Referrer-Policy:
 no-referrer` and `X-Content-Type-Options: nosniff`. The page also carries a
@@ -65,9 +73,9 @@ served at once; one more is answered 503 at once.
 | `GET /api/companions` | Host | `{"companions": [{"id", "moniker", "displayName"}]}`. |
 | `POST /api/companions` | operator write | Creates a companion from `{"moniker", "displayName"}`: 201, or 400 for an invalid name, 409 for a moniker in use. |
 | `POST /api/stop` | operator write | 202, then the daemon stops accepting connections, lets accepted requests finish (at most 10 seconds), releases the lock and exits. |
-| `POST /mcp/attach` | attachment | Attaches as `{"companion": "<id or moniker>"}`: 201 with the attachment id, or 404 for an unknown companion. |
-| `POST /mcp` | attachment | One JSON-RPC message for the attachment named in the `Lobby-Attachment` header: 200 with the answer, 202 for a notification, 404 when the attachment is not live. |
-| `DELETE /mcp/attach/<id>` | attachment | Ends the attachment: 204, or 404. |
+| `POST /mcp/attach` | attachment, install secret | Attaches as `{"companion": "<id or moniker>"}`: 201 with `{"attachment", "token", "companion"}`, or 404 for an unknown companion. |
+| `POST /mcp` | attachment, its token | One JSON-RPC message for the attachment named in the `Lobby-Attachment` header: 200 with the answer, 202 for a notification, 404 when the attachment is not live. |
+| `DELETE /mcp/attach/<id>` | attachment, its token | Ends the attachment: 204, or 404. |
 
 Refusals are JSON, `{"outcome": "<code>", "message": "<sentence>"}`, with an
 outcome code from the one outcome vocabulary and a sentence the lobby wrote.
@@ -105,15 +113,27 @@ A host configuration names `companion-lobby attach <companion>`. The shim:
    does the secret leave the data directory;
 4. when the verified daemon runs another build, asks it to stop, waits for the
    lock to be released, starts this build and verifies again;
-5. attaches as the named companion, relays each host frame to `POST /mcp` and
-   writes each answer back as one line, and detaches when the host closes
-   stdin. When the daemon has forgotten the attachment (it was restarted), the
-   shim attaches again once.
+5. attaches as the named companion with the install secret, relays each host
+   frame to `POST /mcp` with the attachment's token and writes each answer
+   back as one line, and detaches with the token when the host closes stdin.
+
+The shim attaches again, once, in exactly two cases: the daemon answers 404
+(it has forgotten the attachment, because it was restarted), or nothing
+accepts the connection at all. Attaching again starts from step 2, so the
+install secret is sent only to a verified daemon; workers that find the
+attachment gone at the same moment share one new attachment. Every other
+failure is reported to the mind as it is, without a new attachment: a 413 as
+invalid parameters, a 503 as "busy, try again", and a connection that failed
+after the frame was sent as a call that may or may not have happened.
 
 The shim has 10 seconds to find or start the daemon. It reads frames of at
 most 8 MiB, answers a line that is not JSON with a local parse error (-32700)
-and goes on, and stops after an oversized frame. Its stdout carries JSON-RPC
-frames and nothing else; everything meant for a person goes to stderr.
+and goes on, and stops after an oversized frame. A frame over the daemon's
+1 MiB body limit is answered locally with invalid parameters (-32602) and is
+not sent. Notifications are relayed in the order they arrived, before any
+request read after them; at most 16 requests are relayed at once. Its stdout
+carries JSON-RPC frames and nothing else; everything meant for a person goes
+to stderr.
 
 ### Starting the daemon
 

@@ -12,8 +12,10 @@
 //!    evidence: an `Origin` equal to the page's own origin, and a
 //!    `Sec-Fetch-Site` that is absent or `same-origin`;
 //! 4. `/mcp` refuses any browser evidence at all (`Origin`, `Referer` or a
-//!    `Sec-Fetch-*` header) and requires the per-install attach secret as a
-//!    bearer token.
+//!    `Sec-Fetch-*` header). Attaching requires the per-install attach secret
+//!    as a bearer token; every later frame and the detach require the token
+//!    the daemon gave that one attachment, so the install secret crosses the
+//!    port once per attachment, only after the shim verified the listener.
 //!
 //! Every response is sent with `Cache-Control: no-store`,
 //! `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`. Only
@@ -47,7 +49,7 @@ use tokio::sync::{Notify, Semaphore};
 use crate::discovery::{DISCOVERY_PATH, Discovery};
 use crate::domain::{Lobby, Refusal};
 use crate::home::{self, HomeProblem};
-use crate::keyring::AttachSecret;
+use crate::keyring::{AttachSecret, AttachmentToken};
 use crate::lock::{DaemonLock, DaemonRecord, LockProblem};
 use crate::{discovery, mcp, trace};
 
@@ -179,8 +181,23 @@ fn finish(dir: &Path, lock: DaemonLock) {
     drop(lock);
 }
 
+/// Listens on 127.0.0.1:`port`. On Windows the socket is bound for exclusive
+/// use, so no other socket can share the port while the daemon runs.
+fn listen(port: u16) -> io::Result<TcpListener> {
+    let socket = tokio::net::TcpSocket::new_v4()?;
+    #[cfg(windows)]
+    crate::win32::use_address_exclusively(&socket)?;
+    #[cfg(unix)]
+    socket.set_reuseaddr(true)?;
+    socket.bind(std::net::SocketAddr::from((
+        std::net::Ipv4Addr::LOCALHOST,
+        port,
+    )))?;
+    socket.listen(1024)
+}
+
 async fn bind(port: u16) -> Result<TcpListener, String> {
-    match TcpListener::bind(("127.0.0.1", port)).await {
+    match listen(port) {
         Ok(listener) => Ok(listener),
         Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
             trace::line(&format!("start refused: port {port} is in use"));
@@ -330,16 +347,17 @@ async fn route(app: &App, request: Request<Incoming>) -> Reply {
             Err(refused) => refused.reply(),
         },
         (&Method::DELETE, detach_path) if detach_path.starts_with("/mcp/attach/") => {
-            if let Err(refused) = attach_guard(app, request.headers()) {
-                return refused.reply();
-            }
-            detach(app, &detach_path["/mcp/attach/".len()..])
+            detach(app, request.headers(), &detach_path["/mcp/attach/".len()..])
         }
         (&Method::POST, "/mcp") => {
             let attachment =
                 header_text(request.headers(), ATTACHMENT_HEADER).and_then(AttachmentId::parse);
-            match attach_body(app, request).await {
-                Ok(body) => mcp_reply(app, attachment, &body),
+            let companion = match attachment_guard(app, request.headers(), attachment) {
+                Ok(companion) => companion,
+                Err(refused) => return *refused,
+            };
+            match json_body(request).await {
+                Ok(body) => mcp_reply(&companion, &body),
                 Err(refused) => refused.reply(),
             }
         }
@@ -407,9 +425,9 @@ async fn operator_body(request: Request<Incoming>) -> Result<Bytes, Problem> {
     read_body(request).await
 }
 
-/// The attachment guard: no browser evidence, and the attach secret.
-fn attach_guard(app: &App, headers: &HeaderMap) -> Result<(), Problem> {
-    let browser = [
+/// Whether a request carries any sign of having come from a browser.
+fn browser_evidence(headers: &HeaderMap) -> bool {
+    [
         header::ORIGIN.as_str(),
         header::REFERER.as_str(),
         "sec-fetch-site",
@@ -417,17 +435,30 @@ fn attach_guard(app: &App, headers: &HeaderMap) -> Result<(), Problem> {
         "sec-fetch-dest",
     ]
     .iter()
-    .any(|name| headers.contains_key(*name));
-    if browser {
+    .any(|name| headers.contains_key(*name))
+}
+
+/// Refuses a request to `/mcp...` that came from a browser.
+fn refuse_browser(headers: &HeaderMap) -> Result<(), Problem> {
+    if browser_evidence(headers) {
         return Err(Problem(
             StatusCode::FORBIDDEN,
             Outcome::Refused,
             "Minds attach through companion-lobby attach, never from a browser.",
         ));
     }
-    let presented =
-        header_text(headers, header::AUTHORIZATION).and_then(|value| value.strip_prefix("Bearer "));
-    if !presented.is_some_and(|secret| app.secret.matches(secret)) {
+    Ok(())
+}
+
+/// The bearer token a request presents, if any.
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    header_text(headers, header::AUTHORIZATION).and_then(|value| value.strip_prefix("Bearer "))
+}
+
+/// The attach guard: no browser evidence, and the install's attach secret.
+fn install_guard(app: &App, headers: &HeaderMap) -> Result<(), Problem> {
+    refuse_browser(headers)?;
+    if !bearer(headers).is_some_and(|secret| app.secret.matches(secret)) {
         return Err(Problem(
             StatusCode::UNAUTHORIZED,
             Outcome::Refused,
@@ -437,8 +468,35 @@ fn attach_guard(app: &App, headers: &HeaderMap) -> Result<(), Problem> {
     Ok(())
 }
 
-async fn attach_body(app: &App, request: Request<Incoming>) -> Result<Bytes, Problem> {
-    attach_guard(app, request.headers())?;
+/// The guard for frames: no browser evidence, a live attachment, and that
+/// attachment's own token.
+fn attachment_guard(
+    app: &App,
+    headers: &HeaderMap,
+    attachment: Option<AttachmentId>,
+) -> Result<Companion, Box<Reply>> {
+    refuse_browser(headers).map_err(|refused| Box::new(refused.reply()))?;
+    let Some(presented) = bearer(headers) else {
+        return Err(Box::new(problem(
+            StatusCode::UNAUTHORIZED,
+            Outcome::Refused,
+            "Every frame needs its attachment's token.",
+        )));
+    };
+    let Some(attachment) = attachment else {
+        return Err(Box::new(problem(
+            StatusCode::NOT_FOUND,
+            Outcome::NotFound,
+            "No such attachment is live; attach again.",
+        )));
+    };
+    app.lobby
+        .attachment(attachment, presented)
+        .map(|(_, companion)| companion)
+        .map_err(|refusal| Box::new(refusal_reply(&refusal)))
+}
+
+async fn json_body(request: Request<Incoming>) -> Result<Bytes, Problem> {
     if !is_json(request.headers()) {
         return Err(Problem(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -447,6 +505,11 @@ async fn attach_body(app: &App, request: Request<Incoming>) -> Result<Bytes, Pro
         ));
     }
     read_body(request).await
+}
+
+async fn attach_body(app: &App, request: Request<Incoming>) -> Result<Bytes, Problem> {
+    install_guard(app, request.headers())?;
+    json_body(request).await
 }
 
 #[derive(Deserialize)]
@@ -493,7 +556,14 @@ fn attach(app: &App, body: &[u8]) -> Reply {
             "Send {\"companion\": ...} and nothing else.",
         );
     };
-    match app.lobby.attach(&request.companion) {
+    let Ok(token) = AttachmentToken::generate() else {
+        return problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Outcome::TemporarilyUnavailable,
+            "The lobby could not draw a random token; try again.",
+        );
+    };
+    match app.lobby.attach(&request.companion, token.clone()) {
         Ok((attachment, companion)) => {
             trace::line(&format!(
                 "attachment {} attached as companion {}; {} live",
@@ -503,45 +573,55 @@ fn attach(app: &App, body: &[u8]) -> Reply {
             ));
             json_reply(
                 StatusCode::CREATED,
-                json!({ "attachment": attachment.id.to_string(), "companion": companion_json(&companion) }),
+                json!({
+                    "attachment": attachment.id.to_string(),
+                    "token": token.expose(),
+                    "companion": companion_json(&companion),
+                }),
             )
         }
         Err(refusal) => refusal_reply(&refusal),
     }
 }
 
-fn detach(app: &App, id: &str) -> Reply {
-    match AttachmentId::parse(id) {
-        Some(id) if app.lobby.detach(id) => {
+fn detach(app: &App, headers: &HeaderMap, id: &str) -> Reply {
+    if let Err(refused) = refuse_browser(headers) {
+        return refused.reply();
+    }
+    let Some(presented) = bearer(headers) else {
+        return problem(
+            StatusCode::UNAUTHORIZED,
+            Outcome::Refused,
+            "Detaching needs the attachment's token.",
+        );
+    };
+    let Some(id) = AttachmentId::parse(id) else {
+        return problem(
+            StatusCode::NOT_FOUND,
+            Outcome::NotFound,
+            "No such attachment is live.",
+        );
+    };
+    match app.lobby.detach(id, presented) {
+        Ok(()) => {
             trace::line(&format!(
                 "attachment {id} detached; {} live",
                 app.lobby.attachment_count()
             ));
             empty_reply(StatusCode::NO_CONTENT)
         }
-        _ => problem(
-            StatusCode::NOT_FOUND,
-            Outcome::NotFound,
-            "No such attachment is live.",
-        ),
+        Err(refusal) => refusal_reply(&refusal),
     }
 }
 
-fn mcp_reply(app: &App, attachment: Option<AttachmentId>, body: &[u8]) -> Reply {
-    let Some((_, companion)) = attachment.and_then(|id| app.lobby.attachment(id)) else {
-        return problem(
-            StatusCode::NOT_FOUND,
-            Outcome::NotFound,
-            "No such attachment is live; attach again.",
-        );
-    };
+fn mcp_reply(companion: &Companion, body: &[u8]) -> Reply {
     let Ok(message) = serde_json::from_slice::<Value>(body) else {
         return json_reply(
             StatusCode::OK,
             mcp::rpc_error(&Value::Null, mcp::PARSE_ERROR, "Parse error"),
         );
     };
-    match mcp::handle(&companion, &message) {
+    match mcp::handle(companion, &message) {
         Some(answer) => json_reply(StatusCode::OK, answer),
         None => empty_reply(StatusCode::ACCEPTED),
     }
@@ -560,6 +640,8 @@ fn refusal_reply(refusal: &Refusal) -> Reply {
         Outcome::NotFound => StatusCode::NOT_FOUND,
         Outcome::Conflict => StatusCode::CONFLICT,
         Outcome::InvalidInput => StatusCode::BAD_REQUEST,
+        // A token that does not match is a failed proof, as a missing one is.
+        Outcome::Refused => StatusCode::UNAUTHORIZED,
         _ => StatusCode::FORBIDDEN,
     };
     problem(status, refusal.outcome, &refusal.message)

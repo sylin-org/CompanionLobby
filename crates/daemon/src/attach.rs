@@ -7,13 +7,21 @@
 //!   verifies that the process on the port is the daemon lock holder before it
 //!   sends the attach secret (see [`crate::contact`]);
 //! * attaches as the companion the host configuration names, by id or moniker,
-//!   and relays every frame from the host to the daemon on behalf of that one
-//!   attachment, writing each answer back as one line;
+//!   presenting the install's attach secret once; the daemon answers with a
+//!   token for this one attachment, and every relayed frame and the detach
+//!   carry that token, never the install secret;
+//! * relays every frame from the host to the daemon on behalf of that one
+//!   attachment, writing each answer back as one line; notifications go in
+//!   the order they arrived, before any later request, and at most
+//!   [`MAX_IN_FLIGHT`] requests are relayed at once;
 //! * keeps stdout for protocol frames only: everything it has to say to a
 //!   person goes to stderr;
 //! * reads newline-delimited frames of at most 8 MiB, answers an unparseable
 //!   frame locally with a parse error, and stops after an oversized one,
-//!   because the stream cannot be resynchronized after it;
+//!   because the stream cannot be resynchronized after it; a frame larger than
+//!   the daemon accepts is answered locally, without being sent;
+//! * attaches again, once, only when the daemon has forgotten the attachment
+//!   or nothing listens on the port any more (the daemon was restarted);
 //! * detaches when the host closes stdin, and leaves the daemon running.
 //!
 //! With `--log <file>` it appends every frame it relays, in both directions,
@@ -22,7 +30,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -30,8 +38,9 @@ use serde_json::{Value, json};
 use crate::contact::{self, Daemon};
 use crate::home;
 use crate::http::{self, ATTACHMENT_HEADER};
+use crate::keyring::AttachmentToken;
 use crate::loopback::{self, Call};
-use crate::mcp::{INTERNAL_ERROR, PARSE_ERROR, rpc_error};
+use crate::mcp::{INTERNAL_ERROR, INVALID_PARAMS, PARSE_ERROR, rpc_error};
 
 /// The largest frame a host may send.
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -39,6 +48,12 @@ pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const STARTUP_BUDGET: Duration = Duration::from_secs(10);
 /// How long one relayed request may take.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// How many requests the shim relays at once; the next waits for the oldest.
+pub const MAX_IN_FLIGHT: usize = 16;
+
+/// What the mind is told when the daemon is gone and attaching again failed.
+const GONE: &str =
+    "The Companion Lobby daemon did not answer. Restart this MCP server in the host.";
 
 /// Why a frame could not be read.
 #[derive(Debug, PartialEq, Eq)]
@@ -97,6 +112,55 @@ pub fn read_frame(reader: &mut impl BufRead, buffer: &mut String) -> Result<usiz
     Ok(consumed)
 }
 
+/// What the shim does with the daemon's answer to one relayed frame.
+#[derive(Debug, PartialEq)]
+pub enum Relayed {
+    /// Write this frame back to the host.
+    Answer(Value),
+    /// Nothing goes back: the frame was a notification or a response.
+    Nothing,
+    /// The attachment or the daemon is gone; attach again and resend.
+    Gone,
+    /// Tell the mind this, without attaching again.
+    Failed(i64, String),
+}
+
+/// Decides what an answer from the daemon means for the host. Only a
+/// forgotten attachment (404) or a call that never connected leads to a new
+/// attachment; every other failure is reported as it is.
+pub fn classify(answer: io::Result<loopback::Answer>) -> Relayed {
+    match answer {
+        Ok(answer) => match answer.status {
+            200 => match serde_json::from_slice(&answer.body) {
+                Ok(frame) => Relayed::Answer(frame),
+                Err(_) => Relayed::Failed(
+                    INTERNAL_ERROR,
+                    "The lobby sent an unreadable answer.".to_owned(),
+                ),
+            },
+            202 => Relayed::Nothing,
+            404 => Relayed::Gone,
+            413 => Relayed::Failed(
+                INVALID_PARAMS,
+                "The message exceeds the lobby's 1 MiB limit.".to_owned(),
+            ),
+            503 => Relayed::Failed(
+                INTERNAL_ERROR,
+                "The lobby is busy; try the call again in a moment.".to_owned(),
+            ),
+            status => Relayed::Failed(
+                INTERNAL_ERROR,
+                format!("The lobby refused the message (HTTP {status})."),
+            ),
+        },
+        Err(error) if loopback::unreachable(&error) => Relayed::Gone,
+        Err(_) => Relayed::Failed(
+            INTERNAL_ERROR,
+            "The lobby did not finish answering; the call may or may not have happened.".to_owned(),
+        ),
+    }
+}
+
 /// The optional record of a host's conversation.
 struct Transcript {
     file: Mutex<File>,
@@ -120,106 +184,121 @@ impl Transcript {
     }
 }
 
+/// One attachment in the daemon, as the shim knows it.
+#[derive(Debug, Clone)]
+struct Attached {
+    port: u16,
+    id: String,
+    token: AttachmentToken,
+}
+
 /// The relay's link to its attachment in the daemon.
 struct Link {
     companion: String,
     daemon: Mutex<Daemon>,
-    attachment: Mutex<String>,
+    attached: Mutex<Attached>,
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Link {
     fn attach(daemon: Daemon, companion: &str) -> Result<Self, String> {
-        let attachment = attach_once(&daemon, companion)?;
+        let attached = attach_once(&daemon, companion)?;
         Ok(Self {
             companion: companion.to_owned(),
             daemon: Mutex::new(daemon),
-            attachment: Mutex::new(attachment),
+            attached: Mutex::new(attached),
         })
     }
 
-    fn snapshot(&self) -> (Daemon, String) {
-        let daemon = self
-            .daemon
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let attachment = self
-            .attachment
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        (daemon, attachment)
+    fn current(&self) -> Attached {
+        locked(&self.attached).clone()
     }
 
     /// Relays one message; `None` when there is nothing to send back.
     fn forward(&self, message: &Value) -> Option<Value> {
         let id = message.get("id").cloned();
         let body = serde_json::to_vec(message).unwrap_or_default();
-        for attempt in 0..2 {
-            let (daemon, attachment) = self.snapshot();
-            let bearer = format!("Bearer {}", daemon.secret.expose());
+        let failed = |code: i64, text: &str| id.as_ref().map(|id| rpc_error(id, code, text));
+        if body.len() > http::BODY_LIMIT {
+            return failed(
+                INVALID_PARAMS,
+                "The message exceeds the lobby's 1 MiB limit.",
+            );
+        }
+        let mut attached_again = false;
+        loop {
+            let attached = self.current();
+            let bearer = format!("Bearer {}", attached.token.expose());
             let call = Call {
                 method: "POST",
                 path: "/mcp",
-                headers: &[("Authorization", &bearer), (ATTACHMENT_HEADER, &attachment)],
+                headers: &[
+                    ("Authorization", &bearer),
+                    (ATTACHMENT_HEADER, &attached.id),
+                ],
                 body: &body,
                 timeout: CALL_TIMEOUT,
             };
-            match loopback::send(daemon.port, &call) {
-                Ok(answer) if answer.status == 200 => {
-                    return serde_json::from_slice(&answer.body).ok().or_else(|| {
-                        id.as_ref().map(|id| {
-                            rpc_error(id, INTERNAL_ERROR, "The lobby sent an unreadable answer.")
-                        })
-                    });
+            match classify(loopback::send(attached.port, &call)) {
+                Relayed::Answer(frame) => return Some(frame),
+                Relayed::Nothing => return None,
+                Relayed::Failed(code, text) => return failed(code, &text),
+                Relayed::Gone if attached_again => return failed(INTERNAL_ERROR, GONE),
+                Relayed::Gone => {
+                    if self.reattach(&attached).is_err() {
+                        return failed(INTERNAL_ERROR, GONE);
+                    }
+                    attached_again = true;
                 }
-                Ok(answer) if answer.status == 202 => return None,
-                // The daemon has forgotten this attachment, or is gone:
-                // it was restarted. Attach again once, then give up.
-                _ if attempt == 0 && self.reattach().is_ok() => continue,
-                _ => break,
             }
         }
-        id.map(|id| {
-            rpc_error(
-                &id,
-                INTERNAL_ERROR,
-                "The Companion Lobby daemon did not answer. Restart this MCP server in the host.",
-            )
-        })
     }
 
-    fn reattach(&self) -> Result<(), String> {
-        let (daemon, _) = self.snapshot();
-        let daemon = contact::ensure(&daemon.dir, daemon.port, STARTUP_BUDGET)?;
-        let attachment = attach_once(&daemon, &self.companion)?;
-        *self
-            .daemon
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = daemon;
-        *self
-            .attachment
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = attachment;
+    /// Attaches again after `lost` was found gone. Workers that find the same
+    /// attachment gone at once produce one new attachment: the first does the
+    /// work under the lock, the others see it replaced and use the new one.
+    fn reattach(&self, lost: &Attached) -> Result<(), String> {
+        let mut attached = locked(&self.attached);
+        if attached.id != lost.id {
+            return Ok(());
+        }
+        let (dir, port) = {
+            let daemon = locked(&self.daemon);
+            (daemon.dir.clone(), daemon.port)
+        };
+        let daemon = contact::ensure(&dir, port, STARTUP_BUDGET)?;
+        let fresh = attach_once(&daemon, &self.companion)?;
+        // Should the daemon still hold the old attachment, end it.
+        detach(lost);
+        *locked(&self.daemon) = daemon;
+        *attached = fresh;
         Ok(())
     }
 
     fn detach(&self) {
-        let (daemon, attachment) = self.snapshot();
-        let bearer = format!("Bearer {}", daemon.secret.expose());
-        let path = format!("/mcp/attach/{attachment}");
-        let call = Call {
-            method: "DELETE",
-            path: &path,
-            headers: &[("Authorization", &bearer)],
-            body: &[],
-            timeout: contact::PROBE_TIMEOUT,
-        };
-        let _ = loopback::send(daemon.port, &call);
+        detach(&self.current());
     }
 }
 
-fn attach_once(daemon: &Daemon, companion: &str) -> Result<String, String> {
+fn detach(attached: &Attached) {
+    let bearer = format!("Bearer {}", attached.token.expose());
+    let path = format!("/mcp/attach/{}", attached.id);
+    let call = Call {
+        method: "DELETE",
+        path: &path,
+        headers: &[("Authorization", &bearer)],
+        body: &[],
+        timeout: contact::PROBE_TIMEOUT,
+    };
+    let _ = loopback::send(attached.port, &call);
+}
+
+/// Attaches once as `companion`. This is the one call that carries the
+/// install's attach secret, and `daemon` was verified just before it.
+fn attach_once(daemon: &Daemon, companion: &str) -> Result<Attached, String> {
     let bearer = format!("Bearer {}", daemon.secret.expose());
     let body = serde_json::to_vec(&json!({ "companion": companion })).unwrap_or_default();
     let call = Call {
@@ -239,11 +318,21 @@ fn attach_once(daemon: &Daemon, companion: &str) -> Result<String, String> {
             .unwrap_or("the daemon refused the attachment");
         return Err(format!("cannot attach as {companion}: {message}"));
     }
-    value
+    let id = value
         .get("attachment")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| "the daemon's attach answer named no attachment".to_owned())
+        .ok_or_else(|| "the daemon's attach answer named no attachment".to_owned())?;
+    let token = value
+        .get("token")
+        .and_then(Value::as_str)
+        .and_then(AttachmentToken::parse)
+        .ok_or_else(|| "the daemon's attach answer carried no attachment token".to_owned())?;
+    Ok(Attached {
+        port: daemon.port,
+        id,
+        token,
+    })
 }
 
 /// Runs the shim for `companion`, returning the process exit code.
@@ -305,9 +394,7 @@ fn relay(link: Arc<Link>, transcript: Option<Arc<Transcript>>) {
             }
             let mut line = serde_json::to_string(frame).unwrap_or_default();
             line.push('\n');
-            let mut stdout = stdout
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut stdout = locked(&stdout);
             stdout
                 .write_all(line.as_bytes())
                 .and_then(|()| stdout.flush())
@@ -343,7 +430,18 @@ fn relay(link: Arc<Link>, transcript: Option<Arc<Transcript>>) {
         if let Some(transcript) = &transcript {
             transcript.record("host", message.clone());
         }
+        if message.get("method").is_some() && message.get("id").is_none() {
+            // A notification reaches the daemon in arrival order, before any
+            // request read after it.
+            if let Some(answer) = link.forward(&message) {
+                write(&answer);
+            }
+            continue;
+        }
         workers.retain(|worker| !worker.is_finished());
+        if workers.len() >= MAX_IN_FLIGHT {
+            let _ = workers.remove(0).join();
+        }
         let link = link.clone();
         let write = write.clone();
         workers.push(std::thread::spawn(move || {
@@ -392,5 +490,53 @@ mod tests {
             read_frame(&mut Cursor::new(exactly), &mut frame),
             Ok(MAX_FRAME_BYTES + 1)
         );
+    }
+
+    fn answer(status: u16, body: &str) -> io::Result<loopback::Answer> {
+        Ok(loopback::Answer {
+            status,
+            body: body.as_bytes().to_vec(),
+        })
+    }
+
+    #[test]
+    fn only_a_forgotten_attachment_or_an_unreachable_daemon_attaches_again() {
+        assert_eq!(
+            classify(answer(200, r#"{"id":1}"#)),
+            Relayed::Answer(json!({"id": 1}))
+        );
+        assert_eq!(classify(answer(202, "")), Relayed::Nothing);
+        assert_eq!(classify(answer(404, "{}")), Relayed::Gone);
+        let unreachable = loopback::send(
+            {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+                listener.local_addr().expect("address").port()
+            },
+            &Call::get("/", Duration::from_secs(5)),
+        );
+        assert_eq!(classify(unreachable), Relayed::Gone);
+
+        assert!(matches!(
+            classify(answer(413, "{}")),
+            Relayed::Failed(INVALID_PARAMS, _)
+        ));
+        for status in [400, 401, 415, 500, 503] {
+            assert!(
+                matches!(
+                    classify(answer(status, "{}")),
+                    Relayed::Failed(INTERNAL_ERROR, _)
+                ),
+                "{status}"
+            );
+        }
+        assert!(matches!(
+            classify(answer(200, "not json")),
+            Relayed::Failed(INTERNAL_ERROR, _)
+        ));
+        // A call that connected and then failed may have happened; it is not resent.
+        assert!(matches!(
+            classify(Err(io::Error::new(io::ErrorKind::TimedOut, "slow"))),
+            Relayed::Failed(INTERNAL_ERROR, _)
+        ));
     }
 }

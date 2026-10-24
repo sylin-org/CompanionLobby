@@ -282,7 +282,7 @@ pub fn start(dir: &Path, port: u16) -> std::io::Result<()> {
         use std::os::windows::process::CommandExt;
         // The host's pipes are inheritable in this process; were the daemon to
         // inherit them, the host would never see this shim's stdout close.
-        crate::handles::keep_std_handles_from_children();
+        crate::win32::keep_std_handles_from_children();
         command.creation_flags(DETACHED | BREAKAWAY_FROM_JOB);
         match command.spawn() {
             Ok(_) => return Ok(()),

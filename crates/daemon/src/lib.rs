@@ -22,8 +22,6 @@ pub mod cli;
 pub mod contact;
 pub mod discovery;
 pub mod domain;
-#[cfg(windows)]
-pub mod handles;
 pub mod home;
 pub mod http;
 pub mod journal;
@@ -37,3 +35,5 @@ pub mod registry;
 pub mod stop;
 pub mod store;
 pub mod trace;
+#[cfg(windows)]
+pub mod win32;

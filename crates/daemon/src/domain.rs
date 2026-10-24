@@ -7,7 +7,8 @@
 //!
 //! A companion exists only because the sponsor created it through the
 //! operator API; an attachment exists only because the attach shim presented
-//! the per-install secret and named a companion.
+//! the per-install secret and named a companion. Each live attachment keeps
+//! the token its shim presents on every later request.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -16,6 +17,8 @@ use lobby_contracts::{
     Attachment, AttachmentId, Companion, CompanionId, DisplayName, Moniker, NameProblem, Outcome,
     Sponsor,
 };
+
+use crate::keyring::AttachmentToken;
 
 /// Why a command was refused, with the lobby's own words for the sponsor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +41,7 @@ impl Refusal {
 #[derive(Default)]
 struct State {
     companions: Vec<Companion>,
-    attachments: HashMap<AttachmentId, Attachment>,
+    attachments: HashMap<AttachmentId, (Attachment, AttachmentToken)>,
 }
 
 /// The lobby: one owner of the state.
@@ -96,8 +99,13 @@ impl Lobby {
         self.state().companions.clone()
     }
 
-    /// Attaches a mind as the companion named by id or moniker.
-    pub fn attach(&self, name: &str) -> Result<(Attachment, Companion), Refusal> {
+    /// Attaches a mind as the companion named by id or moniker; `token` is
+    /// what the attachment presents from then on.
+    pub fn attach(
+        &self,
+        name: &str,
+        token: AttachmentToken,
+    ) -> Result<(Attachment, Companion), Refusal> {
         let mut state = self.state();
         let companion = find(&state.companions, name).cloned().ok_or_else(|| {
             Refusal::new(
@@ -109,25 +117,63 @@ impl Lobby {
             id: AttachmentId::from_u128(uuid::Uuid::now_v7().as_u128()),
             companion: companion.id,
         };
-        state.attachments.insert(attachment.id, attachment.clone());
+        state
+            .attachments
+            .insert(attachment.id, (attachment.clone(), token));
         Ok((attachment, companion))
     }
 
-    /// The live attachment and its companion.
-    pub fn attachment(&self, id: AttachmentId) -> Option<(Attachment, Companion)> {
+    /// The live attachment and its companion, when `presented` is its token.
+    pub fn attachment(
+        &self,
+        id: AttachmentId,
+        presented: &str,
+    ) -> Result<(Attachment, Companion), Refusal> {
         let state = self.state();
-        let attachment = state.attachments.get(&id)?.clone();
+        let (attachment, token) = state.attachments.get(&id).ok_or_else(|| {
+            Refusal::new(
+                Outcome::NotFound,
+                "No such attachment is live; attach again.",
+            )
+        })?;
+        if !token.matches(presented) {
+            return Err(Refusal::new(
+                Outcome::Refused,
+                "That is not this attachment's token.",
+            ));
+        }
+        let attachment = attachment.clone();
         let companion = state
             .companions
             .iter()
-            .find(|companion| companion.id == attachment.companion)?
-            .clone();
-        Some((attachment, companion))
+            .find(|companion| companion.id == attachment.companion)
+            .cloned()
+            .ok_or_else(|| {
+                Refusal::new(
+                    Outcome::NotFound,
+                    "No such attachment is live; attach again.",
+                )
+            })?;
+        Ok((attachment, companion))
     }
 
-    /// Ends an attachment. Returns whether it was live.
-    pub fn detach(&self, id: AttachmentId) -> bool {
-        self.state().attachments.remove(&id).is_some()
+    /// Ends an attachment, when `presented` is its token.
+    pub fn detach(&self, id: AttachmentId, presented: &str) -> Result<(), Refusal> {
+        let mut state = self.state();
+        match state.attachments.get(&id) {
+            None => Err(Refusal::new(
+                Outcome::NotFound,
+                "No such attachment is live.",
+            )),
+            Some((_, token)) if !token.matches(presented) => Err(Refusal::new(
+                Outcome::Refused,
+                "That is not this attachment's token.",
+            )),
+            Some(_) => {
+                state.attachments.remove(&id);
+                Ok(())
+            }
+        }
     }
 
     /// How many attachments are live.
@@ -176,25 +222,64 @@ mod tests {
         assert_eq!(lobby.companions(), vec![ada]);
     }
 
+    fn token() -> AttachmentToken {
+        AttachmentToken::generate().expect("token")
+    }
+
     #[test]
     fn a_mind_attaches_by_moniker_or_id_and_detaches() {
         let lobby = Lobby::new();
         let ada = lobby.create_companion("ada", "Ada").expect("ada");
-        let (by_moniker, companion) = lobby.attach("ada").expect("by moniker");
+        let (by_moniker, companion) = lobby.attach("ada", token()).expect("by moniker");
         assert_eq!(companion, ada);
-        let (by_id, _) = lobby.attach(&ada.id.to_string()).expect("by id");
+        let id_token = token();
+        let (by_id, _) = lobby
+            .attach(&ada.id.to_string(), id_token.clone())
+            .expect("by id");
         assert_ne!(
             by_moniker.id, by_id.id,
             "every attach is its own attachment"
         );
         assert_eq!(lobby.attachment_count(), 2);
-        assert_eq!(lobby.attachment(by_id.id).map(|(_, c)| c.id), Some(ada.id));
-        assert!(lobby.detach(by_id.id));
-        assert!(!lobby.detach(by_id.id));
-        assert!(lobby.attachment(by_id.id).is_none());
         assert_eq!(
-            lobby.attach("bea").expect_err("unknown").outcome,
+            lobby
+                .attachment(by_id.id, id_token.expose())
+                .map(|(_, c)| c.id),
+            Ok(ada.id)
+        );
+        assert!(lobby.detach(by_id.id, id_token.expose()).is_ok());
+        assert_eq!(
+            lobby
+                .detach(by_id.id, id_token.expose())
+                .expect_err("gone")
+                .outcome,
             Outcome::NotFound
         );
+        assert!(lobby.attachment(by_id.id, id_token.expose()).is_err());
+        assert_eq!(
+            lobby.attach("bea", token()).expect_err("unknown").outcome,
+            Outcome::NotFound
+        );
+    }
+
+    #[test]
+    fn an_attachment_answers_only_to_its_own_token() {
+        let lobby = Lobby::new();
+        lobby.create_companion("ada", "Ada").expect("ada");
+        let (first, _) = lobby.attach("ada", token()).expect("first");
+        let second_token = token();
+        lobby.attach("ada", second_token.clone()).expect("second");
+        let refused = lobby
+            .attachment(first.id, second_token.expose())
+            .expect_err("another attachment's token");
+        assert_eq!(refused.outcome, Outcome::Refused);
+        assert_eq!(
+            lobby
+                .detach(first.id, second_token.expose())
+                .expect_err("refused")
+                .outcome,
+            Outcome::Refused
+        );
+        assert_eq!(lobby.attachment_count(), 2, "a refused detach ends nothing");
     }
 }

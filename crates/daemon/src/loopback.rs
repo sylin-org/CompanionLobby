@@ -49,10 +49,31 @@ impl<'a> Call<'a> {
     }
 }
 
+/// The error behind a call that never reached a listener: nothing was sent,
+/// so the call can be made again without doing anything twice.
+#[derive(Debug)]
+pub struct Unreachable(io::Error);
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "nothing accepted the connection: {}", self.0)
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
+/// Whether `error` came from a call that never connected.
+pub fn unreachable(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<Unreachable>())
+}
+
 /// Sends `call` to the daemon on `port` and reads the whole answer.
 pub fn send(port: u16, call: &Call<'_>) -> io::Result<Answer> {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let mut stream = TcpStream::connect_timeout(&address, call.timeout)?;
+    let mut stream = TcpStream::connect_timeout(&address, call.timeout)
+        .map_err(|error| io::Error::new(error.kind(), Unreachable(error)))?;
     stream.set_read_timeout(Some(call.timeout))?;
     stream.set_write_timeout(Some(call.timeout))?;
     stream.set_nodelay(true)?;
@@ -144,6 +165,16 @@ mod tests {
         let empty = parse(b"HTTP/1.1 204 No Content\r\n\r\n").expect("parse");
         assert_eq!(empty.status, 204);
         assert!(empty.body.is_empty());
+    }
+
+    #[test]
+    fn a_call_to_a_closed_port_is_unreachable_and_other_failures_are_not() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        drop(listener);
+        let error = send(port, &Call::get("/", Duration::from_secs(5))).expect_err("closed");
+        assert!(unreachable(&error), "{error}");
+        assert!(!unreachable(&io::Error::other("read failed")));
     }
 
     #[test]

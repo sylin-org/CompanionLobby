@@ -474,6 +474,69 @@ fn the_envelope_refuses_foreign_hosts_browsers_and_missing_secrets() {
     );
     assert_eq!(status, 401);
 
+    // An attachment answers to its own token; the install secret is not one.
+    install.create("ada", "Ada");
+    let attached = loopback::send(
+        port,
+        &Call {
+            method: "POST",
+            path: "/mcp/attach",
+            headers: &[("Authorization", &bearer)],
+            body: attach_body.as_bytes(),
+            timeout: Duration::from_secs(5),
+        },
+    )
+    .expect("attach");
+    assert_eq!(attached.status, 201);
+    let attached: Value = serde_json::from_slice(&attached.body).expect("JSON");
+    let attachment = attached["attachment"].as_str().expect("attachment id");
+    let token = attached["token"].as_str().expect("attachment token");
+    assert_ne!(token, secret.expose());
+    let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+    let frame = |authorization: &str, evidence: &str| {
+        raw(
+            port,
+            &format!(
+                "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{evidence}Authorization: {authorization}\r\nLobby-Attachment: {attachment}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{ping}",
+                ping.len()
+            ),
+        )
+        .0
+    };
+    assert_eq!(frame(&bearer, ""), 401, "the install secret is not a token");
+    assert_eq!(frame(&format!("Bearer {}", "0".repeat(64)), ""), 401);
+    // A browser-style POST to /mcp is refused even with the right token.
+    for evidence in [
+        "Origin: http://evil.test\r\n",
+        "Sec-Fetch-Site: cross-site\r\n",
+        "Sec-Fetch-Mode: no-cors\r\n",
+        "Sec-Fetch-Dest: empty\r\n",
+        "Referer: http://evil.test/\r\n",
+    ] {
+        assert_eq!(
+            frame(&format!("Bearer {token}"), evidence),
+            403,
+            "{evidence}"
+        );
+    }
+    assert_eq!(frame(&format!("Bearer {token}"), ""), 200);
+    let detach = |authorization: &str| {
+        raw(
+            port,
+            &format!(
+                "DELETE /mcp/attach/{attachment} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: {authorization}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .0
+    };
+    assert_eq!(
+        detach(&bearer),
+        401,
+        "the install secret ends no attachment"
+    );
+    assert_eq!(detach(&format!("Bearer {token}")), 204);
+    assert_eq!(frame(&format!("Bearer {token}"), ""), 404);
+
     // Operator changes need JSON from the page's own origin.
     let create = r#"{"moniker":"mallory"}"#;
     for (headers, expected) in [
@@ -533,6 +596,117 @@ fn the_envelope_refuses_foreign_hosts_browsers_and_missing_secrets() {
     assert_eq!(status, 431);
 }
 
+/// Reads one HTTP request: the head, then as much body as it declares.
+fn read_request(stream: &mut TcpStream) -> String {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let read = stream.read(&mut buffer).unwrap_or(0);
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+        let text = String::from_utf8_lossy(&bytes);
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let declared = head
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if body.len() >= declared {
+                break;
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Serves `listener` from a thread: every request is recorded and answered
+/// with `status` and `body`.
+fn record_requests(
+    listener: std::net::TcpListener,
+    status: &'static str,
+    body: String,
+) -> std::sync::mpsc::Receiver<String> {
+    let (seen_sender, seen) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let _ = seen_sender.send(read_request(&mut stream));
+            let reply = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(reply.as_bytes());
+        }
+    });
+    seen
+}
+
+#[test]
+fn a_process_that_takes_the_port_after_a_stop_never_receives_the_install_secret() {
+    let install = Install::new("after-stop");
+    install.open();
+    install.create("ada", "Ada");
+    let secret = install.secret();
+    let mut host = install.attach("ada");
+    assert_eq!(
+        host.ask(&initialize(0))["result"]["serverInfo"]["name"],
+        "companion-lobby"
+    );
+
+    // The daemon stops, and another process takes its port before any
+    // daemon starts again.
+    let stopped = install.stop();
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let taker = std::net::TcpListener::bind(("127.0.0.1", install.port))
+        .expect("the port is free once the daemon has stopped");
+    let seen = record_requests(
+        taker,
+        "404 Not Found",
+        r#"{"outcome":"not_found"}"#.to_owned(),
+    );
+
+    // The host's next frame goes to that process, and so does the detach.
+    let failed = host.ask(&reach_call(1));
+    assert_eq!(failed["error"]["code"], -32603, "{failed}");
+    host.close_stdin();
+    assert_eq!(
+        host.wait_exit(Duration::from_secs(20))
+            .and_then(|s| s.code()),
+        Some(0)
+    );
+    assert_pure_stdout(&host);
+
+    let requests: Vec<String> = seen.try_iter().collect();
+    assert!(
+        requests.iter().any(|r| r.starts_with("POST /mcp ")),
+        "{requests:?}"
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.starts_with("DELETE /mcp/attach/")),
+        "{requests:?}"
+    );
+    for request in &requests {
+        assert!(
+            !request.contains(secret.expose()),
+            "the install secret reached the port's new owner: {request}"
+        );
+        assert!(
+            !request.starts_with("POST /mcp/attach "),
+            "the shim attached to an unverified process: {request}"
+        );
+    }
+}
+
 #[test]
 fn a_process_squatting_on_the_port_never_receives_the_secret() {
     let install = Install::new("squatter");
@@ -544,22 +718,7 @@ fn a_process_squatting_on_the_port_never_receives_the_secret() {
     let squatter = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let squat_port = squatter.local_addr().expect("address").port();
     let document = serde_json::to_string(&real).expect("document");
-    let (seen_sender, seen) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        for stream in squatter.incoming().flatten() {
-            let mut stream = stream;
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-            let mut buffer = [0u8; 16 * 1024];
-            let read = stream.read(&mut buffer).unwrap_or(0);
-            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
-            let _ = seen_sender.send(request);
-            let reply = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{document}",
-                document.len()
-            );
-            let _ = stream.write_all(reply.as_bytes());
-        }
-    });
+    let seen = record_requests(squatter, "200 OK", document);
 
     let mut environment = install.environment();
     environment.retain(|(name, _)| *name != "LOBBY_PORT");
