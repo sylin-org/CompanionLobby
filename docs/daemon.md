@@ -149,7 +149,9 @@ one command pipeline:
 The event pipeline runs every event through small handlers, in order, before
 the next command starts. The feed handler turns it into an item of the live
 feed. The cascade handler ends the attachments of a removed companion, each
-journaled as a `detach` initiated by the lobby.
+journaled as a `detach` initiated by the lobby, pending and then settled. The
+companion is already gone, so an attachment ends even when its pending entry
+cannot be written; the journal's health says so.
 
 The commands are `create_companion`, `rename_companion` and
 `remove_companion`, which only the sponsor issues through the operator API,

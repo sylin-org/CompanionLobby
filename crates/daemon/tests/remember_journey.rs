@@ -581,8 +581,18 @@ fn renames_and_removals_are_guarded_by_revision_and_removal_cascades_to_attachme
         .journal()
         .into_iter()
         .filter(|entry| entry["command"] == "detach" && entry["initiator"] == "lobby")
+        .map(|entry| entry["outcome"].clone())
         .collect();
-    assert_eq!(ended.len(), 2);
+    assert_eq!(
+        ended,
+        [
+            json!("pending"),
+            json!("done"),
+            json!("pending"),
+            json!("done")
+        ],
+        "each ended attachment is journaled pending, then settled"
+    );
     for mut host in [by_moniker, by_id] {
         host.close_stdin();
         let _ = host.wait_exit(Duration::from_secs(20));

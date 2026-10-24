@@ -627,9 +627,10 @@ impl Core {
         }
     }
 
-    /// Ends every attachment of `companion`, a command the lobby initiates.
-    /// The companion is gone, so the attachments end even when the journal
-    /// cannot record it.
+    /// Ends every attachment of `companion`, a command the lobby initiates,
+    /// journaled pending then settled like any other. The companion is gone,
+    /// so the attachments end even when the journal cannot record it; the
+    /// journal's health then says what is missing.
     fn end_attachments_of(&mut self, companion: CompanionId) {
         let ended: Vec<AttachmentId> = self
             .attachments
@@ -638,6 +639,7 @@ impl Core {
             .map(|live| live.attachment.id)
             .collect();
         for id in ended {
+            let _ = self.begin(Initiator::Lobby, Some(companion), DETACH);
             self.attachments.remove(&id);
             self.settle(Initiator::Lobby, Some(companion), DETACH, Outcome::Done);
             trace::line(&format!(
@@ -813,13 +815,22 @@ mod tests {
                 .outcome,
             Outcome::NotFound
         );
-        let detaches: Vec<serde_json::Value> = dir
+        let detaches: Vec<(String, String)> = dir
             .journal()
             .into_iter()
             .filter(|entry| entry["command"] == DETACH)
+            .map(|entry| {
+                (
+                    entry["initiator"].as_str().expect("initiator").to_owned(),
+                    entry["outcome"].as_str().expect("outcome").to_owned(),
+                )
+            })
             .collect();
-        assert_eq!(detaches.len(), 2);
-        assert!(detaches.iter().all(|entry| entry["initiator"] == "lobby"));
+        let pair = [
+            ("lobby".to_owned(), "pending".to_owned()),
+            ("lobby".to_owned(), "done".to_owned()),
+        ];
+        assert_eq!(detaches, [pair.clone(), pair].concat());
     }
 
     #[test]
