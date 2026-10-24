@@ -29,7 +29,10 @@
 //! what a service issued for each connection in `<connection id>.issued`.
 //! Each file is written atomically and sealed like the secret, with a purpose
 //! of its own, so a file of one kind never opens as the other; it is deleted
-//! when its credential or connection is revoked or removed.
+//! when its credential or connection is revoked or removed. A file is written
+//! before the commit that names its record, so a daemon that stops between
+//! the two leaves a file no record names; the daemon sweeps such files when
+//! it starts.
 
 use std::fmt;
 use std::io;
@@ -250,6 +253,23 @@ pub fn is_sealed_file(name: &str) -> bool {
             .strip_suffix(".tmp")
             .and_then(|rest| rest.rsplit_once('.'))
             .is_some_and(|(file, _)| sealed(file) && crate::store::is_temporary_of(name, file))
+}
+
+/// The names of every material and issued-data file in `dir`, temporary
+/// ones included.
+pub fn sealed_files(dir: &Path) -> io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if let Some(name) = entry.file_name().to_str()
+            && is_sealed_file(name)
+            && entry.file_type()?.is_file()
+        {
+            names.push(name.to_owned());
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 /// Keeps `material` for the credential `id`, sealed.

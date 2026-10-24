@@ -245,6 +245,7 @@ const COMPLETE_SIGN_IN: &str = "complete_sign_in";
 const REVOKE_CREDENTIAL: &str = "revoke_credential";
 const GRANT_CONNECTION: &str = "grant_connection";
 const REVOKE_CONNECTION: &str = "revoke_connection";
+const SWEEP_KEYRING: &str = "sweep_keyring";
 
 /// Who a journal entry is about, short of its kind and outcome.
 #[derive(Debug, Clone)]
@@ -357,6 +358,59 @@ impl Lobby {
                     ))
                 }
             }
+        })
+    }
+
+    /// Deletes every material and issued-data file that no ready credential
+    /// or connection names: what a daemon that stopped between writing a
+    /// file and committing its record left behind, or a file a revocation
+    /// could not delete. A command the lobby initiates when it starts,
+    /// journaled only when there is something to sweep. Returns how many
+    /// files were swept.
+    pub fn sweep_keyring(&self) -> Result<usize, Refusal> {
+        let found = keyring::sealed_files(&self.dir).map_err(|error| {
+            trace::line(&format!("the keyring could not be listed: {error}"));
+            Refusal::new(
+                Outcome::Internal,
+                "The lobby could not list the files it keeps; the trace log in the data directory says why.",
+            )
+        })?;
+        self.run(|core| {
+            let state = core.store.state();
+            let named: Vec<String> = state
+                .credentials
+                .iter()
+                .filter(|credential| credential.state == CredentialState::Ready)
+                .map(|credential| keyring::material_file(credential.id))
+                .chain(
+                    state
+                        .connections
+                        .iter()
+                        .filter(|connection| connection.state == ConnectionState::Ready)
+                        .map(|connection| keyring::issued_file(connection.id)),
+                )
+                .collect();
+            let orphans: Vec<String> = found
+                .into_iter()
+                .filter(|name| !named.contains(name))
+                .collect();
+            if orphans.is_empty() {
+                return Ok(0);
+            }
+            core.begin(Initiator::Lobby, None, SWEEP_KEYRING)?;
+            let mut outcome = Outcome::Done;
+            for name in &orphans {
+                if let Err(error) = keyring::remove_kept(&self.dir, name) {
+                    trace::line(&format!("{name} could not be swept: {error}"));
+                    outcome = Outcome::Internal;
+                }
+            }
+            core.settle(Initiator::Lobby, None, SWEEP_KEYRING, outcome);
+            trace::line(&format!(
+                "swept {} kept file(s) no record names",
+                orphans.len()
+            ));
+            Ok(orphans.len())
         })
     }
 
@@ -1775,6 +1829,120 @@ mod tests {
                 renew("internal")
             ]
         );
+    }
+
+    /// Signs `companion` in with a passbook `authority` as `holder`, the
+    /// way the sponsor's browser does, in process.
+    fn passbook_sign_in(
+        lobby: &Lobby,
+        companion: CompanionId,
+        authority: &lobby_testkit::passbook::PassbookAuthority,
+        holder: &str,
+    ) -> Credential {
+        use lobby_contracts::AddressPolicy;
+        use lobby_outbound::{Outbound, Request};
+        authority.sign_in_as(holder);
+        let start = lobby
+            .begin_sign_in(
+                companion,
+                "passbook",
+                &authority.origin(),
+                "http://127.0.0.1:1",
+            )
+            .expect("a sign-in starts");
+        let (origin, target) = start.url.split_at(authority.origin().len());
+        let origin = Address::parse(origin, AddressPolicy::LoopbackAllowed).expect("origin");
+        let approved = Outbound::new(AddressPolicy::LoopbackAllowed)
+            .send(&origin, Request::new("GET", target))
+            .expect("the authority answers");
+        let back = approved.header("location").expect("sent back").to_owned();
+        let query = back.split_once('?').expect("a query").1;
+        let pairs = query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .map(|(name, value)| {
+                (
+                    lobby_testkit::percent_decode(name),
+                    lobby_testkit::percent_decode(value),
+                )
+            })
+            .collect();
+        lobby
+            .complete_sign_in("passbook", pairs)
+            .expect("signed in")
+    }
+
+    #[test]
+    fn files_no_record_names_are_swept_at_start_and_the_sweep_is_journaled() {
+        let dir = Dir::new("sweep");
+        let registry = Registry::new(
+            vec![Arc::new(lobby_testkit::passbook::Passbook::new())],
+            Vec::new(),
+        );
+        let authority = lobby_testkit::passbook::PassbookAuthority::start();
+        let lobby = Lobby::open(&dir.0, "companion-lobby", registry.clone()).expect("open");
+        let ada = lobby
+            .create_companion("ada", "Ada")
+            .expect("ada")
+            .record
+            .companion
+            .id;
+        let credential = passbook_sign_in(&lobby, ada, &authority, "holder-ada");
+        assert_eq!(lobby.sweep_keyring(), Ok(0), "nothing to sweep");
+        let entries = dir.journal().len();
+        assert!(
+            !dir.journal()
+                .iter()
+                .any(|entry| entry["command"] == SWEEP_KEYRING),
+            "a sweep with nothing to do is not journaled"
+        );
+        drop(lobby);
+
+        // What a daemon that stopped between writing a file and committing
+        // its record leaves behind: files no record names.
+        let lost_credential = CredentialId::from_u128(new_id());
+        let lost_connection = ConnectionId::from_u128(new_id());
+        keyring::write_material(
+            &dir.0,
+            lost_credential,
+            &SealedMaterial::new(b"lost".to_vec()),
+        )
+        .expect("write");
+        keyring::write_issued(
+            &dir.0,
+            lost_connection,
+            &lobby_contracts::SealedIssued::new(b"lost".to_vec()),
+        )
+        .expect("write");
+        let lobby = Lobby::open(&dir.0, "companion-lobby", registry).expect("open again");
+        assert_eq!(lobby.sweep_keyring(), Ok(2));
+        assert_eq!(
+            keyring::sealed_files(&dir.0).expect("list"),
+            [keyring::material_file(credential.id)],
+            "only the material a ready credential names is kept"
+        );
+        assert!(lobby.read_material(credential.id).is_ok());
+        let swept: Vec<(String, String)> = dir.journal()[entries..]
+            .iter()
+            .map(|entry| {
+                (
+                    entry["initiator"].as_str().expect("initiator").to_owned(),
+                    format!(
+                        "{}:{}",
+                        entry["command"].as_str().expect("command"),
+                        entry["outcome"].as_str().expect("outcome")
+                    ),
+                )
+            })
+            .collect();
+        assert_eq!(
+            swept,
+            [
+                ("lobby".to_owned(), "sweep_keyring:pending".to_owned()),
+                ("lobby".to_owned(), "sweep_keyring:done".to_owned())
+            ]
+        );
+        assert_eq!(lobby.sweep_keyring(), Ok(0));
     }
 
     #[test]

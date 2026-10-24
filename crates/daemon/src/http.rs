@@ -195,6 +195,9 @@ pub fn run() -> Result<(), String> {
         trace::line(&format!("start refused: {problem}"));
         format!("{problem} (in {shown})")
     })?;
+    lobby
+        .sweep_keyring()
+        .map_err(|refusal| format!("{} (in {shown})", refusal.message))?;
     let secret = attach_secret(&dir, &lobby)
         .map_err(|problem| format!("cannot use the attach secret in {shown}: {problem}"))?;
     let port = resolve_port()?;

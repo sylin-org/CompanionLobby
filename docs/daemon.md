@@ -61,8 +61,8 @@ writes a new one.
 | `daemon.lock` | the daemon | Nothing; the running daemon holds an exclusive OS lock on it, and the shim, `open` and `stop` learn whether a daemon runs by taking it for an instant. The daemon waits out such a probe when it starts. The OS releases both locks when the process dies, so a daemon killed outright never blocks the next start. |
 | `daemon.json` | the lock holder | `pid`, `port` and `buildId` of the process holding the lock. Read only while the lock is held. |
 | `trace.log`, `trace.1.log` | the daemon | Its own operational log: start, stop, refusals, attachments, journal failures, panics. Rotated at 1 MiB, two generations. No secrets, no content. |
-| `<credential id>.material` | the daemon | One credential's material, as its credential adapter encoded it, sealed. Deleted when the credential is revoked or its companion removed. |
-| `<connection id>.issued` | the daemon | What a service issued for one connection, as its service adapter encoded it, sealed. Deleted when the connection is revoked or its companion removed. |
+| `<credential id>.material` | the daemon | One credential's material, as its credential adapter encoded it, sealed. Deleted when the credential is revoked or its companion removed, and swept when the daemon starts if no ready credential names it. |
+| `<connection id>.issued` | the daemon | What a service issued for one connection, as its service adapter encoded it, sealed. Deleted when the connection is revoked or its companion removed, and swept when the daemon starts if no ready connection names it. |
 
 The record lives beside the lock rather than in it because, on Windows, an
 exclusive lock also stops other processes from reading the locked file.
@@ -221,7 +221,10 @@ The commands are `create_companion`, `rename_companion`,
 `revoke_credential`, `grant_connection` and `revoke_connection`, which only
 the sponsor issues through the operator API, and `attach` and `detach`, which
 a mind issues through its shim; the lobby itself issues `detach` in the
-cascade and `renew_attach_secret` when it starts. Removing a companion
+cascade, and `renew_attach_secret` and `sweep_keyring` when it starts, the
+second only when a material or issued-data file no ready record names is
+left from a daemon that stopped between writing the file and committing
+its record. Removing a companion
 removes its credentials and connections and deletes what they kept. A rename or
 removal that names a revision the companion has moved past is refused with
 409. A removal while minds are attached as the companion is refused with 409
