@@ -12,8 +12,8 @@
 //! Any path whose final component is `.companion-lobby` is refused outright and
 //! never read. The daemon, the attach shim, `open` and `stop` all resolve the
 //! directory the same way, so a host's shim and the sponsor's own commands
-//! meet the same daemon. When the daemon creates the directory it restricts it
-//! to its owner.
+//! meet the same daemon. Whoever creates the directory restricts it to its
+//! owner, and the daemon restricts and checks it again on every start.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -127,43 +127,40 @@ pub fn prepare(path: &Path) -> Result<(), HomeProblem> {
     restrict_to_owner(path).map_err(|error| HomeProblem::Io(path.to_path_buf(), error))
 }
 
-/// Restricts a directory to the current user: an ACL that grants only the
-/// owner on Windows, mode 0700 elsewhere.
+/// Restricts a directory to the current user: on Windows a protected DACL
+/// whose one entry grants the current user full control, inherited by
+/// everything inside; mode 0700 elsewhere.
 pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        use std::process::{Command, Stdio};
-        let who = Command::new("whoami")
-            .args(["/user", "/fo", "csv", "/nh"])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()?;
-        let text = String::from_utf8_lossy(&who.stdout);
-        let sid = text
-            .trim()
-            .rsplit(',')
-            .next()
-            .map(|field| field.trim_matches('"'))
-            .filter(|sid| sid.starts_with("S-1-"))
-            .ok_or_else(|| io::Error::other("whoami did not report the current user's SID"))?;
-        let status = Command::new("icacls")
-            .arg(path)
-            .args(["/inheritance:r", "/grant:r"])
-            .arg(format!("*{sid}:(OI)(CI)F"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other("icacls could not restrict the directory"))
-        }
+        crate::win32::restrict_to_owner(path)
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+    }
+}
+
+/// Restricts the directory to its owner and checks that it took: the daemon
+/// does this on every start, before it reads or creates the attach secret, so
+/// a directory whose access was widened since is narrowed again or refused.
+pub fn secure(path: &Path) -> io::Result<()> {
+    restrict_to_owner(path)?;
+    #[cfg(windows)]
+    let owner_only = crate::win32::is_owner_only(path)?;
+    #[cfg(unix)]
+    let owner_only = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)?.permissions().mode() & 0o077 == 0
+    };
+    if owner_only {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the directory still grants access to someone other than its owner",
+        ))
     }
 }
 
@@ -214,6 +211,31 @@ mod tests {
             prepare(Path::new("/nowhere/.companion-lobby")),
             Err(HomeProblem::Refused(_))
         ));
+    }
+
+    #[test]
+    fn securing_a_directory_leaves_it_to_its_owner_alone() {
+        let dir = std::env::temp_dir().join(format!(
+            "lobby-home-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        secure(&dir).expect("secure");
+        #[cfg(windows)]
+        assert!(crate::win32::is_owner_only(&dir).expect("read the DACL"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        // Securing again changes nothing and still succeeds.
+        secure(&dir).expect("secure again");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(windows)]

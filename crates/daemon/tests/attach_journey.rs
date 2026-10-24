@@ -852,3 +852,32 @@ fn a_host_that_kills_its_job_on_exit_leaves_the_daemon_running() {
         .expect("closing the host's job leaves the daemon running");
     assert_eq!(after.lock_holder_pid, started.lock_holder_pid);
 }
+
+#[cfg(windows)]
+#[test]
+fn the_daemon_narrows_a_widened_data_directory_again_when_it_starts() {
+    use lobby_daemon::win32::is_owner_only;
+
+    let install = Install::new("acl");
+    install.open();
+    assert!(is_owner_only(&install.dir()).expect("read the DACL"));
+    let stopped = install.stop();
+    assert!(stopped.status.success());
+
+    // Someone grants Everyone read access while no daemon runs.
+    let widened = Command::new("icacls")
+        .arg(install.dir())
+        .args(["/grant", "*S-1-1-0:(OI)(CI)R"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .expect("run icacls");
+    assert!(widened.success());
+    assert!(!is_owner_only(&install.dir()).expect("read the DACL"));
+
+    install.open();
+    assert!(
+        is_owner_only(&install.dir()).expect("read the DACL"),
+        "the daemon's start restricts the directory to its owner again"
+    );
+}

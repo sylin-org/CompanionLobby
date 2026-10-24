@@ -130,7 +130,6 @@ impl App {
 /// Runs the daemon in the foreground until it is asked to stop.
 pub fn run() -> Result<(), String> {
     let dir = home::resolve().map_err(|problem| problem.to_string())?;
-    let created = !dir.is_dir();
     home::prepare(&dir).map_err(|problem| problem.to_string())?;
     let shown = home::display_path(&dir);
     trace::install(&dir)
@@ -143,10 +142,11 @@ pub fn run() -> Result<(), String> {
         }
         Err(LockProblem::Io(error)) => return Err(format!("cannot lock {shown}: {error}")),
     };
-    let first_install = !dir.join(crate::keyring::ATTACH_SECRET_FILE).exists();
-    if first_install && !created {
-        home::restrict_to_owner(&dir)
-            .map_err(|error| HomeProblem::Io(dir.clone(), error).to_string())?;
+    if let Err(error) = home::secure(&dir) {
+        trace::line(&format!(
+            "start refused: the data directory is not owner-only: {error}"
+        ));
+        return Err(HomeProblem::Io(dir.clone(), error).to_string());
     }
     let secret = AttachSecret::load_or_create(&dir)
         .map_err(|error| format!("cannot read the attach secret in {shown}: {error}"))?;
