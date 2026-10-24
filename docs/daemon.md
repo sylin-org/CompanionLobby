@@ -406,7 +406,9 @@ to be private), sends a same-origin `POST /api/stop`, and returns once the
 daemon lock is released. A stopping daemon keeps its listener bound,
 accepting nothing, until the drain is over, so no other process can take the
 port while the daemon still holds the lock and its record names the port;
-then it closes the listener, removes its record and lets go of the lock. On
+then it closes the listener, removes its record and lets go of the lock. A
+live feed is not part of the drain: its connection is dropped when the stop
+arrives, so a page that stopped reading its feed never holds a stop up. On
 Windows a running executable cannot be replaced, so `stop` before
 `cargo build`; a shim of the new build would also replace a daemon of the old
 one by itself, as long as the old one runs from a different file.

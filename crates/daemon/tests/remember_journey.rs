@@ -968,3 +968,37 @@ fn a_page_elsewhere_reads_nothing_and_a_closed_feed_frees_its_place() {
     drop(reopened);
     assert!(install.stop().status.success());
 }
+
+/// A page that stops reading its live feed never holds up a stop: frames
+/// pile up past what the feed task's channel, the connection and the
+/// loopback socket hold, and the stop still returns well inside the drain
+/// limit.
+#[test]
+fn a_page_that_stops_reading_its_feed_never_holds_up_a_stop() {
+    use lobby_daemon::http::{DRAIN_LIMIT, FEED_PATH};
+    // Three feed items each, several times what fills the buffers between
+    // the feed task and a page that reads nothing.
+    const RENAMES: u64 = 600;
+    let install = Install::new("unread");
+    install.open();
+    let ada = install.create("ada", "Ada");
+    let path = format!("/api/companions/{}", ada["id"].as_str().expect("id"));
+    let (status, unread) = read_status(install.port, FEED_PATH, "");
+    assert_eq!(status, 200);
+    for revision in 1..=RENAMES {
+        let renamed = install.operator(
+            "PATCH",
+            &path,
+            &json!({ "expectedRevision": revision, "displayName": format!("{revision:0>64}") }),
+        );
+        assert_eq!(renamed.status, 200);
+    }
+    let stopping = Instant::now();
+    assert!(install.stop().status.success());
+    assert!(
+        stopping.elapsed() < DRAIN_LIMIT / 2,
+        "the stop waited {:?} on a page that reads nothing",
+        stopping.elapsed()
+    );
+    drop(unread);
+}

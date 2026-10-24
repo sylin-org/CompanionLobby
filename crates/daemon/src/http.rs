@@ -95,6 +95,8 @@ pub const PORT_ENV: &str = "LOBBY_PORT";
 pub const ATTACHMENT_HEADER: &str = "lobby-attachment";
 /// Live feeds served at once; one more is answered 503.
 pub const FEED_CLIENT_LIMIT: usize = 16;
+/// The live feed's path.
+pub const FEED_PATH: &str = "/api/events";
 /// How often a quiet live feed sends a comment, so a vanished page is noticed.
 pub const FEED_KEEPALIVE: Duration = Duration::from_secs(15);
 
@@ -263,14 +265,26 @@ async fn bind(port: u16) -> Result<TcpListener, String> {
 /// The listener stays bound through the drain, accepting nothing, so no other
 /// process can take the port while this daemon still holds the lock and its
 /// record names it; it closes only once the drain is over.
+///
+/// A live feed is not drained. It never finishes on its own, and a page that
+/// stopped reading it leaves frames the connection can never flush, so once
+/// a stop is requested the feed's connection is dropped rather than awaited.
 pub async fn serve(listener: TcpListener, app: Arc<App>) {
     let graceful = GracefulShutdown::new();
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
-                    let app = app.clone();
-                    let service = service_fn(move |request| handle(app.clone(), request));
+                    let (marks_feed, mut serves_feed) = watch::channel(false);
+                    let service = service_fn({
+                        let app = app.clone();
+                        move |request: Request<Incoming>| {
+                            if request.uri().path() == FEED_PATH {
+                                marks_feed.send_replace(true);
+                            }
+                            handle(app.clone(), request)
+                        }
+                    });
                     let mut builder = http1::Builder::new();
                     builder
                         .max_buf_size(HEADER_LIMIT)
@@ -278,8 +292,12 @@ pub async fn serve(listener: TcpListener, app: Arc<App>) {
                         .header_read_timeout(READ_TIMEOUT)
                         .keep_alive(false);
                     let connection = graceful.watch(builder.serve_connection(TokioIo::new(stream), service));
+                    let mut stopped = app.stopped.subscribe();
                     tokio::spawn(async move {
-                        let _ = connection.await;
+                        tokio::select! {
+                            _ = connection => {}
+                            () = feed_abandoned(&mut serves_feed, &mut stopped) => {}
+                        }
                     });
                 }
                 // Transient accept failures never end the loop.
@@ -421,7 +439,7 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
         (&Method::GET, "/api/journal") => {
             blocking(app, move |lobby| journal_reply(lobby, &query)).await
         }
-        (&Method::GET, "/api/events") => events(app, request.headers()),
+        (&Method::GET, FEED_PATH) => events(app, request.headers()),
         (&Method::POST, "/api/companions") => match operator_body(app, request).await {
             Ok(body) => blocking(app, move |lobby| create_companion(lobby, &body)).await,
             Err(refused) => refused.reply(),
@@ -486,7 +504,7 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
         }
         (
             _,
-            DISCOVERY_PATH | "/api/lobby" | "/api/companions" | "/api/journal" | "/api/events"
+            DISCOVERY_PATH | "/api/lobby" | "/api/companions" | "/api/journal" | FEED_PATH
             | "/api/stop" | "/mcp/attach" | "/mcp",
         ) => method_not_allowed(),
         (_, other) if manager::is_page_path(other) || companion_in(other).is_some() => {
@@ -878,31 +896,28 @@ fn events(app: &Arc<App>, headers: &HeaderMap) -> Reply {
                 .map(|item| manager::item_frame(&feed.id_of(item), &item.data)),
         );
         for frame in first {
-            if sender.send(frame).await.is_err() {
+            if !deliver(&sender, &mut stopped, frame).await {
                 return;
             }
         }
         let mut receiver = subscription.receiver;
-        if *stopped.borrow_and_update() {
-            return;
-        }
         loop {
             let frame = tokio::select! {
                 item = receiver.recv() => match item {
                     Ok(item) => manager::item_frame(&feed.id_of(&item), &item.data),
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let _ = sender.send(manager::reset_frame("behind")).await;
+                        deliver(&sender, &mut stopped, manager::reset_frame("behind")).await;
                         return;
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
                 },
                 () = tokio::time::sleep(FEED_KEEPALIVE) => manager::keepalive_frame(),
-                _ = stopped.changed() => return,
+                () = stop_requested(&mut stopped) => return,
                 // The page went away: its place is free at once, not at the
                 // next keepalive.
                 () = sender.closed() => return,
             };
-            if sender.send(frame).await.is_err() {
+            if !deliver(&sender, &mut stopped, frame).await {
                 return;
             }
         }
@@ -913,6 +928,38 @@ fn events(app: &Arc<App>, headers: &HeaderMap) -> Reply {
         HeaderValue::from_static("text/event-stream; charset=utf-8"),
     );
     reply
+}
+
+/// Hands one frame to the feed's body, unless the daemon stops first: a page
+/// that stops reading fills the channel, and a stop never waits on it.
+/// Whether the frame went out.
+async fn deliver(
+    sender: &mpsc::Sender<Bytes>,
+    stopped: &mut watch::Receiver<bool>,
+    frame: Bytes,
+) -> bool {
+    tokio::select! {
+        sent = sender.send(frame) => sent.is_ok(),
+        () = stop_requested(stopped) => false,
+    }
+}
+
+/// Resolves once a stop is requested and the connection serves the live
+/// feed, in either order; never for any other connection, which the drain
+/// awaits.
+async fn feed_abandoned(
+    serves_feed: &mut watch::Receiver<bool>,
+    stopped: &mut watch::Receiver<bool>,
+) {
+    stop_requested(stopped).await;
+    // The connection holds the sender, so it is there while this runs.
+    let _ = serves_feed.wait_for(|&feed| feed).await;
+}
+
+/// Resolves once a stop is requested, at once when one already was.
+async fn stop_requested(stopped: &mut watch::Receiver<bool>) {
+    // The sender lives as long as the daemon; were it gone, so is the feed.
+    let _ = stopped.wait_for(|&stop| stop).await;
 }
 
 /// Frees a live feed's place when its stream ends, however it ends.
