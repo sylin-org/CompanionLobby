@@ -71,11 +71,11 @@ configuration, and the entry's only argument is the companion's id or moniker:
 }
 ```
 
-The manager page shows this block, ready to copy, for every companion. The
-host launches `companion-lobby attach ada`; the shim starts the daemon in the
-background if it is not running, proves itself with the per-install attach
-secret, and relays the host's MCP frames. Every tool call is journaled with the
-companion and the attachment that made it.
+`docs/hosts.md` has the configuration for each host and how to record what a
+host sends. The host launches `companion-lobby attach ada`; the shim starts
+the daemon in the background if it is not running, proves itself with the
+per-install attach secret, and relays the host's MCP frames. `docs/daemon.md` describes the
+daemon, the files it keeps, its loopback boundary and the attach protocol.
 
 ## Where the lobby keeps its files
 
