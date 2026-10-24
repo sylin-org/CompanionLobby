@@ -1073,7 +1073,7 @@ fn sign_in_done(query: &str) -> Reply {
     };
     let page = format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>Companion Lobby</title></head><body><p>{}</p></body></html>",
-        html_escape(&said)
+        html_escape(said)
     );
     let mut reply = with_hygiene(Response::new(Full::new(Bytes::from(page)).boxed()), status);
     let headers = reply.headers_mut();
