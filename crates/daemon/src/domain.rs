@@ -21,7 +21,10 @@
 //! before the next command starts: the feed handler turns it into an item of
 //! the live feed the manager page follows, and the cascade handler ends the
 //! attachments of a companion that was removed, a command of its own
-//! initiated by the lobby.
+//! initiated by the lobby. The handlers run while the lobby is held, which
+//! is what makes a snapshot's feed position exact, so a handler only changes
+//! state in memory and writes the journal; it never calls an adapter, which
+//! would hold the lobby across a service's I/O.
 //!
 //! A companion is created, renamed and removed only by the sponsor, through
 //! the operator API; a rename or removal names the companion's revision and
@@ -306,11 +309,11 @@ impl Lobby {
         token: AttachmentToken,
     ) -> Result<(Attachment, Companion), Refusal> {
         self.run(|core| {
-            let attachment = AttachmentId::from_u128(uuid::Uuid::now_v7().as_u128());
-            let mind = Initiator::Mind { attachment };
             let Some(record) = find(&core.store.state().companions, name).cloned() else {
+                // No attachment came to exist, so the lobby that refused it
+                // is journaled, never an attachment id nothing ever held.
                 return Err(core.refused(
-                    mind,
+                    Initiator::Lobby,
                     None,
                     ATTACH,
                     Refusal::new(
@@ -319,6 +322,8 @@ impl Lobby {
                     ),
                 ));
             };
+            let attachment = AttachmentId::from_u128(uuid::Uuid::now_v7().as_u128());
+            let mind = Initiator::Mind { attachment };
             let companion = record.companion.clone();
             core.begin(mind, Some(companion.id), ATTACH)?;
             let attachment = Attachment {
@@ -789,6 +794,23 @@ mod tests {
             Outcome::NotFound
         );
         assert_eq!(lobby.companions().len(), 1);
+    }
+
+    #[test]
+    fn a_refused_attach_is_journaled_as_the_lobby_with_no_attachment() {
+        let dir = Dir::new("refused-attach");
+        let lobby = dir.lobby();
+        let refused = lobby
+            .attach("nobody", token())
+            .expect_err("no such companion");
+        assert_eq!(refused.outcome, Outcome::NotFound);
+        let journal = dir.journal();
+        let last = journal.last().expect("the refusal is journaled");
+        assert_eq!(last["command"], ATTACH);
+        assert_eq!(last["initiator"], "lobby");
+        assert_eq!(last["outcome"], "not_found");
+        assert!(last.get("attachment").is_none(), "{last}");
+        assert_eq!(lobby.attachment_count(), 0);
     }
 
     #[test]

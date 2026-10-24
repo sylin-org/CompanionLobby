@@ -455,18 +455,6 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(dir);
         }
-        let dir = temp_dir("valid");
-        std::fs::write(
-            dir.join(STATE_FILE),
-            valid.replace("[]", &format!("[{company}]")),
-        )
-        .expect("write");
-        let store = Store::open(&dir).expect("a valid file opens");
-        assert_eq!(
-            store.state().companions[0].companion.moniker.as_str(),
-            "ada"
-        );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

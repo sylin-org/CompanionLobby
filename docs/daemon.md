@@ -115,7 +115,8 @@ name, a fixed lobby word or an outcome code:
 ```
 
 `initiator` is `sponsor` (the manager page), `mind` (with the attachment it
-acted through) or `lobby` (the lobby reacting to an event). `kind` is
+acted through) or `lobby` (the lobby reacting to an event, or refusing an
+attach that named no companion, since no attachment came to exist). `kind` is
 `command` (with the command's fixed name) here, and `invoked` and `settled`
 for the external calls adapters make. Fields that do not apply are absent.
 
