@@ -1,16 +1,24 @@
 //! The Companion Lobby daemon: the one process.
 //!
 //! This is the only crate that knows the async runtime, the file system and
-//! how the pieces are composed. It is an event-driven monolith:
+//! how the pieces are composed. What runs in this crate:
 //!
-//! * one command pipeline: every change validates, applies, commits to the
-//!   state file, journals, then emits events;
-//! * one event pipeline: small reactive handlers turn events into further
-//!   commands and refresh projections;
-//! * projections hold no truth: the state file is truth and the journal is
-//!   attribution;
-//! * the async runtime lives only here; adapters are synchronous and run on
-//!   blocking threads with no lock held.
+//! * the loopback listener and its envelope ([`http`]), the attach shim
+//!   ([`attach`]) and how every subcommand finds, verifies, starts and stops
+//!   the daemon ([`contact`], [`lock`], [`discovery`], [`loopback`], [`stop`],
+//!   [`browser`]);
+//! * the lobby's state, held in memory, with commands that validate before
+//!   they apply ([`domain`]), and the catalog a mind sees, projected from it
+//!   ([`projections`], [`mcp`]);
+//! * the data directory and the attach secret ([`home`], [`keyring`]), the
+//!   daemon's own trace log ([`trace`]) and, on Windows, the crate's one module
+//!   allowed `unsafe` (`win32`).
+//!
+//! The modules [`store`], [`journal`], [`calls`], [`broker`], [`registry`]
+//! and [`manager`] hold no code yet; each says what it will own when the
+//! state file, the journal and the adapters arrive. Then every change will
+//! validate, apply, commit to the state file, journal and emit events, and
+//! adapters will run synchronously on blocking threads with no lock held.
 //!
 //! The `companion-lobby` binary is a thin front over [`cli`].
 

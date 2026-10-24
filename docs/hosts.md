@@ -17,6 +17,17 @@ your build.
 The Claude Code conversation is a test fixture (`hosts::claude_code` in the
 test kit) and is replayed against the shim on every test run.
 
+So far a mind is shown to list and call `reach` through the shim from Claude
+Code on Windows only. Claude Desktop and Codex stay open until each is
+recorded with `attach --log` and its conversation joins the test kit with a
+replay test like Claude Code's. Each recording must also answer two questions
+the tests cannot: whether `LOBBY_DATA_DIR` and `LOBBY_PORT` from the server's
+configured environment reach the shim (the `start` record says), and whether
+the packaged Claude Desktop resolves the same data directory as the sponsor's
+own shell, since an MSIX app may see a virtualized Local AppData; the shim
+then refuses with "serves another data directory" rather than attach to the
+wrong install.
+
 ## Configurations
 
 ### Claude Code

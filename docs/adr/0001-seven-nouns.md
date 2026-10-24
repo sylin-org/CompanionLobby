@@ -42,16 +42,18 @@ contracts:
   and an optional push stream into an `Ingress`.
 
 The daemon implements `MaterialSlot`, `Authority` and `Ingress`. Material is a
-sealed blob only its own adapter decodes. A type enters the contracts crate
-only when both synthetic adapters in the test kit need it in the same change;
-there is no shared vocabulary of service nouns, and service adapters may
-duplicate each other.
+sealed blob only its own adapter decodes. The nouns themselves are declared
+with the crate: `Companion` with its moniker and display name, `Attachment`,
+`JournalEntry` with its kinds and initiator, `Outcome` and `ToolDescriptor`.
+Beyond them, a type enters the contracts crate only when both synthetic
+adapters in the test kit need it in the same change; there is no shared
+vocabulary of service nouns, and service adapters may duplicate each other.
 
 ### Crates and dependency direction
 
 | Crate | Path | Depends on |
 | --- | --- | --- |
-| `lobby-contracts` | `crates/contracts` | nothing |
+| `lobby-contracts` | `crates/contracts` | `serde_json` only, for the JSON values that tool descriptors, arguments and results carry |
 | `lobby-outbound` | `crates/outbound` | contracts |
 | `lobby-testkit` (unpublished) | `crates/testkit` | contracts |
 | `lobby-credential-atproto` | `crates/credentials/atproto` | contracts, outbound |
@@ -82,12 +84,17 @@ path and the shim can start the daemon from its own executable.
 
 - The daemon listens on 127.0.0.1 only. The Host header is checked before a
   body is read.
-- Every attachment presents a per-install attach secret, kept in the data
-  directory under an owner-only ACL and sealed with DPAPI on Windows. `/mcp`
-  refuses browser-origin evidence. This keeps journal attribution honest.
+- Attaching presents a per-install attach secret, kept in the data directory
+  under an owner-only ACL; it is sealed with DPAPI on Windows together with
+  credential material, and until then the ACL alone protects it. The daemon
+  answers each attach with a token for that one attachment, held only in its
+  memory, and every later frame and the detach present that token, never the
+  secret. `/mcp` refuses browser-origin evidence. This keeps journal
+  attribution honest.
 - Before sending the secret, the shim verifies that the listener's pid is the
-  pid recorded in `daemon.lock` and that the store fingerprint matches, so a
-  process squatting on the port never receives it.
+  pid the lock holder recorded in `daemon.json` and that the store
+  fingerprint matches, so a process squatting on the port never receives it;
+  a process that takes the port later receives only tokens no daemon accepts.
 - The manager page and its operator API run under same-machine trust for v1:
   any local user who can reach the loopback port can drive it, as with
   ssh-agent. Mutations require same-origin browser evidence and JSON. An
@@ -136,7 +143,10 @@ come after v0.1.0.
   the vocabulary lint in `tools/` enforces this and the forbidden names.
 - Conformance suites for both contracts run through the real daemon and the
   real binary against local fakes; no test reaches the live network.
-- The workspace denies `unsafe_code`; clippy warnings fail the build.
+- The workspace denies `unsafe_code`, except one Windows module in the daemon
+  (`win32.rs`) for the calls the standard library has no safe form of: the
+  standard handles' inherit flag, the data directory's DACL and the exclusive
+  listening socket. Clippy warnings fail the build.
 
 ## Defaults awaiting the owner's confirmation
 
