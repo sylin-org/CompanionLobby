@@ -46,6 +46,10 @@ impl CredentialFixture for PassbookFixture {
         self.authority.origin()
     }
 
+    fn account(&self) -> String {
+        "conformance-holder".to_owned()
+    }
+
     fn approve_as(&self, account: &str) {
         self.authority.sign_in_as(account);
     }

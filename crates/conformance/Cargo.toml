@@ -15,5 +15,8 @@ lobby-outbound.workspace = true
 lobby-testkit.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+lobby-credential-atproto.workspace = true
+
 [lints]
 workspace = true

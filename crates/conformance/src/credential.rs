@@ -4,7 +4,8 @@
 //! process, through every promise of the contract:
 //!
 //! * a sign-in records the account the provider authenticated, whatever the
-//!   sponsor typed, and a return carrying another `state` is refused;
+//!   sponsor typed, with permissions that follow the credential's rule, and
+//!   a return carrying another `state` is refused;
 //! * every ask the adapter supports is answered from the material in the
 //!   slot, and the authorization never prints its token;
 //! * an ask the adapter does not support is refused as unsupported before
@@ -17,14 +18,16 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lobby_contracts::{
-    AuthorizationAsk, CredentialAdapter, MaterialSlot, Outcome, SealedMaterial, SignInRequest,
-    SignInReturn, SignInStart,
+    AuthorizationAsk, Credential, CredentialAdapter, MaterialSlot, Outcome, SealedMaterial,
+    SignInRequest, SignInReturn, SignInStart,
 };
 
 /// What the credential suite needs from a provider's fake.
 pub trait CredentialFixture {
     /// What the sponsor types to start a sign-in with this provider.
     fn hint(&self) -> String;
+    /// An account the provider knows, in the form the adapter reports it.
+    fn account(&self) -> String;
     /// Makes the provider authenticate `account` on the next sign-in.
     fn approve_as(&self, account: &str);
     /// Follows the browser from `start` until the provider sends it back to
@@ -76,7 +79,8 @@ pub fn run(adapter: &dyn CredentialAdapter, fixture: &dyn CredentialFixture) {
     };
 
     // A sign-in records the account the provider authenticated.
-    fixture.approve_as("conformance-holder");
+    let account = fixture.account();
+    fixture.approve_as(&account);
     let start = adapter.begin_sign_in(&request).expect("a sign-in starts");
     let query = fixture.browse(&start);
     let forged = SignInReturn {
@@ -102,8 +106,13 @@ pub fn run(adapter: &dyn CredentialAdapter, fixture: &dyn CredentialFixture) {
         .expect("the sign-in completes");
     assert_eq!(
         signed.account.as_str(),
-        "conformance-holder",
+        account,
         "the account is the one the provider authenticated"
+    );
+    assert!(
+        Credential::permissions_are_valid(&signed.permissions),
+        "{:?} follow the rule",
+        signed.permissions
     );
 
     // Every supported ask is answered from the slot's material.

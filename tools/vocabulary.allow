@@ -17,3 +17,5 @@ crates/daemon/src/http/feed_body.rs	identifiers	Implementing hyper's Body names 
 crates/daemon/src/http/feed_body.rs	context	Implementing hyper's Body names the standard library's std::task::Context; it is no lobby handle.
 crates/conformance/src/host.rs	session	The scenario asserts that this word never reaches a mind's tool list.
 crates/conformance/src/host.rs	context	The scenario asserts that this word never reaches a mind's tool list.
+crates/conformance/Cargo.toml	provider-atproto	The conformance suite's tests hold the atproto credential adapter to its contract.
+crates/conformance/tests/atproto_credential.rs	provider-atproto	The credential suite runs against the atproto adapter and the test kit's fake of its provider.

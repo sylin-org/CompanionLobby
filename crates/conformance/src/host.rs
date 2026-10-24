@@ -31,6 +31,7 @@ pub struct Install {
     exe: PathBuf,
     home: TempHome,
     port: u16,
+    extra: Vec<(&'static str, String)>,
 }
 
 impl Install {
@@ -40,7 +41,21 @@ impl Install {
             exe: exe.to_path_buf(),
             home: TempHome::new(label),
             port: free_port(),
+            extra: Vec::new(),
         }
+    }
+
+    /// The same install, run with the environment variable `name` set to
+    /// `value` as well.
+    #[must_use]
+    pub fn with_env(mut self, name: &'static str, value: &str) -> Self {
+        self.extra.push((name, value.to_owned()));
+        self
+    }
+
+    /// The port the daemon listens on.
+    pub fn port(&self) -> u16 {
+        self.port
     }
 
     /// The data directory.
@@ -49,14 +64,18 @@ impl Install {
     }
 
     fn environment(&self) -> Vec<(&'static str, String)> {
-        vec![
+        let mut environment = vec![
             ("LOBBY_DATA_DIR", self.dir().to_string_lossy().into_owned()),
             ("LOBBY_PORT", self.port.to_string()),
             ("LOBBY_NO_BROWSER", "1".to_owned()),
-        ]
+        ];
+        environment.extend(self.extra.iter().cloned());
+        environment
     }
 
-    fn command(&self, arguments: &[&str]) -> Output {
+    /// Runs `companion-lobby` with `arguments` and this install's
+    /// environment, and returns what it did.
+    pub fn command(&self, arguments: &[&str]) -> Output {
         let mut command = Command::new(&self.exe);
         command.args(arguments).stdin(Stdio::null());
         for (name, value) in self.environment() {
@@ -85,7 +104,8 @@ impl Install {
         );
     }
 
-    fn running(&self) -> bool {
+    /// Whether a daemon answers on this install's port.
+    pub fn running(&self) -> bool {
         matches!(contact::probe(self.port), Probe::Lobby(_))
     }
 
@@ -271,16 +291,18 @@ impl Drop for Install {
     }
 }
 
-fn body(answer: &Answer) -> Value {
+/// An answer's body as JSON, or `null`.
+pub fn body(answer: &Answer) -> Value {
     serde_json::from_slice(&answer.body).unwrap_or(Value::Null)
 }
 
-fn text(answer: &Answer) -> String {
+/// An answer's body as text.
+pub fn text(answer: &Answer) -> String {
     String::from_utf8_lossy(&answer.body).into_owned()
 }
 
 /// The origin and the path and query of an `http://` URL.
-fn split_url(url: &str) -> (Address, String) {
+pub fn split_url(url: &str) -> (Address, String) {
     let rest = url.strip_prefix("http://").expect("an http URL");
     let slash = rest.find('/').unwrap_or(rest.len());
     let origin = Address::parse(
