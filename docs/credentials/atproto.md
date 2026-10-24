@@ -83,7 +83,9 @@ reaches the state file, a projection, the journal, the trace log or a page.
 
 An account belongs to one companion. Revoking the credential keeps it as
 history and keeps the account reserved to that companion; signing the
-companion in again makes a new credential.
+companion in again makes a new credential. Removing the companion deletes
+its credentials and their material here; the grant at the provider stays
+until the sponsor revokes the app's access in the provider's settings.
 
 ## Permissions
 
