@@ -1,0 +1,15 @@
+[package]
+name = "lobby-testkit"
+description = "Wire fakes, fixtures and synthetic adapters for Companion Lobby tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+lobby-contracts.workspace = true
+
+[lints]
+workspace = true

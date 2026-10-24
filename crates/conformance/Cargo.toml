@@ -1,0 +1,17 @@
+[package]
+name = "lobby-conformance"
+description = "The executable specification of the Companion Lobby adapter contracts and daemon."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+lobby-contracts.workspace = true
+lobby-daemon.workspace = true
+lobby-testkit.workspace = true
+
+[lints]
+workspace = true

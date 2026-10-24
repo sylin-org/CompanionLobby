@@ -1,0 +1,14 @@
+# Justified exceptions to tools/vocabulary.rules.
+#
+# One exception per line, three tab-separated fields:
+#   path           a file path relative to the repository root, with forward slashes
+#   rule           the id of the rule that does not apply to that file
+#   justification  one line saying why; an entry without one fails the lint
+#
+# Lines starting with # and blank lines are ignored.
+
+crates/daemon/Cargo.toml	provider-tangent	The daemon composes the compiled-in service adapter and depends on its crate.
+crates/daemon/Cargo.toml	provider-atproto	The daemon composes the compiled-in credential adapter and depends on its crate.
+docs/adr/0001-seven-nouns.md	provider-tangent	The founding ADR names the first service adapter, its crate and the ship line.
+docs/adr/0001-seven-nouns.md	provider-atproto	The founding ADR names the first credential adapter, its crate and the owner's account kind.
+docs/adr/0001-seven-nouns.md	provider-bluesky	The founding ADR names the second service adapter that follows the ship line.

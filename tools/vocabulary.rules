@@ -1,0 +1,36 @@
+# Vocabulary rules for tools/vocabulary.ps1 and tools/vocabulary.sh.
+#
+# One rule per line, four tab-separated fields:
+#   id      a short name, used by tools/vocabulary.allow
+#   case    i (case-insensitive) or s (case-sensitive)
+#   regex   a ripgrep (Rust regex) pattern; write a double quote as \x22
+#   allowed comma-separated globs where the rule does not apply, or -
+#
+# Lines starting with # and blank lines are ignored. Fields never contain tabs.
+
+connector	i	connector	-
+hub	i	\bhub\b	-
+enrollment	i	enrol	-
+sign-in-verbs	i	\b(re|un)-?bind(s|ing|ed)?\b|\bbind flight|\bbindings?\b	-
+disconnect	i	\bdisconnect	-
+forget	i	\bforget	-
+caller	i	\bcallers?\b|CallerId	-
+activity	i	\bactivit(y|ies)\b	-
+diagnostics	i	\bdiagnostics?\b	-
+session	i	\bsessions?\b	crates/credentials/atproto/**
+context	i	\bcontext\b	-
+phrases	i	companion manager|manager verb|serve mode|standalone manager|lock file|server card|forum ring|core four|moniker selection|persona resolution|connect again|enroll again|re-bind|tangent_9f01|--force	-
+identifiers	s	\b(Hub|CONNECTOR_PRODUCT|Forum[A-Za-z_]*|Context|ContextId|contextId|context_expired|belongs_to|IntakeChannel|CredentialBinding|BindingStatus|binding_for_slot|DormantGrant|effective_grants|dormant_grants|grant_revision|session_generation|SessionProvenance|Place|PlaceKind|ServerCard|server_cards?|ParticipationProblem|participant_ref|ExperienceError|UreqExperience|RequestContext|AuthAdapter|CredentialBroker|AuthorizationIntent|BindStart|BindFlight|BindTarget|BindOutcome|PendingConnect|PendingSignIn|DataDirLock|holder_of|STANDALONE_MANAGER|ToolOutcome|DELIVERY_MODE|tool_response_only|ActivityRecord|ActivityKind|OperatorCondition|ConditionKind|DomainEvent|StreamSnapshot|ReplayResult|OAuthTokens|AccountSession|TangentAscii|TangentAtmosphere|TANGENT_MANAGER_STYLE|TANGENT_ATMOSPHERE|OwnershipReservation|acceptable_origin|valid_identifier)\b	-
+crate-names	i	companion[-_]core|adapter-auth-atproto|adapter-service-tangent|crates/cli\b|\bcompanion_lobby\b|cred_atproto_	-
+tombstone	i	\btombstones?\b	-
+file-names	i	\b(hub|forum|intake|participation|session|boundary|poller|perspective|operations|diagnostics|refs|lockfile)\.rs\b|manager\.html|atmosphere\.(css|js)|ascii-scenes\.js	-
+tool-names	s	\b(ListCompanions|WhoAmI|CatchUp|Service_Invoke|deliveryMode|enrollmentId)\b|\x22Connect\x22	-
+epics	s	\bEPICS?\b|EPIC-\d	-
+legacy	i	\bledgers?\b|\blease\b|red[ -]team|workstream|\bPA02\b|ADR 000[23]|supersed|\blegacy\b|\bformerly\b|renamed from|was previously|no longer|as before|\btoday\b|\bcurrently\b|half-migrated|boundary recovery|recovery zip|schemaVersion 3|\bv[23] state\b|harvest|docs/epics|serde\(alias|contract \x{00A7}	-
+stale-files	i	state\.json|\.bak\b|credential-quarantine|profile-media	-
+environment	s	COMPANION_LOBBY_[A-Z_]+|NEXT_PAGE_PORT	-
+markers	s	\b(TODO|FIXME|XXX)\b	-
+provider-tangent	i	tangent	crates/services/tangent/**,docs/services/tangent.md
+provider-atproto	i	atproto|\bbsky\b|did:plc|did:web	crates/credentials/atproto/**,crates/services/bluesky/**,crates/testkit/**,docs/credentials/atproto.md,docs/services/bluesky.md
+provider-atproto-wire	s	\bDPoP\b|\bPDS\b	crates/credentials/atproto/**,crates/services/bluesky/**,crates/testkit/**,docs/credentials/atproto.md,docs/services/bluesky.md
+provider-bluesky	i	bluesky	crates/services/bluesky/**,docs/services/bluesky.md

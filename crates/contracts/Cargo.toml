@@ -1,0 +1,11 @@
+[package]
+name = "lobby-contracts"
+description = "The seven nouns of Companion Lobby and the two adapter contracts, with no I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

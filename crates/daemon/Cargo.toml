@@ -1,0 +1,28 @@
+[package]
+name = "lobby-daemon"
+description = "The Companion Lobby daemon and the companion-lobby command."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "lobby_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "companion-lobby"
+path = "src/main.rs"
+
+[dependencies]
+lobby-contracts.workspace = true
+lobby-outbound.workspace = true
+lobby-credential-atproto.workspace = true
+lobby-service-tangent.workspace = true
+
+[dev-dependencies]
+lobby-testkit.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/contracts",
+    "crates/outbound",
+    "crates/testkit",
+    "crates/credentials/atproto",
+    "crates/services/tangent",
+    "crates/daemon",
+    "crates/conformance",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/sylin-org/CompanionLobby"
+
+# Every dependency, internal or external, is declared here once with an exact
+# version; member manifests refer to it with `workspace = true`.
+[workspace.dependencies]
+lobby-contracts = { path = "crates/contracts" }
+lobby-outbound = { path = "crates/outbound" }
+lobby-testkit = { path = "crates/testkit" }
+lobby-credential-atproto = { path = "crates/credentials/atproto" }
+lobby-service-tangent = { path = "crates/services/tangent" }
+lobby-daemon = { path = "crates/daemon" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+panic = "abort"
