@@ -127,14 +127,10 @@ pub struct DaemonRecord {
 }
 
 impl DaemonRecord {
-    /// Writes the record atomically: a temporary file, then a rename.
+    /// Writes the record atomically.
     pub fn write(&self, dir: &Path) -> io::Result<()> {
-        let temporary = dir.join(format!("{RECORD_FILE}.{}.tmp", std::process::id()));
         let bytes = serde_json::to_vec(self).map_err(io::Error::other)?;
-        std::fs::write(&temporary, bytes)?;
-        std::fs::rename(&temporary, record_path(dir)).inspect_err(|_| {
-            let _ = std::fs::remove_file(&temporary);
-        })
+        crate::store::atomic_write(&record_path(dir), &bytes)
     }
 
     /// Reads the record, if one exists and parses.

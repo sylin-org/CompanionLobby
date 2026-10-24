@@ -253,15 +253,11 @@ fn first_foreign_entry(path: &Path) -> io::Result<Option<String>> {
 
 /// Whether `name` is a file the lobby itself writes in the data directory.
 fn is_lobby_file(name: &str) -> bool {
+    use crate::journal::is_journal_file;
     use crate::keyring::ATTACH_SECRET_FILE;
     use crate::lock::{INSTANCE_FILE, LOCK_FILE, RECORD_FILE};
+    use crate::store::{STATE_FILE, is_temporary_of};
     use crate::trace::{TRACE_FILE, TRACE_PREVIOUS};
-    let temporary = |file: &str| {
-        name.strip_prefix(file)
-            .and_then(|rest| rest.strip_prefix('.'))
-            .and_then(|rest| rest.strip_suffix(".tmp"))
-            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()))
-    };
     [
         ATTACH_SECRET_FILE,
         LOCK_FILE,
@@ -269,10 +265,13 @@ fn is_lobby_file(name: &str) -> bool {
         RECORD_FILE,
         TRACE_FILE,
         TRACE_PREVIOUS,
+        STATE_FILE,
     ]
     .contains(&name)
-        || temporary(ATTACH_SECRET_FILE)
-        || temporary(RECORD_FILE)
+        || is_journal_file(name)
+        || [ATTACH_SECRET_FILE, RECORD_FILE, STATE_FILE]
+            .iter()
+            .any(|file| is_temporary_of(name, file))
 }
 
 /// A path as an operator should read it: on Windows, without the `\\?\` or
@@ -400,7 +399,10 @@ mod tests {
             "attach.secret",
             "daemon.lock",
             "trace.log",
-            "daemon.json.42.tmp",
+            "daemon.json.42-7.tmp",
+            "lobby.json",
+            "journal.jsonl",
+            "journal.4.jsonl",
         ] {
             std::fs::write(dir.join(name), b"x").expect("file");
         }
@@ -423,7 +425,14 @@ mod tests {
 
     #[test]
     fn a_shared_directory_holding_other_files_is_refused_untouched() {
-        for stranger in ["notes.txt", "daemon.json.tmp", "attach.secret.x.tmp"] {
+        for stranger in [
+            "notes.txt",
+            "daemon.json.tmp",
+            "daemon.json.42.tmp",
+            "attach.secret.x.tmp",
+            "journal.5.jsonl",
+            "lobby.json.old",
+        ] {
             let dir = temp_dir("foreign");
             std::fs::write(dir.join("trace.log"), b"x").expect("file");
             std::fs::write(dir.join(stranger), b"x").expect("file");
