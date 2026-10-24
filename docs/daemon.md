@@ -23,7 +23,8 @@ sealed with DPAPI. Sealing arrives with credential material, and
 | File | Written by | What it holds |
 | --- | --- | --- |
 | `attach.secret` | the daemon, once per install | 32 random bytes as 64 hex digits. The shim presents it once per attachment, when it attaches. |
-| `daemon.lock` | the daemon | Nothing; the daemon holds an exclusive OS lock on it for its whole life. The OS releases it when the process dies. |
+| `daemon.instance` | the daemon | Nothing; its exclusive OS lock decides which daemon runs. A start that finds it held refuses at once. Nothing else touches it. |
+| `daemon.lock` | the daemon | Nothing; the running daemon holds an exclusive OS lock on it, and the shim, `open` and `stop` learn whether a daemon runs by taking it for an instant. The daemon waits out such a probe when it starts. The OS releases both locks when the process dies. |
 | `daemon.json` | the lock holder | `pid`, `port` and `buildId` of the process holding the lock. Read only while the lock is held. |
 | `trace.log`, `trace.1.log` | the daemon | Its own operational log: start, stop, refusals, attachments, panics. Rotated at 1 MiB, two generations. No secrets, no content. |
 
@@ -135,7 +136,8 @@ failure is reported to the mind as it is, without a new attachment: a 413 as
 invalid parameters, a 503 as "busy, try again", and a connection that failed
 after the frame was sent as a call that may or may not have happened.
 
-The shim has 10 seconds to find or start the daemon. It reads frames of at
+The shim has 10 seconds to find, start or restart the daemon, one budget for
+all of it, because the host is waiting for its first answer. It reads frames of at
 most 8 MiB, answers a line that is not JSON with a local parse error (-32700)
 and goes on, and stops after an oversized frame. A frame over the daemon's
 1 MiB body limit is answered locally with invalid parameters (-32602) and is

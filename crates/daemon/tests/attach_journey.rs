@@ -1011,3 +1011,37 @@ fn stop_lets_a_request_still_arriving_finish_before_the_daemon_exits() {
     assert!(String::from_utf8_lossy(&stopped.stdout).contains("stopped"));
     assert!(!lobby_daemon::lock::is_held(&install.dir()).expect("lock probe"));
 }
+
+#[test]
+fn hosts_that_start_at_once_on_a_cold_install_meet_one_daemon() {
+    let install = Install::new("cold");
+    // Three hosts launch their shims at the same moment; nothing runs yet.
+    let mut shims: Vec<Peer> = (0..3).map(|_| install.attach("ada")).collect();
+    for shim in &mut shims {
+        let status = shim
+            .wait_exit(Duration::from_secs(30))
+            .expect("the shim exits");
+        assert_eq!(status.code(), Some(1));
+        // Refused only because a fresh daemon has no companions: each shim
+        // found, verified and reached the one daemon.
+        let stderr = shim.stderr_text();
+        assert!(stderr.contains("cannot attach as ada"), "stderr: {stderr}");
+    }
+    let document = install.discovery().expect("a daemon runs");
+    let trace = std::fs::read_to_string(install.dir().join("trace.log")).expect("trace.log");
+    let listening: Vec<&str> = trace
+        .lines()
+        .filter(|line| line.contains("listening on"))
+        .collect();
+    assert_eq!(listening.len(), 1, "{trace}");
+    let record = lobby_daemon::lock::DaemonRecord::read(&install.dir()).expect("record");
+    assert_eq!(record.pid, document.lock_holder_pid);
+    let stopped = install.stop();
+    assert!(
+        stopped.status.success(),
+        "{}
+{}",
+        String::from_utf8_lossy(&stopped.stderr),
+        std::fs::read_to_string(install.dir().join("trace.log")).unwrap_or_default()
+    );
+}

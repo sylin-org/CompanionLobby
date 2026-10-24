@@ -78,7 +78,9 @@ pub fn probe_within(port: u16, timeout: Duration) -> Probe {
     }
 }
 
-/// Finds, starts or restarts the daemon for `dir` on `port`, within `budget`.
+/// Finds, starts or restarts the daemon for `dir` on `port`. Everything,
+/// a restart included, happens within `budget`, which is what a host waits
+/// for its first answer.
 pub fn ensure(dir: &Path, port: u16, budget: Duration) -> Result<Daemon, String> {
     let deadline = Instant::now() + budget;
     let own_build =
@@ -104,15 +106,16 @@ pub fn ensure(dir: &Path, port: u16, budget: Duration) -> Result<Daemon, String>
             discovery: document,
         });
     }
-    // A verified daemon of another build: replace it with this one.
+    // A verified daemon of another build: replace it with this one, within
+    // the same budget, because the host is waiting for its first answer.
     request_stop(port)?;
-    if !wait_released(dir, STOP_WAIT) {
+    if !wait_released(dir, deadline.saturating_duration_since(Instant::now())) {
         return Err(format!(
-            "the daemon on 127.0.0.1:{port} runs another build and did not stop when asked"
+            "the daemon on 127.0.0.1:{port} runs another build and did not stop in time; start this MCP server again"
         ));
     }
     start(dir, port).map_err(|error| format!("cannot start the daemon: {error}"))?;
-    let document = wait_for(port, deadline.max(Instant::now() + budget))?;
+    let document = wait_for(port, deadline)?;
     let secret = verify(dir, port, &document)?;
     if document.build_id != own_build {
         return Err(format!(
