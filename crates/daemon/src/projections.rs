@@ -28,7 +28,7 @@ use lobby_contracts::{
 use serde_json::{Map, Value, json};
 use tokio::sync::broadcast;
 
-use crate::domain::{CompanionView, Event};
+use crate::domain::{CompanionView, Event, SignInView};
 use crate::journal;
 
 /// The name of the one tool every attachment has.
@@ -191,6 +191,17 @@ pub fn credential_json(credential: &Credential) -> Value {
     })
 }
 
+/// A sign-in as the manager page follows it. Its `state` never shows.
+pub fn sign_in_json(sign_in: &SignInView) -> Value {
+    json!({
+        "id": sign_in.id,
+        "companion": sign_in.companion.to_string(),
+        "kind": sign_in.kind.as_str(),
+        "status": sign_in.status.code(),
+        "expiresAt": sign_in.expires_at,
+    })
+}
+
 /// A connection as the manager page shows it. What the service issued for
 /// it never is.
 pub fn connection_json(connection: &Connection) -> Value {
@@ -246,6 +257,9 @@ pub fn event_json(event: &Event, store_id: &str, command: &str) -> Value {
         Event::CompanionRemoved(id) => json!({ "kind": "companion_removed", "id": id.to_string() }),
         Event::CredentialChanged(credential) => {
             json!({ "kind": "credential", "credential": credential_json(credential) })
+        }
+        Event::SignInChanged(sign_in) => {
+            json!({ "kind": "sign_in", "signIn": sign_in_json(sign_in) })
         }
         Event::ConnectionChanged(connection) => {
             json!({ "kind": "connection", "connection": connection_json(connection) })

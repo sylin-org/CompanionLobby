@@ -50,7 +50,13 @@
 //! A credential exists only because its adapter completed a sign-in the
 //! sponsor started: a companion holds at most one ready credential of a
 //! provider kind, and an account belongs to one companion, which keeps it
-//! after the credential is revoked. A connection exists only because its
+//! after the credential is revoked; signing the companion in again creates a
+//! new credential and the revoked one stays as history. A companion waits on
+//! at most one sign-in of a kind at a time: a second is refused before its
+//! adapter is asked to start anything. The sponsor follows a sign-in by an
+//! id of its own, never by the `state` the provider carries back, and may
+//! cancel it while it waits; one that waits past its time expires, and a
+//! return for a cancelled or expired sign-in signs nothing in. A connection exists only because its
 //! service adapter established it with a credential of its companion.
 //! Revoking a credential revokes every connection made from it in the same
 //! commit, under one journal entry, and deletes what they keep.
@@ -65,8 +71,8 @@ use lobby_contracts::{
     Address, Attachment, AttachmentId, Companion, CompanionId, Connection, ConnectionId,
     ConnectionState, Credential, CredentialAdapter, CredentialId, CredentialState, DisplayName,
     Initiator, JournalEntry, JournalKind, Label, Moniker, NameProblem, Outcome, ProviderKind,
-    SealedMaterial, ServiceAdapter, ServiceName, SignInRequest, SignInReturn, SignInStart, Sponsor,
-    ToolArguments, ToolResult,
+    SealedMaterial, ServiceAdapter, ServiceName, SignInRequest, SignInReturn, SignInStart,
+    SignedIn, Sponsor, ToolArguments, ToolResult,
 };
 use serde_json::{Map, Value};
 use tokio::sync::watch;
@@ -84,6 +90,52 @@ use crate::trace;
 pub const SIGN_IN_TIME_LIMIT: Duration = Duration::from_secs(10 * 60);
 /// How many sign-ins the lobby waits on at once; the oldest gives way.
 pub const SIGN_INS_WAITING: usize = 32;
+/// How many ended sign-ins the lobby remembers, to say why a late return
+/// signs nothing in.
+pub const SIGN_INS_REMEMBERED: usize = 64;
+
+/// Where a sign-in the lobby started stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignInStatus {
+    /// Waiting for the provider to send the browser back.
+    Pending,
+    /// The provider sent it back and the credential was created.
+    SignedIn,
+    /// The sponsor cancelled it.
+    Cancelled,
+    /// It waited past its time.
+    Expired,
+    /// The return did not prove the sign-in, or the lobby refused it.
+    Refused,
+}
+
+impl SignInStatus {
+    /// The stable wire name.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::SignedIn => "signed_in",
+            Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
+            Self::Refused => "refused",
+        }
+    }
+}
+
+/// A sign-in as the sponsor follows it. Its `state` never shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignInView {
+    /// The id the sponsor follows it by: 32 hex digits.
+    pub id: String,
+    /// The companion being signed in.
+    pub companion: CompanionId,
+    /// The provider kind.
+    pub kind: ProviderKind,
+    /// Where it stands.
+    pub status: SignInStatus,
+    /// When it expires, in milliseconds since the Unix epoch.
+    pub expires_at: u64,
+}
 
 /// Why a command was refused, with the lobby's own words for the sponsor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +197,8 @@ pub enum Event {
     CompanionRemoved(CompanionId),
     /// A credential was signed in or revoked.
     CredentialChanged(Credential),
+    /// A sign-in started, ended or changed where it stands.
+    SignInChanged(SignInView),
     /// A connection was established or revoked.
     ConnectionChanged(Connection),
     /// An entry reached the journal.
@@ -187,6 +241,8 @@ pub struct Snapshot {
     pub credentials: Vec<Credential>,
     /// Every connection, oldest first.
     pub connections: Vec<Connection>,
+    /// Every sign-in the lobby waits on, oldest first.
+    pub sign_ins: Vec<SignInView>,
     /// The store id that names the journal.
     pub store_id: String,
     /// The live feed's epoch.
@@ -209,10 +265,24 @@ struct Live {
 
 /// A sign-in the lobby started and waits to see come back.
 struct Awaited {
+    id: String,
     companion: CompanionId,
     kind: ProviderKind,
     request: SignInRequest,
     started: Instant,
+    expires_at: u64,
+}
+
+impl Awaited {
+    fn view(&self, status: SignInStatus) -> SignInView {
+        SignInView {
+            id: self.id.clone(),
+            companion: self.companion,
+            kind: self.kind.clone(),
+            status,
+            expires_at: self.expires_at,
+        }
+    }
 }
 
 struct Core {
@@ -220,6 +290,10 @@ struct Core {
     journal: Journal,
     attachments: HashMap<AttachmentId, Live>,
     awaited: HashMap<String, Awaited>,
+    /// Sign-ins whose adapter is starting them, with nothing parked yet.
+    starting: Vec<(CompanionId, ProviderKind)>,
+    /// Sign-ins that ended, by their `state`, newest last.
+    ended: VecDeque<(String, SignInView)>,
     journal_healthy: bool,
     events: VecDeque<Event>,
 }
@@ -231,6 +305,7 @@ pub struct Lobby {
     command: String,
     dir: PathBuf,
     registry: Registry,
+    sign_in_limit: Duration,
 }
 
 /// The fixed names commands carry in the journal.
@@ -242,6 +317,7 @@ const DETACH: &str = "detach";
 const RENEW_ATTACH_SECRET: &str = "renew_attach_secret";
 const BEGIN_SIGN_IN: &str = "begin_sign_in";
 const COMPLETE_SIGN_IN: &str = "complete_sign_in";
+const CANCEL_SIGN_IN: &str = "cancel_sign_in";
 const REVOKE_CREDENTIAL: &str = "revoke_credential";
 const GRANT_CONNECTION: &str = "grant_connection";
 const REVOKE_CONNECTION: &str = "revoke_connection";
@@ -305,6 +381,8 @@ impl Lobby {
                 journal,
                 attachments: HashMap::new(),
                 awaited: HashMap::new(),
+                starting: Vec::new(),
+                ended: VecDeque::new(),
                 journal_healthy: true,
                 events: VecDeque::new(),
             }),
@@ -312,7 +390,15 @@ impl Lobby {
             command: command.to_owned(),
             dir: dir.to_path_buf(),
             registry,
+            sign_in_limit: SIGN_IN_TIME_LIMIT,
         })
+    }
+
+    /// The same lobby, waiting `limit` for a sign-in to come back.
+    #[must_use]
+    pub fn with_sign_in_limit(mut self, limit: Duration) -> Self {
+        self.sign_in_limit = limit;
+        self
     }
 
     fn core(&self) -> MutexGuard<'_, Core> {
@@ -550,7 +636,15 @@ impl Lobby {
             for file in kept {
                 self.discard(&file);
             }
-            core.awaited.retain(|_, awaited| awaited.companion != id);
+            let waiting: Vec<String> = core
+                .awaited
+                .iter()
+                .filter(|(_, awaited)| awaited.companion == id)
+                .map(|(state, _)| state.clone())
+                .collect();
+            for state in waiting {
+                core.end_sign_in(&state, SignInStatus::Cancelled);
+            }
             core.events.push_back(Event::CompanionRemoved(id));
             Ok(attached)
         })
@@ -656,16 +750,20 @@ impl Lobby {
 
     /// Starts signing `companion` in with the provider `kind`, as the sponsor
     /// asked with `hint`. `origin` is the lobby's own origin, where the
-    /// provider sends the browser back. Returns where the browser goes.
+    /// provider sends the browser back. Refused while the companion already
+    /// waits on a sign-in of that kind, before the adapter starts anything.
+    /// Returns the sign-in and where the browser goes.
     pub fn begin_sign_in(
         &self,
         companion: CompanionId,
         kind: &str,
         hint: &str,
         origin: &str,
-    ) -> Result<SignInStart, Refusal> {
+    ) -> Result<(SignInView, SignInStart), Refusal> {
         let subject = Subject::new(Initiator::Sponsor, Some(companion), BEGIN_SIGN_IN);
+        let limit = self.sign_in_limit;
         let (adapter, kind) = self.run(|core| {
+            core.prune_awaited(limit);
             let validated = (|| {
                 core.store
                     .state()
@@ -673,10 +771,12 @@ impl Lobby {
                     .ok_or_else(|| Refusal::new(Outcome::NotFound, "No companion has that id."))?;
                 let (adapter, kind) = self.credential_adapter(kind)?;
                 core.no_ready_credential(companion, &kind)?;
+                core.no_sign_in_waiting(companion, &kind)?;
                 Ok((adapter, kind))
             })();
             let found = validated.map_err(|refusal| core.refused_as(&subject, refusal))?;
             core.begin_as(&subject)?;
+            core.starting.push((companion, found.1.clone()));
             Ok(found)
         })?;
         let state = keyring::random_token();
@@ -693,58 +793,96 @@ impl Lobby {
                     .begin_sign_in(&request)
                     .map(|start| (start, request))
             });
-        self.run(|core| match started {
-            Ok((start, request)) => {
-                core.prune_awaited();
-                core.awaited.insert(
-                    request.state.clone(),
-                    Awaited {
+        self.run(|core| {
+            core.starting
+                .retain(|(waiting, of)| !(*waiting == companion && *of == kind));
+            match started {
+                Ok((start, request)) => {
+                    core.prune_awaited(limit);
+                    let awaited = Awaited {
+                        id: uuid::Uuid::now_v7().simple().to_string(),
                         companion,
                         kind,
                         request,
                         started: Instant::now(),
-                    },
-                );
-                core.settle_as(&subject, Outcome::Done);
-                Ok(start)
-            }
-            Err(outcome) => {
-                core.settle_as(&subject, outcome);
-                Err(match outcome {
-                    Outcome::InvalidInput => Refusal::new(
-                        outcome,
-                        "The provider cannot start a sign-in from what was typed; check it and try again.",
-                    ),
-                    other => Refusal::from_adapter(other),
-                })
+                        expires_at: epoch_millis().saturating_add(limit.as_millis() as u64),
+                    };
+                    let view = awaited.view(SignInStatus::Pending);
+                    core.awaited.insert(awaited.request.state.clone(), awaited);
+                    core.settle_as(&subject, Outcome::Done);
+                    core.events.push_back(Event::SignInChanged(view.clone()));
+                    Ok((view, start))
+                }
+                Err(outcome) => {
+                    core.settle_as(&subject, outcome);
+                    Err(begin_refusal(outcome))
+                }
             }
         })
     }
 
+    /// Cancels the sign-in `id` while it waits; a return for it afterwards
+    /// signs nothing in.
+    pub fn cancel_sign_in(&self, id: &str) -> Result<SignInView, Refusal> {
+        let limit = self.sign_in_limit;
+        self.run(|core| {
+            core.prune_awaited(limit);
+            let found = core
+                .awaited
+                .iter()
+                .find(|(_, awaited)| awaited.id == id)
+                .map(|(state, awaited)| (state.clone(), awaited.companion));
+            let Some((state, companion)) = found else {
+                return Err(core.refused_as(
+                    &Subject::new(Initiator::Sponsor, None, CANCEL_SIGN_IN),
+                    Refusal::new(
+                        Outcome::NotFound,
+                        "No sign-in with that id is waiting; it may have ended already.",
+                    ),
+                ));
+            };
+            let subject = Subject::new(Initiator::Sponsor, Some(companion), CANCEL_SIGN_IN);
+            core.begin_as(&subject)?;
+            let view = core.end_sign_in(&state, SignInStatus::Cancelled);
+            core.settle_as(&subject, Outcome::Done);
+            view.ok_or_else(gone)
+        })
+    }
+
     /// Completes a sign-in of the provider `kind` from what the provider sent
-    /// back to the return route. A return the lobby is not waiting for is
-    /// refused without a journal entry: nothing proves who sent it.
+    /// back to the return route. The sign-in ends whatever its adapter says:
+    /// it is used once. A return the lobby is not waiting for is refused
+    /// without a journal entry: nothing proves who sent it.
     pub fn complete_sign_in(
         &self,
         kind: &str,
         query: Vec<(String, String)>,
     ) -> Result<Credential, Refusal> {
         let returned = SignInReturn { query };
-        let awaited = self.run(|core| {
-            core.prune_awaited();
-            let awaited = returned
-                .get("state")
-                .and_then(|state| core.awaited.remove(state))
-                .filter(|awaited| awaited.kind.as_str() == kind)
-                .ok_or_else(|| {
-                    Refusal::new(
-                        Outcome::NotFound,
-                        "The lobby is not waiting for this sign-in; start it again on the manager page.",
-                    )
-                })?;
-            let subject = Subject::new(Initiator::Sponsor, Some(awaited.companion), COMPLETE_SIGN_IN);
-            core.begin_as(&subject)?;
-            Ok(awaited)
+        let limit = self.sign_in_limit;
+        let (state, awaited) = self.run(|core| {
+            core.prune_awaited(limit);
+            let state = returned.get("state").unwrap_or_default().to_owned();
+            if !core
+                .awaited
+                .get(&state)
+                .is_some_and(|awaited| awaited.kind.as_str() == kind)
+            {
+                return Err(core.why_not_waiting(&state));
+            }
+            let awaited = core.awaited.remove(&state).ok_or_else(gone)?;
+            let subject = Subject::new(
+                Initiator::Sponsor,
+                Some(awaited.companion),
+                COMPLETE_SIGN_IN,
+            );
+            if let Err(refusal) = core.begin_as(&subject) {
+                core.awaited.insert(state, awaited);
+                return Err(refusal);
+            }
+            core.starting
+                .push((awaited.companion, awaited.kind.clone()));
+            Ok((state, awaited))
         })?;
         let subject = Subject::new(
             Initiator::Sponsor,
@@ -756,60 +894,82 @@ impl Lobby {
             None => Err(Outcome::Unsupported),
         };
         self.run(|core| {
-            let signed = signed.map_err(|outcome| {
-                core.settle_as(&subject, outcome);
-                Refusal::from_adapter(outcome)
-            })?;
-            let state = core.store.state();
-            let checked = if !Credential::permissions_are_valid(&signed.permissions) {
-                Err(Refusal::new(
-                    Outcome::Internal,
-                    "The provider's adapter reported permissions the lobby cannot keep, so nothing was signed in.",
-                ))
-            } else if state.companion(awaited.companion).is_none() {
-                Err(Refusal::new(
-                    Outcome::NotFound,
-                    "The companion was removed while it was signing in.",
-                ))
-            } else if state.credentials.iter().any(|credential| {
-                credential.kind == awaited.kind
-                    && credential.account == signed.account
-                    && credential.companion != awaited.companion
-            }) {
-                Err(Refusal::new(
-                    Outcome::Conflict,
-                    "That account is signed in for another companion; an account belongs to one companion.",
-                ))
+            core.starting
+                .retain(|(waiting, of)| !(*waiting == awaited.companion && *of == awaited.kind));
+            let landed = self.land_sign_in(core, &subject, &awaited, signed);
+            let status = if landed.is_ok() {
+                SignInStatus::SignedIn
             } else {
-                core.no_ready_credential(awaited.companion, &awaited.kind)
+                SignInStatus::Refused
             };
-            checked.inspect_err(|refusal| core.settle_as(&subject, refusal.outcome))?;
-            let credential = Credential {
-                id: CredentialId::from_u128(new_id()),
-                companion: awaited.companion,
-                kind: awaited.kind.clone(),
-                account: signed.account,
-                permissions: signed.permissions,
-                state: CredentialState::Ready,
-            };
-            if let Err(error) = keyring::write_material(&self.dir, credential.id, &signed.material) {
-                trace::line(&format!("the material of a new credential could not be kept: {error}"));
-                core.settle_as(&subject, Outcome::TemporarilyUnavailable);
-                return Err(Refusal::new(
-                    Outcome::TemporarilyUnavailable,
-                    "The lobby could not keep the new credential, so nothing was signed in; try again.",
-                ));
-            }
-            let mut next = core.store.state().clone();
-            next.credentials.push(credential.clone());
-            if let Err(refusal) = core.land_as(&subject, next) {
-                self.discard(&keyring::material_file(credential.id));
-                return Err(refusal);
-            }
-            core.events
-                .push_back(Event::CredentialChanged(credential.clone()));
-            Ok(credential)
+            core.remember_ended(&state, awaited.view(status));
+            landed
         })
+    }
+
+    /// Checks what the adapter signed in and commits the credential.
+    fn land_sign_in(
+        &self,
+        core: &mut Core,
+        subject: &Subject,
+        awaited: &Awaited,
+        signed: Result<SignedIn, Outcome>,
+    ) -> Result<Credential, Refusal> {
+        let signed = signed.map_err(|outcome| {
+            core.settle_as(subject, outcome);
+            complete_refusal(outcome)
+        })?;
+        let state = core.store.state();
+        let checked = if !Credential::permissions_are_valid(&signed.permissions) {
+            Err(Refusal::new(
+                Outcome::Internal,
+                "The provider's adapter reported permissions the lobby cannot keep, so nothing was signed in.",
+            ))
+        } else if state.companion(awaited.companion).is_none() {
+            Err(Refusal::new(
+                Outcome::NotFound,
+                "The companion was removed while it was signing in.",
+            ))
+        } else if state.credentials.iter().any(|credential| {
+            credential.kind == awaited.kind
+                && credential.account == signed.account
+                && credential.companion != awaited.companion
+        }) {
+            Err(Refusal::new(
+                Outcome::Conflict,
+                "That account is signed in for another companion; an account belongs to one companion.",
+            ))
+        } else {
+            core.no_ready_credential(awaited.companion, &awaited.kind)
+        };
+        checked.inspect_err(|refusal| core.settle_as(subject, refusal.outcome))?;
+        let credential = Credential {
+            id: CredentialId::from_u128(new_id()),
+            companion: awaited.companion,
+            kind: awaited.kind.clone(),
+            account: signed.account,
+            permissions: signed.permissions,
+            state: CredentialState::Ready,
+        };
+        if let Err(error) = keyring::write_material(&self.dir, credential.id, &signed.material) {
+            trace::line(&format!(
+                "the material of a new credential could not be kept: {error}"
+            ));
+            core.settle_as(subject, Outcome::TemporarilyUnavailable);
+            return Err(Refusal::new(
+                Outcome::TemporarilyUnavailable,
+                "The lobby could not keep the new credential, so nothing was signed in; try again.",
+            ));
+        }
+        let mut next = core.store.state().clone();
+        next.credentials.push(credential.clone());
+        if let Err(refusal) = core.land_as(subject, next) {
+            self.discard(&keyring::material_file(credential.id));
+            return Err(refusal);
+        }
+        core.events
+            .push_back(Event::CredentialChanged(credential.clone()));
+        Ok(credential)
     }
 
     /// Revokes the credential `id` and, in the same commit, every connection
@@ -1175,6 +1335,14 @@ impl Lobby {
             companions: core.views(),
             credentials: state.credentials.clone(),
             connections: state.connections.clone(),
+            sign_ins: {
+                let mut waiting: Vec<&Awaited> = core.awaited.values().collect();
+                waiting.sort_by_key(|awaited| awaited.started);
+                waiting
+                    .into_iter()
+                    .map(|awaited| awaited.view(SignInStatus::Pending))
+                    .collect()
+            },
             store_id: state.store_id.clone(),
             epoch: self.feed.epoch().to_owned(),
             // Items are published only while the core is held, so this is
@@ -1332,6 +1500,43 @@ fn call_note(
     }
 }
 
+/// Milliseconds since the Unix epoch.
+fn epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The refusal of a sign-in its adapter could not start, in the lobby's words.
+fn begin_refusal(outcome: Outcome) -> Refusal {
+    let message = match outcome {
+        Outcome::InvalidInput => {
+            "The provider cannot start a sign-in from what was typed; check it and try again."
+        }
+        Outcome::NotFound => "No account answers to what was typed; check it and try again.",
+        Outcome::Unsupported => {
+            "The provider's server does not offer the sign-in the lobby requires, so nothing was started."
+        }
+        Outcome::Refused => "The provider refused to start a sign-in.",
+        Outcome::Conflict => "A sign-in like this one is already waiting.",
+        other => return Refusal::from_adapter(other),
+    };
+    Refusal::new(outcome, message)
+}
+
+/// The refusal of a return its adapter did not accept, in the lobby's words.
+fn complete_refusal(outcome: Outcome) -> Refusal {
+    let message = match outcome {
+        Outcome::Refused | Outcome::NotFound | Outcome::InvalidInput => {
+            "The provider's answer did not prove the sign-in the lobby started, so nothing was signed in. Start it again on the manager page."
+        }
+        Outcome::Unsupported => "The lobby cannot complete sign-ins of this kind.",
+        other => return Refusal::from_adapter(other),
+    };
+    Refusal::new(outcome, message)
+}
+
 fn gone() -> Refusal {
     Refusal::new(
         Outcome::NotFound,
@@ -1462,23 +1667,92 @@ impl Core {
         Ok(())
     }
 
-    /// Lets go of sign-ins that waited too long, and of the oldest when too
-    /// many wait.
-    fn prune_awaited(&mut self) {
-        self.awaited
-            .retain(|_, awaited| awaited.started.elapsed() < SIGN_IN_TIME_LIMIT);
-        while self.awaited.len() >= SIGN_INS_WAITING {
-            let oldest = self
-                .awaited
-                .iter()
-                .min_by_key(|(_, awaited)| awaited.started)
-                .map(|(state, _)| state.clone());
-            match oldest {
-                Some(state) => {
-                    self.awaited.remove(&state);
-                }
-                None => break,
+    /// Refuses a second sign-in of `kind` for `companion` while one waits.
+    fn no_sign_in_waiting(
+        &self,
+        companion: CompanionId,
+        kind: &ProviderKind,
+    ) -> Result<(), Refusal> {
+        let waiting = self
+            .awaited
+            .values()
+            .any(|awaited| awaited.companion == companion && awaited.kind == *kind)
+            || self.starting.contains(&(companion, kind.clone()));
+        if waiting {
+            return Err(Refusal::new(
+                Outcome::Conflict,
+                "A sign-in for this companion is already waiting; finish it or cancel it first.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Ends the sign-in waiting under `state` as `status`.
+    fn end_sign_in(&mut self, state: &str, status: SignInStatus) -> Option<SignInView> {
+        let awaited = self.awaited.remove(state)?;
+        let view = awaited.view(status);
+        self.remember_ended(state, view.clone());
+        Some(view)
+    }
+
+    /// Remembers a sign-in that ended, and says so on the feed.
+    fn remember_ended(&mut self, state: &str, view: SignInView) {
+        self.ended.push_back((state.to_owned(), view.clone()));
+        while self.ended.len() > SIGN_INS_REMEMBERED {
+            self.ended.pop_front();
+        }
+        self.events.push_back(Event::SignInChanged(view));
+    }
+
+    /// Why a return under `state` finds no sign-in waiting, in the lobby's words.
+    fn why_not_waiting(&self, state: &str) -> Refusal {
+        let ended = self
+            .ended
+            .iter()
+            .rev()
+            .find(|(ended, _)| ended == state)
+            .map(|(_, view)| view.status);
+        let message = match ended {
+            Some(SignInStatus::Cancelled) => {
+                "This sign-in was cancelled, so nothing was signed in."
             }
+            Some(SignInStatus::Expired) => {
+                "This sign-in waited too long, so nothing was signed in. Start it again on the manager page."
+            }
+            Some(_) => {
+                "This sign-in already finished. Start another on the manager page if you need one."
+            }
+            None => {
+                "The lobby is not waiting for this sign-in; start it again on the manager page."
+            }
+        };
+        Refusal::new(Outcome::NotFound, message)
+    }
+
+    /// Ends the sign-ins that waited past `limit` as expired, and the oldest
+    /// when too many wait.
+    fn prune_awaited(&mut self, limit: Duration) {
+        let mut expired: Vec<String> = self
+            .awaited
+            .iter()
+            .filter(|(_, awaited)| awaited.started.elapsed() >= limit)
+            .map(|(state, _)| state.clone())
+            .collect();
+        let mut kept: Vec<(&String, Instant)> = self
+            .awaited
+            .iter()
+            .filter(|(state, _)| !expired.contains(state))
+            .map(|(state, awaited)| (state, awaited.started))
+            .collect();
+        kept.sort_by_key(|(_, started)| *started);
+        let excess = (kept.len() + 1).saturating_sub(SIGN_INS_WAITING);
+        expired.extend(
+            kept.into_iter()
+                .take(excess)
+                .map(|(state, _)| state.clone()),
+        );
+        for state in expired {
+            self.end_sign_in(&state, SignInStatus::Expired);
         }
     }
 
@@ -1845,10 +2119,24 @@ mod tests {
         authority: &lobby_testkit::passbook::PassbookAuthority,
         holder: &str,
     ) -> Credential {
+        let pairs = passbook_return(lobby, companion, authority, holder);
+        lobby
+            .complete_sign_in("passbook", pairs)
+            .expect("signed in")
+    }
+
+    /// Starts a passbook sign-in and follows the browser to the authority
+    /// and back, returning what the authority sent back.
+    fn passbook_return(
+        lobby: &Lobby,
+        companion: CompanionId,
+        authority: &lobby_testkit::passbook::PassbookAuthority,
+        holder: &str,
+    ) -> Vec<(String, String)> {
         use lobby_contracts::AddressPolicy;
         use lobby_outbound::{Outbound, Request};
         authority.sign_in_as(holder);
-        let start = lobby
+        let (_, start) = lobby
             .begin_sign_in(
                 companion,
                 "passbook",
@@ -1863,7 +2151,7 @@ mod tests {
             .expect("the authority answers");
         let back = approved.header("location").expect("sent back").to_owned();
         let query = back.split_once('?').expect("a query").1;
-        let pairs = query
+        query
             .split('&')
             .filter_map(|pair| pair.split_once('='))
             .map(|(name, value)| {
@@ -1872,10 +2160,143 @@ mod tests {
                     lobby_testkit::percent_decode(value),
                 )
             })
-            .collect();
-        lobby
+            .collect()
+    }
+
+    fn passbook_lobby(dir: &Dir) -> Lobby {
+        let registry = Registry::new(
+            vec![Arc::new(lobby_testkit::passbook::Passbook::new())],
+            Vec::new(),
+        );
+        Lobby::open(&dir.0, "companion-lobby", registry).expect("open")
+    }
+
+    fn commands(dir: &Dir, name: &str) -> Vec<String> {
+        dir.journal()
+            .iter()
+            .filter(|entry| entry["command"] == name)
+            .map(|entry| entry["outcome"].as_str().expect("outcome").to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_companion_waits_on_one_sign_in_of_a_kind_and_the_sponsor_may_cancel_it() {
+        let dir = Dir::new("waiting");
+        let lobby = passbook_lobby(&dir);
+        let authority = lobby_testkit::passbook::PassbookAuthority::start();
+        let ada = lobby
+            .create_companion("ada", "Ada")
+            .expect("ada")
+            .record
+            .companion
+            .id;
+        authority.sign_in_as("holder-ada");
+        let (first, _) = lobby
+            .begin_sign_in(ada, "passbook", &authority.origin(), "http://127.0.0.1:1")
+            .expect("a sign-in starts");
+        assert_eq!(first.status, SignInStatus::Pending);
+        assert_eq!(first.id.len(), 32);
+        let again = lobby
+            .begin_sign_in(ada, "passbook", &authority.origin(), "http://127.0.0.1:1")
+            .expect_err("one waits already");
+        assert_eq!(again.outcome, Outcome::Conflict);
+        assert_eq!(lobby.snapshot().sign_ins, std::slice::from_ref(&first));
+
+        let cancelled = lobby.cancel_sign_in(&first.id).expect("cancelled");
+        assert_eq!(cancelled.status, SignInStatus::Cancelled);
+        assert!(lobby.snapshot().sign_ins.is_empty());
+        assert_eq!(
+            lobby.cancel_sign_in(&first.id).map(|view| view.status),
+            Err(Refusal::new(
+                Outcome::NotFound,
+                "No sign-in with that id is waiting; it may have ended already."
+            ))
+        );
+        assert_eq!(
+            commands(&dir, CANCEL_SIGN_IN),
+            ["pending", "done", "not_found"]
+        );
+
+        // The browser comes back for a cancelled sign-in: nothing signs in.
+        let pairs = passbook_return(&lobby, ada, &authority, "holder-ada");
+        let waiting = lobby.snapshot().sign_ins;
+        assert_eq!(waiting.len(), 1, "a new sign-in may start once none waits");
+        lobby.cancel_sign_in(&waiting[0].id).expect("cancelled");
+        let refused = lobby
             .complete_sign_in("passbook", pairs)
-            .expect("signed in")
+            .expect_err("cancelled");
+        assert_eq!(refused.outcome, Outcome::NotFound);
+        assert!(refused.message.contains("cancelled"), "{}", refused.message);
+        assert!(lobby.snapshot().credentials.is_empty());
+        assert_eq!(
+            authority.listener().count("/exchange"),
+            0,
+            "the authority never heard of it"
+        );
+    }
+
+    #[test]
+    fn a_sign_in_that_waits_past_its_time_expires_and_signs_nothing_in() {
+        let dir = Dir::new("expired");
+        let lobby = passbook_lobby(&dir).with_sign_in_limit(Duration::from_millis(50));
+        let authority = lobby_testkit::passbook::PassbookAuthority::start();
+        let ada = lobby
+            .create_companion("ada", "Ada")
+            .expect("ada")
+            .record
+            .companion
+            .id;
+        let pairs = passbook_return(&lobby, ada, &authority, "holder-ada");
+        std::thread::sleep(Duration::from_millis(100));
+        let refused = lobby
+            .complete_sign_in("passbook", pairs)
+            .expect_err("expired");
+        assert_eq!(refused.outcome, Outcome::NotFound);
+        assert!(
+            refused.message.contains("waited too long"),
+            "{}",
+            refused.message
+        );
+        assert!(lobby.snapshot().credentials.is_empty());
+        assert!(lobby.snapshot().sign_ins.is_empty());
+        assert_eq!(authority.listener().count("/exchange"), 0);
+    }
+
+    #[test]
+    fn a_revoked_credential_stays_as_history_and_a_new_sign_in_makes_a_new_one() {
+        let dir = Dir::new("history");
+        let lobby = passbook_lobby(&dir);
+        let authority = lobby_testkit::passbook::PassbookAuthority::start();
+        let ada = lobby
+            .create_companion("ada", "Ada")
+            .expect("ada")
+            .record
+            .companion
+            .id;
+        let bea = lobby
+            .create_companion("bea", "Bea")
+            .expect("bea")
+            .record
+            .companion
+            .id;
+        let first = passbook_sign_in(&lobby, ada, &authority, "holder-ada");
+        assert_eq!(first.permissions, ["stamp"]);
+        lobby.revoke_credential(first.id).expect("revoked");
+        let taken = lobby
+            .complete_sign_in(
+                "passbook",
+                passbook_return(&lobby, bea, &authority, "holder-ada"),
+            )
+            .expect_err("the account stays reserved to ada");
+        assert_eq!(taken.outcome, Outcome::Conflict);
+        let second = passbook_sign_in(&lobby, ada, &authority, "holder-ada");
+        assert_ne!(second.id, first.id);
+        let credentials = lobby.snapshot().credentials;
+        assert_eq!(credentials.len(), 2);
+        assert_eq!(credentials[0].state, CredentialState::Revoked);
+        assert_eq!(credentials[1].state, CredentialState::Ready);
+        assert!(lobby.read_material(first.id).is_err());
+        assert!(lobby.read_material(second.id).is_ok());
     }
 
     #[test]

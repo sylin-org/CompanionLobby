@@ -76,7 +76,7 @@ use crate::journal::{PAGE_DEFAULT, PageProblem};
 use crate::keyring::{AttachSecret, AttachmentToken};
 use crate::lock::{DaemonLock, DaemonRecord, LockProblem};
 use crate::manager;
-use crate::projections::{Reached, companion_json, connection_json, credential_json};
+use crate::projections::{Reached, companion_json, connection_json, credential_json, sign_in_json};
 use crate::registry::Registry;
 use crate::{discovery, mcp, trace};
 
@@ -410,6 +410,13 @@ fn connection_revoked_in(path: &str) -> Option<ConnectionId> {
         .and_then(ConnectionId::parse)
 }
 
+/// The sign-in an `/api/sign-ins/<id>/cancel` path names: 32 hex digits.
+fn sign_in_cancelled_in(path: &str) -> Option<&str> {
+    path.strip_prefix("/api/sign-ins/")
+        .and_then(|rest| rest.strip_suffix("/cancel"))
+        .filter(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 /// The provider kind a `/signin/<kind>/return` path names.
 fn sign_in_return_in(path: &str) -> Option<&str> {
     path.strip_prefix("/signin/")
@@ -509,6 +516,23 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
             }
             Err(refused) => refused.reply(),
         },
+        (&Method::POST, cancelled) if sign_in_cancelled_in(cancelled).is_some() => {
+            let id = sign_in_cancelled_in(cancelled)
+                .unwrap_or_else(|| unreachable!("checked above"))
+                .to_owned();
+            match operator_body(app, request).await {
+                Ok(_) => {
+                    blocking(app, move |lobby| match lobby.cancel_sign_in(&id) {
+                        Ok(sign_in) => {
+                            json_reply(StatusCode::OK, json!({ "signIn": sign_in_json(&sign_in) }))
+                        }
+                        Err(refusal) => refusal_reply(&refusal),
+                    })
+                    .await
+                }
+                Err(refused) => refused.reply(),
+            }
+        }
         (&Method::GET, returned) if sign_in_return_in(returned).is_some() => {
             let kind = sign_in_return_in(returned)
                 .unwrap_or_else(|| unreachable!("checked above"))
@@ -629,6 +653,7 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
                 || companion_in(other).is_some()
                 || credential_revoked_in(other).is_some()
                 || connection_revoked_in(other).is_some()
+                || sign_in_cancelled_in(other).is_some()
                 || sign_in_return_in(other).is_some() =>
         {
             method_not_allowed()
@@ -834,6 +859,7 @@ fn snapshot_json(lobby: &Lobby) -> Value {
         companions,
         credentials,
         connections,
+        sign_ins,
         store_id,
         epoch,
         position,
@@ -849,6 +875,7 @@ fn snapshot_json(lobby: &Lobby) -> Value {
             .collect::<Vec<_>>(),
         "credentials": credentials.iter().map(credential_json).collect::<Vec<_>>(),
         "connections": connections.iter().map(connection_json).collect::<Vec<_>>(),
+        "signIns": sign_ins.iter().map(sign_in_json).collect::<Vec<_>>(),
         "journal": { "healthy": journal_healthy, "highWater": journal_high_water },
     })
 }
@@ -965,7 +992,10 @@ fn begin_sign_in(lobby: &Lobby, origin: &str, body: &[u8]) -> Reply {
         );
     };
     match lobby.begin_sign_in(companion, &request.kind, &request.hint, origin) {
-        Ok(start) => json_reply(StatusCode::CREATED, json!({ "url": start.url })),
+        Ok((sign_in, start)) => json_reply(
+            StatusCode::CREATED,
+            json!({ "signIn": sign_in_json(&sign_in), "url": start.url }),
+        ),
         Err(refusal) => refusal_reply(&refusal),
     }
 }
@@ -1586,6 +1616,13 @@ mod tests {
             Some("passbook")
         );
         assert_eq!(sign_in_return_in("/signin//return"), None);
+        let id = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            sign_in_cancelled_in(&format!("/api/sign-ins/{id}/cancel")),
+            Some(id)
+        );
+        assert_eq!(sign_in_cancelled_in("/api/sign-ins/x/cancel"), None);
+        assert_eq!(sign_in_cancelled_in(&format!("/api/sign-ins/{id}")), None);
         assert_eq!(sign_in_return_in("/signin/a/b/return"), None);
     }
 

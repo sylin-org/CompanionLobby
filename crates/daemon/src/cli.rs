@@ -15,13 +15,13 @@ use crate::{attach, browser, http, stop};
 
 /// Runs the command named by this process's arguments. `registry` composes
 /// the adapters, and is called only when the command runs the daemon.
-pub fn main(registry: fn() -> Registry) -> ExitCode {
+pub fn main(registry: fn() -> Result<Registry, String>) -> ExitCode {
     match Command::parse(std::env::args().skip(1)) {
         Ok(Parsed::Help) => {
             println!("{USAGE}");
             ExitCode::SUCCESS
         }
-        Ok(Parsed::Command(Command::Run)) => report(http::run(registry()).map(|()| None)),
+        Ok(Parsed::Command(Command::Run)) => report(registry().and_then(http::run).map(|()| None)),
         Ok(Parsed::Command(Command::Attach { companion, log })) => {
             ExitCode::from(attach::run(&companion, log.as_deref()))
         }
