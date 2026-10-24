@@ -18,10 +18,11 @@
 //! * the status, the headers and the body come back as they are, whatever the
 //!   status, so each adapter maps them to outcomes in its own words.
 //!
-//! It is synchronous: the daemon calls adapters on blocking threads. The agent
-//! speaks plain HTTP, which [`AddressPolicy`] allows only to this machine;
-//! HTTPS joins with the first adapter that reaches a public service, and until
-//! then a request to an HTTPS address is refused before anything is sent.
+//! It is synchronous: the daemon calls adapters on blocking threads. HTTPS is
+//! spoken with rustls and verified against the Mozilla root certificates the
+//! agent carries, never the machine's own store, so nothing installed locally
+//! widens what it trusts; plain HTTP is spoken only to this machine, the one
+//! place [`AddressPolicy`] lets it reach. A body is sent as JSON or as a form.
 
 use std::io::{self, Read};
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -48,8 +49,8 @@ pub struct Request<'a> {
     pub path: &'a str,
     /// Extra headers.
     pub headers: Vec<(&'a str, String)>,
-    /// A JSON body, sent with `Content-Type: application/json`.
-    pub json: Option<Vec<u8>>,
+    /// A body and its content type.
+    pub body: Option<(&'static str, Vec<u8>)>,
     /// The longest response body accepted.
     pub limit: usize,
     /// How long the whole request may take.
@@ -63,7 +64,7 @@ impl<'a> Request<'a> {
             method,
             path,
             headers: Vec::new(),
-            json: None,
+            body: None,
             limit: DEFAULT_LIMIT,
             deadline: DEADLINE,
         }
@@ -79,7 +80,19 @@ impl<'a> Request<'a> {
     /// Sends `body`, already encoded, as JSON.
     #[must_use]
     pub fn json(mut self, body: Vec<u8>) -> Self {
-        self.json = Some(body);
+        self.body = Some(("application/json", body));
+        self
+    }
+
+    /// Sends `fields` as an `application/x-www-form-urlencoded` body.
+    #[must_use]
+    pub fn form(mut self, fields: &[(&str, &str)]) -> Self {
+        let encoded = fields
+            .iter()
+            .map(|(name, value)| format!("{}={}", form_encode(name), form_encode(value)))
+            .collect::<Vec<_>>()
+            .join("&");
+        self.body = Some(("application/x-www-form-urlencoded", encoded.into_bytes()));
         self
     }
 
@@ -164,7 +177,7 @@ impl Outbound {
 
     /// Sends `request` to `address` and reads the whole response.
     pub fn send(&self, address: &Address, request: Request<'_>) -> Result<Response, Failure> {
-        if address.is_https() || !request.path.starts_with('/') {
+        if !request.path.starts_with('/') {
             return Err(Failure::Refused);
         }
         let mut call = self
@@ -174,10 +187,8 @@ impl Outbound {
         for (name, value) in &request.headers {
             call = call.set(name, value);
         }
-        let answered = match &request.json {
-            Some(body) => call
-                .set("Content-Type", "application/json")
-                .send_bytes(body),
+        let answered = match &request.body {
+            Some((content_type, body)) => call.set("Content-Type", content_type).send_bytes(body),
             None => call.call(),
         };
         let response = match answered {
@@ -225,6 +236,20 @@ impl Outbound {
             body,
         })
     }
+}
+
+/// Percent-encodes everything but the RFC 3986 unreserved characters, as one
+/// form field name or value.
+fn form_encode(text: &str) -> String {
+    text.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                (byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
 }
 
 fn refused_by_policy(transport: &ureq::Transport) -> bool {
@@ -429,12 +454,62 @@ Connection: close
     }
 
     #[test]
-    fn an_https_address_is_refused_before_anything_is_sent() {
-        let address =
-            Address::parse("https://board.test", AddressPolicy::PublicHttps).expect("public");
-        let failure = Outbound::new(AddressPolicy::PublicHttps)
-            .send(&address, Request::new("GET", "/"))
-            .expect_err("no TLS here");
-        assert_eq!(failure, Failure::Refused);
+    fn an_https_address_is_spoken_to_in_tls_and_never_in_plain_text() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut first = [0u8; 1];
+            stream.read_exact(&mut first).expect("a first byte");
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK
+Content-Length: 0
+
+",
+            );
+            first[0]
+        });
+        let address = Address::parse(
+            &format!("https://127.0.0.1:{port}"),
+            AddressPolicy::LoopbackAllowed,
+        )
+        .expect("loopback");
+        let failure = Outbound::new(AddressPolicy::LoopbackAllowed)
+            .send(&address, Request::new("GET", "/secret?token=t"))
+            .expect_err("a plain-text answer is no TLS server");
+        assert_ne!(failure, Failure::Refused);
+        assert_eq!(
+            server.join().expect("server"),
+            0x16,
+            "the first byte is a TLS handshake record, not a request line"
+        );
+    }
+
+    #[test]
+    fn a_form_is_sent_encoded() {
+        let (address, server) = serve_once(
+            b"HTTP/1.1 201 Created
+Content-Length: 0
+Connection: close
+
+",
+        );
+        let response = Outbound::new(AddressPolicy::LoopbackAllowed)
+            .send(
+                &address,
+                Request::new("POST", "/form").form(&[("scope", "a b"), ("uri", "http://x/?y=1&z")]),
+            )
+            .expect("a response");
+        assert_eq!(response.status, 201);
+        let head = server.join().expect("server");
+        assert!(
+            head.contains("Content-Type: application/x-www-form-urlencoded"),
+            "{head}"
+        );
+        assert!(head.contains("Content-Length: 45"), "{head}");
+        assert_eq!(
+            form_encode("http://x/?y=1&z"),
+            "http%3A%2F%2Fx%2F%3Fy%3D1%26z"
+        );
     }
 }
