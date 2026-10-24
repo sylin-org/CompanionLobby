@@ -10,7 +10,13 @@
 //! The page writes text only through `textContent` and text nodes, never
 //! through markup, so nothing a companion's name holds can become markup. It
 //! never opens a dialog: a destructive action asks for confirmation in place.
-//! Links marked `data-link` are routed inside the page. Each companion shows
+//! Links marked `data-link` are routed inside the page. A companion's page
+//! lists its accounts with a revoke for each ready one, and offers a sign-in
+//! for each provider kind the lobby runs with; a sign-in has a page of its
+//! own between the lobby and the provider, which names the companion and
+//! the account the sponsor meant, links to the provider's page in a new tab,
+//! and follows the sign-in until it is signed in, refused, cancelled or
+//! expired. Each companion shows
 //! the `mcpServers` block a host configuration needs, naming the companion by
 //! its immutable id, with a warning that host configurations naming it by its
 //! moniker stop working after a rename.
@@ -40,13 +46,20 @@ pub const SCRIPT: (&str, &str) = (
 pub const CONTENT_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
      connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-/// Whether `path` is a route of the page: the companions, one companion, or
-/// the journal.
+/// Whether `path` is a route of the page: the companions, one companion, one
+/// of its sign-ins, or the journal.
 pub fn is_page_path(path: &str) -> bool {
-    matches!(path, "/" | "/journal")
-        || path
-            .strip_prefix("/companion/")
-            .is_some_and(|id| CompanionId::parse(id).is_some())
+    let Some(rest) = path.strip_prefix("/companion/") else {
+        return matches!(path, "/" | "/journal");
+    };
+    match rest.split_once("/sign-in/") {
+        Some((id, sign_in)) => {
+            CompanionId::parse(id).is_some()
+                && sign_in.len() == 32
+                && sign_in.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }
+        None => CompanionId::parse(rest).is_some(),
+    }
 }
 
 /// The embedded file served at `path`, with its content type.
@@ -124,6 +137,11 @@ mod tests {
         assert!(is_page_path("/journal"));
         assert!(is_page_path(&format!("/companion/{id}")));
         assert!(!is_page_path("/companion/ada"));
+        let sign_in = "0123456789abcdef0123456789abcdef";
+        assert!(is_page_path(&format!("/companion/{id}/sign-in/{sign_in}")));
+        assert!(!is_page_path(&format!("/companion/{id}/sign-in/x")));
+        assert!(!is_page_path(&format!("/companion/ada/sign-in/{sign_in}")));
+        assert!(!is_page_path(&format!("/companion/{id}/other/{sign_in}")));
         assert!(!is_page_path("/companion/"));
         assert!(!is_page_path("/elsewhere"));
         assert_eq!(asset("/manager.js"), Some(SCRIPT));

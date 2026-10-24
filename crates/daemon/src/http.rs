@@ -62,7 +62,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use lobby_contracts::{
     Attachment, AttachmentId, Companion, CompanionId, ConnectionId, CredentialId, Outcome,
-    ToolResult,
+    ProviderKind, ToolResult,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -876,6 +876,11 @@ fn snapshot_json(lobby: &Lobby) -> Value {
         "credentials": credentials.iter().map(credential_json).collect::<Vec<_>>(),
         "connections": connections.iter().map(connection_json).collect::<Vec<_>>(),
         "signIns": sign_ins.iter().map(sign_in_json).collect::<Vec<_>>(),
+        "kinds": lobby
+            .credential_kinds()
+            .iter()
+            .map(ProviderKind::as_str)
+            .collect::<Vec<_>>(),
         "journal": { "healthy": journal_healthy, "highWater": journal_high_water },
     })
 }

@@ -21,3 +21,4 @@ crates/conformance/Cargo.toml	provider-atproto	The conformance suite's tests hol
 crates/conformance/tests/atproto_credential.rs	provider-atproto	The credential suite runs against the atproto adapter and the test kit's fake of its provider.
 crates/daemon/src/registry.rs	provider-atproto	The registry is the one place the daemon composes the compiled-in credential adapter.
 crates/daemon/src/bin/synthetic.rs	provider-atproto	The test-only command composes the credential adapter against the test kit's fake world.
+crates/daemon/tests/sign_in_journey.rs	provider-atproto	The journey signs companions in with the atproto adapter through the real daemon against the test kit's fake.

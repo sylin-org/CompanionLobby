@@ -77,6 +77,14 @@ impl Registry {
         ))
     }
 
+    /// The provider kinds of every credential adapter, in the order listed.
+    pub fn credential_kinds(&self) -> Vec<ProviderKind> {
+        self.credentials
+            .iter()
+            .map(|adapter| adapter.kind())
+            .collect()
+    }
+
     /// The credential adapter of `kind`.
     pub fn credential(&self, kind: &ProviderKind) -> Option<Arc<dyn CredentialAdapter>> {
         self.credentials

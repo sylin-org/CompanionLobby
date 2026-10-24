@@ -1321,6 +1321,11 @@ impl Lobby {
         answer.map_err(|outcome| CallRefusal::Ended(Refusal::new(outcome, outcome.sentence())))
     }
 
+    /// The provider kinds the sponsor may sign companions in with.
+    pub fn credential_kinds(&self) -> Vec<ProviderKind> {
+        self.registry.credential_kinds()
+    }
+
     /// Every companion with its live attachments, oldest first.
     pub fn companions(&self) -> Vec<CompanionView> {
         let core = self.core();

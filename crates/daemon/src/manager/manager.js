@@ -109,7 +109,12 @@ function attachedText(count) {
 
 // ---------- the lobby: loaded, then patched by the feed ----------
 
-const lobby = { companions: new Map(), journalHealthy: true, position: 0, loaded: false };
+// handoffs holds, in this page's memory only, where the provider's page is
+// for each sign-in this page started, and what the sponsor typed.
+const lobby = {
+  companions: new Map(), credentials: new Map(), signIns: new Map(), kinds: [],
+  handoffs: new Map(), journalHealthy: true, position: 0, loaded: false,
+};
 let resynchronizing = true;
 let loads = 0;
 // Whether the feed is open; when it was refused or ended for good, the page
@@ -123,6 +128,8 @@ function applyItem(seq, item) {
   lobby.position = seq;
   if (item.kind === "companion") lobby.companions.set(item.companion.id, item.companion);
   else if (item.kind === "companion_removed") lobby.companions.delete(item.id);
+  else if (item.kind === "credential") lobby.credentials.set(item.credential.id, item.credential);
+  else if (item.kind === "sign_in") lobby.signIns.set(item.signIn.id, item.signIn);
   else if (item.kind === "journal_health") lobby.journalHealthy = item.healthy;
   else if (item.kind === "journal") journalArrived(item.entry);
   return true;
@@ -139,6 +146,13 @@ async function resynchronize() {
   if (mine !== loads) return;
   if (result.ok) {
     lobby.companions = new Map(result.body.companions.map(companion => [companion.id, companion]));
+    lobby.credentials = new Map(result.body.credentials.map(credential => [credential.id, credential]));
+    // The lobby lists the sign-ins that wait; the ones this page saw end
+    // stay as the page last heard of them.
+    const ended = [...lobby.signIns.values()].filter(signIn => signIn.status !== "pending");
+    lobby.signIns = new Map(result.body.signIns.map(signIn => [signIn.id, signIn]));
+    for (const signIn of ended) if (!lobby.signIns.has(signIn.id)) lobby.signIns.set(signIn.id, signIn);
+    lobby.kinds = result.body.kinds;
     lobby.position = result.body.feed.position;
     lobby.journalHealthy = result.body.journal.healthy;
     lobby.loaded = true;
@@ -245,6 +259,7 @@ function render() {
   if (parts.length === 0) renderCompanions();
   else if (parts[0] === "journal" && parts.length === 1) renderJournal();
   else if (parts[0] === "companion" && parts[1] && parts.length === 2) renderCompanion(parts[1]);
+  else if (parts[0] === "companion" && parts.length === 4 && parts[2] === "sign-in") renderSignIn(parts[1], parts[3]);
   else { history.replaceState({}, "", "/"); renderCompanions(); }
 }
 
@@ -306,7 +321,163 @@ function renderCompanion(id) {
   }
   const heading = element("h1", "", companion.displayName);
   const facts = element("p", "muted", companion.moniker + " · " + attachedText(companion.attachments));
-  view.replaceChildren(back, heading, facts, renameForm(companion), hostConfig(companion), removal(companion));
+  view.replaceChildren(back, heading, facts, accounts(companion), renameForm(companion), hostConfig(companion), removal(companion));
+}
+
+// ---------- accounts: credentials and the sign-ins that make them ----------
+
+function waitingNow(signIn) {
+  return signIn.status === "pending" && Date.now() < signIn.expiresAt;
+}
+
+function credentialsOf(companion) {
+  return [...lobby.credentials.values()].filter(credential => credential.companion === companion.id);
+}
+
+function accounts(companion) {
+  const section = element("section");
+  section.setAttribute("aria-label", "Accounts");
+  const parts = [element("h2", "", "Accounts")];
+  const held = credentialsOf(companion);
+  if (held.length === 0) {
+    parts.push(element("p", "muted", "No account is signed in for " + companion.displayName + " yet."));
+  } else {
+    const list = element("ul", "accounts");
+    for (const credential of held) list.append(credentialLine(credential));
+    parts.push(list);
+  }
+  for (const kind of lobby.kinds) {
+    const ready = held.some(credential => credential.kind === kind && credential.state === "ready");
+    const waiting = [...lobby.signIns.values()].find(signIn => signIn.companion === companion.id && signIn.kind === kind && waitingNow(signIn));
+    if (waiting) parts.push(waitingLine(companion, waiting));
+    else if (!ready) parts.push(signInForm(companion, kind));
+  }
+  section.append(...parts);
+  return section;
+}
+
+function credentialLine(credential) {
+  const line = element("li", "account");
+  const words = element("div");
+  const facts = [credential.kind, credential.state === "ready" ? "signed in" : "revoked"];
+  if (credential.permissions.length) facts.push("permissions: " + credential.permissions.join(", "));
+  words.append(element("strong", "", credential.account), element("p", "hint", facts.join(" · ")));
+  line.append(words);
+  if (credential.state === "ready") {
+    const trigger = button("Revoke", "danger");
+    confirmInPlace(trigger, "Revoke this account for this companion? Every connection made with it is revoked too.", "Revoke", async () => {
+      const result = await call("/api/credentials/" + encodeURIComponent(credential.id) + "/revoke", "POST", {});
+      if (!result.ok) {
+        note(sentence(result), true);
+        if (result.status === 409) resynchronize();
+        return;
+      }
+      lobby.credentials.set(credential.id, result.body.credential);
+      note("The account was revoked.");
+      refresh(true);
+    });
+    line.append(trigger);
+  }
+  return line;
+}
+
+function waitingLine(companion, signIn) {
+  const line = element("p", "warning");
+  line.append(document.createTextNode("A sign-in with " + signIn.kind + " is waiting until " + new Date(signIn.expiresAt).toLocaleTimeString() + ". "),
+    link("/companion/" + encodeURIComponent(companion.id) + "/sign-in/" + encodeURIComponent(signIn.id), "", "Follow it"));
+  return line;
+}
+
+function signInForm(companion, kind) {
+  const form = element("form");
+  form.setAttribute("aria-label", "Sign " + companion.displayName + " in with " + kind);
+  const account = field("Account (optional)", "", "What the provider calls the account, such as its handle. Leave it empty to choose the account on the provider's own page.");
+  const go = element("button", "primary", "Sign in with " + kind);
+  go.type = "submit";
+  const actions = element("div", "actions");
+  actions.append(go);
+  form.append(account.wrapper, actions);
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    go.disabled = true;
+    const hint = account.input.value.trim();
+    const result = await call("/api/sign-ins", "POST", { companion: companion.id, kind, hint });
+    go.disabled = false;
+    if (!result.ok) {
+      note(sentence(result), true);
+      if (result.status === 409) resynchronize();
+      return;
+    }
+    const signIn = result.body.signIn;
+    lobby.signIns.set(signIn.id, signIn);
+    lobby.handoffs.set(signIn.id, { url: result.body.url, hint });
+    navigate("/companion/" + encodeURIComponent(companion.id) + "/sign-in/" + encodeURIComponent(signIn.id));
+  });
+  return form;
+}
+
+let expiryTimer = null;
+
+// The page between the lobby and the provider: it names the companion and
+// the account the sponsor meant, links to the provider's page, and follows
+// the sign-in until it ends.
+function renderSignIn(companionId, signInId) {
+  clearTimeout(expiryTimer);
+  const companion = lobby.companions.get(companionId);
+  const signIn = lobby.signIns.get(signInId);
+  const handoff = lobby.handoffs.get(signInId);
+  if (!companion || !signIn || signIn.companion !== companionId) {
+    view.replaceChildren(link("/", "", "All companions"), element("h1", "", "Not here"),
+      element("p", "muted", "This page does not know that sign-in; it may have ended. Start one from the companion's page."));
+    return;
+  }
+  const back = link("/companion/" + encodeURIComponent(companion.id), "", companion.displayName);
+  const heading = element("h1", "", "Sign " + companion.displayName + " in with " + signIn.kind);
+  const meant = handoff && handoff.hint
+    ? "The account: " + handoff.hint + ". The provider asks you to sign in as it."
+    : "The account: the one you choose on the provider's page.";
+  const parts = [back, heading, element("p", "", meant)];
+  const signedIn = credentialsOf(companion).find(credential => credential.kind === signIn.kind && credential.state === "ready");
+  if (waitingNow(signIn)) {
+    parts.push(element("p", "muted", "Waiting for the provider to send you back, until " + new Date(signIn.expiresAt).toLocaleTimeString() + "."));
+    const actions = element("div", "actions");
+    if (handoff) {
+      const onward = element("a", "button primary", "Continue to " + new URL(handoff.url).host);
+      onward.href = handoff.url;
+      onward.target = "_blank";
+      onward.rel = "noopener noreferrer";
+      actions.append(onward);
+    } else {
+      parts.push(element("p", "hint", "The provider's page is linked only from the page that started this sign-in. Cancel it and start again if that page was closed."));
+    }
+    const cancel = button("Cancel sign-in", "danger");
+    confirmInPlace(cancel, "Cancel this sign-in? Nothing is signed in.", "Cancel sign-in", async () => {
+      const result = await call("/api/sign-ins/" + encodeURIComponent(signIn.id) + "/cancel", "POST", {});
+      if (!result.ok) {
+        note(sentence(result), true);
+        resynchronize();
+        return;
+      }
+      lobby.signIns.set(signIn.id, result.body.signIn);
+      lobby.handoffs.delete(signIn.id);
+      note("The sign-in was cancelled.");
+      refresh(true);
+    }, "Keep waiting");
+    actions.append(cancel);
+    parts.push(actions);
+    expiryTimer = setTimeout(() => refresh(false), Math.max(0, signIn.expiresAt - Date.now()) + 500);
+  } else if (signIn.status === "signed_in") {
+    parts.push(element("p", "ok", signedIn
+      ? "Signed in: " + signedIn.account + " is now " + companion.displayName + "'s " + signIn.kind + " account."
+      : "Signed in."));
+  } else if (signIn.status === "cancelled") {
+    parts.push(element("p", "muted", "This sign-in was cancelled; nothing was signed in."));
+  } else if (signIn.status === "refused") {
+    parts.push(element("p", "error", "The provider's answer did not complete this sign-in; nothing was signed in. Start it again from the companion's page."));
+  } else {
+    parts.push(element("p", "muted", "This sign-in expired; nothing was signed in. Start it again from the companion's page."));
+  }
+  view.replaceChildren(...parts);
 }
 
 function renameForm(companion) {
