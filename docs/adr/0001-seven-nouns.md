@@ -44,7 +44,8 @@ contracts:
 The daemon implements `MaterialSlot`, `Authority` and `Ingress`. Material is a
 sealed blob only its own adapter decodes. The nouns themselves are declared
 with the crate: `Companion` with its moniker and display name, `Attachment`,
-`JournalEntry` with its kinds and initiator, `Outcome` and `ToolDescriptor`.
+`JournalEntry` with its kinds, its initiator and the `ConnectionId` it went
+through, `Outcome` and `ToolDescriptor`.
 Beyond them, a type enters the contracts crate only when both synthetic
 adapters in the test kit need it in the same change; there is no shared
 vocabulary of service nouns, and service adapters may duplicate each other.
