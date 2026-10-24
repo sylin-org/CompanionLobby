@@ -6,6 +6,13 @@
 //! the manager page; a sponsor never attaches over MCP.
 
 /// The sponsor who owns a companion and initiates operator commands.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// One install serves one sponsor: the local user who runs the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub struct Sponsor {}
+
+impl Sponsor {
+    /// The local user who runs this install.
+    pub const LOCAL: Self = Self {};
+}

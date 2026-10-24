@@ -14,9 +14,38 @@ use crate::{
 };
 
 /// A service name: `[a-z][a-z0-9]{1,15}`, so that `<service>_<tool>` fits in 64 characters.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub struct ServiceName {}
+///
+/// It is the one rule for service names and for the prefix of every tool a
+/// mind sees; it holds no underscore, so the prefix always splits cleanly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ServiceName(String);
+
+impl ServiceName {
+    /// The longest service name, in bytes.
+    pub const MAX_BYTES: usize = 16;
+
+    /// Checks `text` against the service name rule.
+    pub fn new(text: &str) -> Option<Self> {
+        let bytes = text.as_bytes();
+        let valid = (2..=Self::MAX_BYTES).contains(&bytes.len())
+            && bytes[0].is_ascii_lowercase()
+            && bytes[1..]
+                .iter()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+        valid.then(|| Self(text.to_owned()))
+    }
+
+    /// The name as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ServiceName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// The accepted credential kinds with their permissions, the addressing mode and the push flag.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,5 +114,29 @@ pub trait ServiceAdapter: Send + Sync {
     /// Opens a push stream for a connection, for services that push events.
     fn open_stream(&self, _pinned: CallContext, _ingress: &dyn Ingress) -> Result<(), Outcome> {
         Err(Outcome::Unsupported)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ServiceName;
+
+    #[test]
+    fn service_names_are_short_lowercase_words() {
+        for good in ["board", "ab", "x9", "abcdefghijklmnop"] {
+            assert!(ServiceName::new(good).is_some(), "{good}");
+        }
+        for bad in [
+            "",
+            "a",
+            "Board",
+            "9board",
+            "bo_ard",
+            "bo-ard",
+            "abcdefghijklmnopq",
+            "bóard",
+        ] {
+            assert!(ServiceName::new(bad).is_none(), "{bad:?}");
+        }
     }
 }

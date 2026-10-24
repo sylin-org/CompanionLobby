@@ -38,13 +38,13 @@ mod tool;
 
 pub use address::{Address, AddressPolicy};
 pub use authorization::{Authorization, AuthorizationAsk};
-pub use companion::{Companion, CompanionId};
+pub use companion::{Companion, CompanionId, DisplayName, Moniker, NameProblem};
 pub use connection::{Connection, ConnectionId};
 pub use credential::{
     Credential, CredentialAdapter, CredentialDescription, CredentialId, Portrait, ProviderKind,
     SignInRequest, SignInReturn, SignInStart, SignedIn,
 };
-pub use journal::JournalEntry;
+pub use journal::{Initiator, JournalEntry, JournalKind};
 pub use material::{MaterialSlot, MaterialUpdate, SealedIssued, SealedMaterial};
 pub use mind::{Attachment, AttachmentId};
 pub use outcome::{Outcome, Retry};

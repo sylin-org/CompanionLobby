@@ -27,11 +27,31 @@ lobby-credential-atproto = { path = "crates/credentials/atproto" }
 lobby-service-tangent = { path = "crates/services/tangent" }
 lobby-daemon = { path = "crates/daemon" }
 
+bytes = "=1.12.1"
+dirs = "=6.0.0"
+getrandom = "=0.3.4"
+http-body-util = "=0.1.5"
+hyper = { version = "=1.12.0", features = ["server", "http1"] }
+hyper-util = { version = "=0.1.21", features = ["tokio", "server", "server-graceful", "http1"] }
+netstat2 = "=0.11.2"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+sha2 = "=0.10.9"
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+uuid = { version = "=1.28.0", features = ["v7"] }
+win32job = "=2.0.3"
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# The attach shim hashes its own executable to learn its build id; an
+# optimized hash keeps that inside the host's startup budget in debug builds.
+[profile.dev.package.sha2]
+opt-level = 3
 
 [profile.release]
 panic = "abort"
