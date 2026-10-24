@@ -1,7 +1,8 @@
 //! The Credential noun and the credential adapter contract.
 //!
 //! A credential record names its companion, the provider kind that signed it
-//! in, the account the provider authenticated, and its state. It never holds
+//! in, the account the provider authenticated, the permissions the provider
+//! granted, and its state. It never holds
 //! the material itself: material is a blob only the adapter of its provider
 //! kind can decode, which the daemon keeps sealed beside the record and hands
 //! back only through a [`MaterialSlot`].
@@ -109,8 +110,32 @@ pub struct Credential {
     pub kind: ProviderKind,
     /// The account the provider authenticated.
     pub account: AccountKey,
+    /// What the provider granted at sign-in, in the provider's own words, as
+    /// its adapter reported them. Nothing but a new sign-in widens them: a
+    /// service that needs more asks the sponsor to sign in again.
+    pub permissions: Vec<String>,
     /// Whether it can still be used.
     pub state: CredentialState,
+}
+
+impl Credential {
+    /// The most permissions one credential holds.
+    pub const MAX_PERMISSIONS: usize = 32;
+    /// The longest permission, in bytes.
+    pub const MAX_PERMISSION_BYTES: usize = 256;
+
+    /// Whether `permissions` follow the rule: at most
+    /// [`Self::MAX_PERMISSIONS`], each 1 to [`Self::MAX_PERMISSION_BYTES`]
+    /// printable ASCII characters with no spaces, none twice.
+    pub fn permissions_are_valid(permissions: &[String]) -> bool {
+        permissions.len() <= Self::MAX_PERMISSIONS
+            && permissions.iter().enumerate().all(|(index, permission)| {
+                !permission.is_empty()
+                    && permission.len() <= Self::MAX_PERMISSION_BYTES
+                    && permission.bytes().all(|byte| byte.is_ascii_graphic())
+                    && !permissions[..index].contains(permission)
+            })
+    }
 }
 
 /// The sponsor's request to sign a companion in to an account.
@@ -157,6 +182,9 @@ impl SignInReturn {
 pub struct SignedIn {
     /// The account the provider authenticated, whatever the hint said.
     pub account: AccountKey,
+    /// What the provider granted, in its own words; see
+    /// [`Credential::permissions`].
+    pub permissions: Vec<String>,
     /// The material only this adapter decodes.
     pub material: SealedMaterial,
 }
@@ -217,6 +245,29 @@ mod tests {
         assert!(AccountKey::new("member:0001/aaaa").is_some());
         for bad in ["", "a b", "a\nb", "á", &"a".repeat(257)] {
             assert!(AccountKey::new(bad).is_none(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn permissions_are_printable_words_without_repeats() {
+        let words = |list: &[&str]| {
+            list.iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(Credential::permissions_are_valid(&[]));
+        assert!(Credential::permissions_are_valid(&words(&[
+            "stamp",
+            "rpc:a.b?aud=*"
+        ])));
+        for bad in [
+            words(&[""]),
+            words(&["a b"]),
+            words(&["stamp", "stamp"]),
+            words(&[&"a".repeat(257)]),
+            (0..33).map(|n| n.to_string()).collect(),
+        ] {
+            assert!(!Credential::permissions_are_valid(&bad), "{bad:?}");
         }
     }
 

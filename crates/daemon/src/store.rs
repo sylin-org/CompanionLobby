@@ -209,6 +209,7 @@ struct CredentialForm {
     companion: String,
     kind: String,
     account: String,
+    permissions: Vec<String>,
     state: StateForm,
 }
 
@@ -320,6 +321,7 @@ fn encode(state: &State) -> Vec<u8> {
                 companion: credential.companion.to_string(),
                 kind: credential.kind.as_str().to_owned(),
                 account: credential.account.as_str().to_owned(),
+                permissions: credential.permissions.clone(),
                 state: match credential.state {
                     CredentialState::Ready => StateForm::Ready,
                     CredentialState::Revoked => StateForm::Revoked,
@@ -405,6 +407,8 @@ fn decode(bytes: &[u8]) -> Result<State, String> {
                 companion: CompanionId::parse(&entry.companion)?,
                 kind: ProviderKind::new(&entry.kind)?,
                 account: AccountKey::new(&entry.account)?,
+                permissions: Credential::permissions_are_valid(&entry.permissions)
+                    .then_some(entry.permissions)?,
                 state: match entry.state {
                     StateForm::Ready => CredentialState::Ready,
                     StateForm::Revoked => CredentialState::Revoked,
@@ -609,7 +613,7 @@ mod tests {
     fn a_file_this_build_does_not_read_is_refused_and_left_as_it_is() {
         let valid = r#"{"schema":1,"storeId":"0123456789abcdef0123456789abcdef","revision":0,"companions":[],"credentials":[],"connections":[]}"#;
         let company = r#"{"id":"0123456789abcdef0123456789abcdef","moniker":"ada","displayName":"Ada","revision":1}"#;
-        let stray = r#"{"id":"0123456789abcdef0123456789abcde0","companion":"0123456789abcdef0123456789abcde1","kind":"passbook","account":"holder-1","state":"ready"}"#;
+        let stray = r#"{"id":"0123456789abcdef0123456789abcde0","companion":"0123456789abcdef0123456789abcde1","kind":"passbook","account":"holder-1","permissions":["stamp"],"state":"ready"}"#;
         for (bytes, why) in [
             (String::new(), "is empty"),
             ("  \n".to_owned(), "is empty"),
@@ -634,6 +638,27 @@ mod tests {
             (
                 valid.replace("\"credentials\":[]", &format!("\"credentials\":[{stray}]")),
                 "credential of a companion",
+            ),
+            (
+                // A credential without the permissions schema 1 requires.
+                valid.replace(
+                    "\"credentials\":[]",
+                    &format!(
+                        "\"credentials\":[{}]",
+                        stray.replace(",\"permissions\":[\"stamp\"]", "")
+                    ),
+                ),
+                "does not follow schema 1",
+            ),
+            (
+                valid.replace(
+                    "\"credentials\":[]",
+                    &format!(
+                        "\"credentials\":[{}]",
+                        stray.replace("[\"stamp\"]", "[\"stamp\",\"stamp\"]")
+                    ),
+                ),
+                "a value its rules refuse",
             ),
             (
                 valid.replace("0123456789abcdef0123", "0123456789ABCDEF0123"),

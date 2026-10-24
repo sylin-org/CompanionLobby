@@ -183,6 +183,7 @@ pub fn credential_json(credential: &Credential) -> Value {
         "companion": credential.companion.to_string(),
         "kind": credential.kind.as_str(),
         "account": credential.account.as_str(),
+        "permissions": credential.permissions,
         "state": match credential.state {
             CredentialState::Ready => "ready",
             CredentialState::Revoked => "revoked",

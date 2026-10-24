@@ -90,7 +90,8 @@ never decodes either: only the adapter that encoded a blob reads it.
   ],
   "credentials": [
     { "id": "<32 hex digits>", "companion": "<companion id>", "kind": "<provider kind>",
-      "account": "<account key>", "state": "ready" }
+      "account": "<account key>", "permissions": ["<what the provider granted>"],
+      "state": "ready" }
   ],
   "connections": [
     { "id": "<32 hex digits>", "companion": "<companion id>", "credential": "<credential id>",
@@ -103,7 +104,9 @@ never decodes either: only the adapter that encoded a blob reads it.
 The store id is minted once per install and names the journal's entries.
 `revision` advances on every commit; each companion's own `revision`
 advances whenever it changes, and a rename or removal names the revision it
-read. A credential is `ready` or `revoked`; a connection is `ready` or
+read. A credential is `ready` or `revoked`, and its `permissions` are what
+the provider granted at sign-in, in the provider's own words; only a new
+sign-in widens them. A connection is `ready` or
 `revoked`, and its `revision` advances on every change, so a call pinned to
 one revision can tell that the connection changed while it ran. Material and
 what services issued are kept beside the file, never in it. Live
@@ -111,7 +114,8 @@ attachments and the sign-ins the lobby waits on are runtime facts and are
 not written.
 
 - **Refused, never rewritten.** A file that is empty, does not parse, names
-  no schema or another one, carries a field schema 1 does not have, or holds
+  no schema or another one, carries a field schema 1 does not have or lacks
+  one it has (a credential without `permissions`, say), or holds
   a value its rules refuse (a duplicate id or moniker, an identifier of the
   wrong shape, a credential of a companion the file does not hold, one
   account signed in for two companions, two ready credentials of one kind
@@ -369,7 +373,7 @@ state file and the journal before it answers.
 | `GET`, `OPTIONS /api/discovery` | Host | The discovery document; the only response with cross-origin headers. |
 | `GET /`, `/companion/<id>`, `/journal` | Host | The manager page. |
 | `GET /manager.css`, `/manager.js` | Host | Its stylesheet and script. |
-| `GET /api/lobby` | Host | `{"storeId", "feed": {"epoch", "position"}, "companions": [...], "credentials": [...], "connections": [...], "journal": {"healthy", "highWater"}}`, one consistent picture. A credential is `{"id", "companion", "kind", "account", "state"}` and a connection `{"id", "companion", "credential", "service", "address", "label", "state", "revision"}`; neither ever carries material or what a service issued. |
+| `GET /api/lobby` | Host | `{"storeId", "feed": {"epoch", "position"}, "companions": [...], "credentials": [...], "connections": [...], "journal": {"healthy", "highWater"}}`, one consistent picture. A credential is `{"id", "companion", "kind", "account", "permissions", "state"}` and a connection `{"id", "companion", "credential", "service", "address", "label", "state", "revision"}`; neither ever carries material or what a service issued. |
 | `GET /api/companions` | Host | `{"companions": [{"id", "moniker", "displayName", "revision", "attachments", "hostConfig"}]}`. |
 | `GET /api/journal?before=<cursor>&limit=<n>` | Host | `{"entries", "upper", "next"}`, newest first; 409 for a cursor of another journal. |
 | `GET /api/events` | Host | The live feed, as server-sent events. |

@@ -31,6 +31,9 @@ use crate::{percent_encode, unique_token};
 /// The provider kind of the passbook adapter.
 pub const KIND: &str = "passbook";
 
+/// What every passbook sign-in grants: stamps for any audience.
+pub const PERMISSION: &str = "stamp";
+
 /// The format tag of passbook material.
 const MATERIAL_FORMAT: &str = "passbook-1";
 
@@ -314,6 +317,7 @@ impl CredentialAdapter for Passbook {
         };
         Ok(SignedIn {
             account,
+            permissions: vec![PERMISSION.to_owned()],
             material: material.encode(),
         })
     }

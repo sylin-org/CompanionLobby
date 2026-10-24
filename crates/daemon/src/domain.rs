@@ -761,7 +761,12 @@ impl Lobby {
                 Refusal::from_adapter(outcome)
             })?;
             let state = core.store.state();
-            let checked = if state.companion(awaited.companion).is_none() {
+            let checked = if !Credential::permissions_are_valid(&signed.permissions) {
+                Err(Refusal::new(
+                    Outcome::Internal,
+                    "The provider's adapter reported permissions the lobby cannot keep, so nothing was signed in.",
+                ))
+            } else if state.companion(awaited.companion).is_none() {
                 Err(Refusal::new(
                     Outcome::NotFound,
                     "The companion was removed while it was signing in.",
@@ -784,6 +789,7 @@ impl Lobby {
                 companion: awaited.companion,
                 kind: awaited.kind.clone(),
                 account: signed.account,
+                permissions: signed.permissions,
                 state: CredentialState::Ready,
             };
             if let Err(error) = keyring::write_material(&self.dir, credential.id, &signed.material) {
