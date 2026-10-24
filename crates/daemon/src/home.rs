@@ -210,12 +210,39 @@ pub fn secure(path: &Path) -> io::Result<()> {
     if owner_only(path)? {
         return Ok(());
     }
+    only_plain_lobby_files(path)?;
+    restrict_to_owner(path)?;
+    if !owner_only(path)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the directory still grants access to someone other than its owner, or another account owns it",
+        ));
+    }
+    // A file another account made between the scan and the narrowing keeps
+    // its owner and its own entries through it, so the scan runs again.
+    let late = match first_foreign_entry(path)? {
+        Some(name) => Some(name),
+        None => first_entry_with_access_of_its_own(path)?,
+    };
+    match late {
+        None => Ok(()),
+        Some(name) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{name} appeared in the directory while Companion Lobby narrowed it to its owner, and it was not written by                  Companion Lobby or is owned by another account; remove {name} after checking it, and start again"
+            ),
+        )),
+    }
+}
+
+/// Refuses a directory holding anything but lobby files the current user
+/// owns with no access of their own.
+fn only_plain_lobby_files(path: &Path) -> io::Result<()> {
     if let Some(stranger) = first_foreign_entry(path)? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "the directory is not private to its owner and holds {stranger}, which Companion Lobby did not write; \
-                 choose an empty directory for {DATA_DIR_ENV}"
+                "the directory is not private to its owner and holds {stranger}, which Companion Lobby did not write;                  choose an empty directory for {DATA_DIR_ENV}"
             ),
         ));
     }
@@ -223,20 +250,11 @@ pub fn secure(path: &Path) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "the directory is not private to its owner, and {planted} is owned by another account or carries access entries of its own; \
-                 Companion Lobby left the directory as it is: remove {planted} after checking it, and start again"
+                "the directory is not private to its owner, and {planted} is owned by another account or carries access entries of its own;                  Companion Lobby left the directory as it is: remove {planted} after checking it, and start again"
             ),
         ));
     }
-    restrict_to_owner(path)?;
-    if owner_only(path)? {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "the directory still grants access to someone other than its owner, or another account owns it",
-        ))
-    }
+    Ok(())
 }
 
 fn owner_only(path: &Path) -> io::Result<bool> {
@@ -337,6 +355,75 @@ mod tests {
         let platform = choose(None, Some(PathBuf::from("/base"))).expect("platform");
         assert_eq!(platform, PathBuf::from("/base").join(platform_leaf()));
         assert!(matches!(choose(None, None), Err(HomeProblem::NoBaseFolder)));
+    }
+
+    /// The line [`report_the_platform_folder`] prints its answer on.
+    #[cfg(windows)]
+    const PLATFORM_FOLDER_LINE: &str = "platform folder: ";
+
+    /// The platform folder a child process of this test binary resolves
+    /// with `environment` set, `None` when Windows reports none.
+    #[cfg(windows)]
+    fn platform_folder_with(environment: &[(&str, &OsStr)]) -> Option<PathBuf> {
+        let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
+        command
+            .args([
+                "--exact",
+                "home::tests::report_the_platform_folder",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_remove(DATA_DIR_ENV);
+        for (name, value) in environment {
+            command.env(name, value);
+        }
+        let output = command.output().expect("run the test binary");
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let answer = stdout
+            .lines()
+            .find_map(|line| line.split_once(PLATFORM_FOLDER_LINE).map(|(_, rest)| rest))
+            .unwrap_or_else(|| panic!("no answer in {stdout}"));
+        (answer != "none").then(|| PathBuf::from(answer))
+    }
+
+    /// Every process resolves the same folder, the shim a host started with a
+    /// rewritten environment included: the folder comes from the known
+    /// folder, never from the variables that usually mirror it, and a profile
+    /// path Windows does not recognize yields no folder at all, which the
+    /// daemon refuses, rather than another one.
+    #[cfg(windows)]
+    #[test]
+    fn the_platform_folder_comes_from_the_known_folder_never_the_environment() {
+        let here = platform_base().expect("this process has a platform folder");
+        let misleading = std::env::temp_dir().join("lobby-misleading-environment");
+        let misleading = misleading.as_os_str();
+        let mirrored = platform_folder_with(&[
+            ("LOCALAPPDATA", misleading),
+            ("APPDATA", misleading),
+            ("HOMEDRIVE", OsStr::new("Q:")),
+            ("HOMEPATH", OsStr::new(r"\misleading")),
+        ]);
+        assert_eq!(mirrored, Some(here), "the mirroring variables are ignored");
+        let profile = platform_folder_with(&[("USERPROFILE", misleading)]);
+        assert_eq!(profile, None, "no folder rather than another one");
+        assert!(matches!(
+            choose(None, profile),
+            Err(HomeProblem::NoBaseFolder)
+        ));
+    }
+
+    /// Run only by the test above, in a child process with a misleading
+    /// environment; it resolves the folder and creates nothing.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "run by the_platform_folder_comes_from_the_known_folder_never_the_environment"]
+    fn report_the_platform_folder() {
+        match platform_base() {
+            Some(base) => println!("{PLATFORM_FOLDER_LINE}{}", base.display()),
+            None => println!("{PLATFORM_FOLDER_LINE}none"),
+        }
     }
 
     #[test]

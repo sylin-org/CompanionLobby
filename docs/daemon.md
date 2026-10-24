@@ -9,20 +9,28 @@ page, `stop` drains it.
 
 The data directory is resolved as `README.md` describes; `LOBBY_DATA_DIR`
 overrides it and a path that leads into a `.companion-lobby` directory is
-refused. Whoever creates the directory restricts it to its owner. On every
+refused. On Windows the base folder comes from the known-folder API alone: a
+process whose `LOCALAPPDATA` or `APPDATA` says otherwise still resolves the
+same folder, and one whose `USERPROFILE` Windows does not recognize gets no
+folder and refuses until `LOBBY_DATA_DIR` names one, rather than using
+another. Whoever creates the directory restricts it to its owner. On every
 start, before it writes anything there, the daemon checks that the directory
 is still owner-only. If it is not, the daemon narrows it again only when
 everything inside is a file the daemon itself writes, owned by the current
 user (by the directory's owner elsewhere) and, on Windows, with no access
 entry of its own beyond what it inherits from the directory; then it checks
-that the narrowing took. A directory holding anything else is refused and
-left untouched: pointing `LOBBY_DATA_DIR` at a shared folder never rewrites
+that the narrowing took and that nothing else appeared while it ran. A
+directory holding anything else is refused and left untouched: pointing `LOBBY_DATA_DIR` at a shared folder never rewrites
 that folder's access, and a lobby file that another account owns or that was
 opened up for someone while the directory was open may have been planted or
 read, which narrowing the directory would hide. On Windows owner-only means
 the current user owns the directory and it has a protected DACL with one
 entry, full control for the current user, inherited by everything inside,
-set and read through the Win32 security API; elsewhere it is mode 0700.
+set and read through the Win32 security API; elsewhere it is mode 0700. A
+daemon run elevated on Windows creates files owned by the Administrators
+group, usually the default owner of an elevated token; a later run that is
+not elevated finds the directory not owner-only and refuses it, and the
+sponsor removes the directory or runs elevated again.
 
 `attach.secret` is sealed with DPAPI in the current user's scope on Windows,
 so a copy of the file is useless to another account or another machine;
