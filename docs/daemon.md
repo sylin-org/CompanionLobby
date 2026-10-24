@@ -14,7 +14,11 @@ for the process token, and must lie under the profile root Windows records
 for the user's account, which no environment variable moves: a process whose
 `LOCALAPPDATA`, `APPDATA` or `USERPROFILE` says otherwise still resolves the
 same folder, and a folder that resolves outside that root is refused until
-`LOBBY_DATA_DIR` names one, rather than used. Whoever creates the directory restricts it to its owner. On every
+`LOBBY_DATA_DIR` names one, rather than used. Whoever creates the directory
+creates it owner-only in the same call (`CreateDirectoryW` with an owner-only
+security descriptor on Windows, mode 0700 elsewhere), so it never exists with
+any other access, and then refuses it if anything but a private lobby file is
+already inside. On every
 start, before it writes anything there, the daemon checks that the directory
 is still owner-only. If it is not, the daemon narrows it again only when
 everything inside is a file the daemon itself writes, owned by the current

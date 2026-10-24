@@ -11,7 +11,8 @@
 //!   shim's own standard handles before the daemon starts closes that path.
 //! * **The owner-only data directory.** The directory gets a protected DACL
 //!   with one entry, full control for the current user, inherited by
-//!   everything inside it; and the daemon checks on every start that it still
+//!   everything inside it, given in the same call that creates it; and the
+//!   daemon checks on every start that it still
 //!   has exactly that and that the current user owns it, since an owner can
 //!   always rewrite a DACL. Files inside are read the same way: whether one
 //!   is private to the current user, and whether its access comes only from
@@ -36,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, LocalFree, SetHandleInformation,
+    CloseHandle, ERROR_ALREADY_EXISTS, HANDLE, HANDLE_FLAG_INHERIT, LocalFree, SetHandleInformation,
 };
 use windows_sys::Win32::Networking::WinSock::{SO_EXCLUSIVEADDRUSE, SOL_SOCKET, setsockopt};
 use windows_sys::Win32::Security::Authorization::{
@@ -49,13 +50,17 @@ use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, AddAccessAllowedAceEx,
     CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid,
     GetSecurityDescriptorControl, GetTokenInformation, INHERITED_ACE, InitializeAcl,
-    OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_ACCESS_MASK, TOKEN_IMPERSONATE,
-    TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenOwner, TokenUser,
+    InitializeSecurityDescriptor, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+    SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
+    SetSecurityDescriptorDacl, TOKEN_ACCESS_MASK, TOKEN_IMPERSONATE, TOKEN_INFORMATION_CLASS,
+    TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenOwner, TokenUser,
 };
-use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ALL_ACCESS};
 use windows_sys::Win32::System::Com::CoTaskMemFree;
-use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+use windows_sys::Win32::System::SystemServices::{
+    ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
+};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Shell::{
     FOLDERID_LocalAppData, GetUserProfileDirectoryW, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
@@ -104,10 +109,11 @@ pub fn use_address_exclusively(socket: &impl AsRawSocket) -> io::Result<()> {
     }
 }
 
-/// Gives `path` a protected DACL with one entry: full control for the current
-/// user, inherited by every file and folder inside it.
-pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
-    let user = CurrentUser::query()?;
+/// The one-entry ACL of an owner-only directory: full control for the
+/// current user, inherited by every file and folder inside it. The ACL lives
+/// in the returned buffer, which must outlive every use of it, and names the
+/// SID inside `user`.
+fn owner_acl(user: &CurrentUser) -> io::Result<Vec<u64>> {
     let sid = user.sid();
     // SAFETY: `sid` points into `user`, a valid SID for as long as `user` lives.
     let sid_length = unsafe { GetLengthSid(sid) } as usize;
@@ -133,6 +139,15 @@ pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
     }
+    Ok(buffer)
+}
+
+/// Gives `path` a protected DACL with one entry: full control for the current
+/// user, inherited by every file and folder inside it.
+pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
+    let user = CurrentUser::query()?;
+    let mut buffer = owner_acl(&user)?;
+    let acl = buffer.as_mut_ptr().cast::<ACL>();
     let wide = wide(path);
     // SAFETY: `wide` is a NUL-terminated UTF-16 path and `acl` a valid ACL;
     // the owner, group and SACL are not touched.
@@ -151,6 +166,47 @@ pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::from_raw_os_error(status as i32))
+    }
+}
+
+/// Creates the directory `path`, whose parent must exist, with the
+/// owner-only protected DACL [`restrict_to_owner`] gives, in the one call
+/// that creates it: there is no moment at which it exists with any other
+/// access. Returns `false`, changing nothing, when something already exists
+/// at `path`.
+pub fn create_private_dir(path: &Path) -> io::Result<bool> {
+    let user = CurrentUser::query()?;
+    let mut buffer = owner_acl(&user)?;
+    let acl = buffer.as_mut_ptr().cast::<ACL>();
+    let mut storage = vec![0u64; size_of::<SECURITY_DESCRIPTOR>().div_ceil(size_of::<u64>())];
+    let descriptor: PSECURITY_DESCRIPTOR = storage.as_mut_ptr().cast();
+    // SAFETY: `descriptor` points to an aligned, writable SECURITY_DESCRIPTOR
+    // in `storage`, and `acl` to a valid ACL in `buffer`; both outlive the
+    // creation below.
+    unsafe {
+        if InitializeSecurityDescriptor(descriptor, SECURITY_DESCRIPTOR_REVISION) == 0
+            || SetSecurityDescriptorDacl(descriptor, 1, acl, 0) == 0
+            || SetSecurityDescriptorControl(descriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor,
+        bInheritHandle: 0,
+    };
+    let wide = wide(path);
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path and `attributes` points
+    // at the descriptor built above, alive for the call.
+    if unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } != 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) {
+        Ok(false)
+    } else {
+        Err(error)
     }
 }
 
@@ -565,6 +621,29 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_directory_created_private_is_owner_only_from_the_start() {
+        let parent = std::env::temp_dir().join(format!(
+            "lobby-private-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&parent).expect("temp dir");
+        let dir = parent.join("data");
+        assert!(create_private_dir(&dir).expect("create"));
+        assert!(
+            is_owner_only(&dir).expect("read the DACL"),
+            "no narrowing ran after the creation"
+        );
+        assert!(
+            !create_private_dir(&dir).expect("already there"),
+            "an existing directory is left to the caller"
+        );
+        std::fs::write(dir.join("file"), b"x").expect("file");
+        assert!(is_private_file(&dir.join("file")).expect("read"));
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
     fn sealed_bytes_open_only_for_their_purpose() {
         let sealed = protect(b"0123", b"one purpose").expect("seal");
         assert!(!sealed.windows(4).any(|window| window == b"0123"));
@@ -616,12 +695,9 @@ pub(crate) mod tests {
     /// another account with `WRITE_DAC` on the file could write this one.
     pub(crate) fn plant_protected_dacl_marked_inherited(path: &Path) {
         use windows_sys::Win32::Security::{
-            CreateWellKnownSid, InitializeSecurityDescriptor, SECURITY_DESCRIPTOR,
-            SECURITY_MAX_SID_SIZE, SetFileSecurityW, SetSecurityDescriptorControl,
-            SetSecurityDescriptorDacl, WinWorldSid,
+            CreateWellKnownSid, SECURITY_MAX_SID_SIZE, SetFileSecurityW, WinWorldSid,
         };
         use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
-        use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
 
         let mut everyone = vec![0u64; (SECURITY_MAX_SID_SIZE as usize).div_ceil(8)];
         let mut sid_size = SECURITY_MAX_SID_SIZE;

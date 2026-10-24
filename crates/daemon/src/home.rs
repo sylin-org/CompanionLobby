@@ -20,11 +20,13 @@
 //! `open` and `stop` all resolve the directory the same way, so a host's shim
 //! and the sponsor's own commands meet the same daemon.
 //!
-//! Whoever creates the directory restricts it to its owner. A directory that
-//! is not owner-only is restricted only when everything in it is a file the
-//! lobby itself writes; anything else is refused rather than re-permissioned,
-//! so a mistyped `LOBBY_DATA_DIR` never rewrites the access of a folder the
-//! lobby does not own.
+//! Whoever creates the directory creates it owner-only in the same call, so
+//! it never exists with any other access, and then checks that nothing is in
+//! it yet that the lobby did not write. A directory that is not owner-only is
+//! restricted only when everything in it is a file the lobby itself writes;
+//! anything else is refused rather than re-permissioned, so a mistyped
+//! `LOBBY_DATA_DIR` never rewrites the access of a folder the lobby does not
+//! own.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -207,19 +209,59 @@ const fn platform_leaf() -> &'static str {
     }
 }
 
-/// Creates the directory if it is missing, restricting a new directory to its
-/// owner, then [`secure`]s it. Nothing is written into the directory before
-/// it is known to be the lobby's own.
+/// Creates the directory if it is missing, owner-only from the call that
+/// creates it, then [`secure`]s it. A directory this call created is
+/// checked like a narrowed one: anything in it that is not a private lobby
+/// file was put there by someone else, and the directory is refused. Nothing
+/// is written into the directory before it is known to be the lobby's own.
 pub fn prepare(path: &Path) -> Result<(), HomeProblem> {
+    prepare_with(path, |_| {})
+}
+
+/// [`prepare`], with `after_create` run right after this call created the
+/// directory and before it is checked, so a test can stand in for whoever
+/// races the creation.
+fn prepare_with(path: &Path, after_create: impl FnOnce(&Path)) -> Result<(), HomeProblem> {
     if refused(path) {
         return Err(HomeProblem::Refused(path.to_path_buf()));
     }
-    if !path.is_dir() {
-        std::fs::create_dir_all(path)
-            .map_err(|error| HomeProblem::Io(path.to_path_buf(), error))?;
-        restrict_to_owner(path).map_err(|error| HomeProblem::Io(path.to_path_buf(), error))?;
+    let problem = |error| HomeProblem::Io(path.to_path_buf(), error);
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(problem)?;
     }
-    secure(path).map_err(|error| HomeProblem::Io(path.to_path_buf(), error))
+    if create_private(path).map_err(problem)? {
+        after_create(path);
+        if let Some(name) = first_entry_not_its_own(path).map_err(problem)? {
+            return Err(problem(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{name} appeared in the directory as Companion Lobby created it; remove {name} after checking it, and start again"
+                ),
+            )));
+        }
+    }
+    secure(path).map_err(problem)
+}
+
+/// Creates the directory `path`, whose parent exists, owner-only in the one
+/// call that creates it. `false` when something is already there.
+fn create_private(path: &Path) -> io::Result<bool> {
+    #[cfg(windows)]
+    {
+        crate::win32::create_private_dir(path)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        match std::fs::DirBuilder::new().mode(0o700).create(path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// Restricts a directory to the current user: on Windows a protected DACL
@@ -266,14 +308,7 @@ pub fn secure(path: &Path) -> io::Result<()> {
     // its owner and its own entries through it, so the scan runs again, and
     // then every file must grant access to its owner alone, whatever its
     // entries claim about where they came from.
-    let late = match first_foreign_entry(path)? {
-        Some(name) => Some(name),
-        None => match first_entry_with_access_of_its_own(path)? {
-            Some(name) => Some(name),
-            None => first_entry_not_private(path)?,
-        },
-    };
-    match late {
+    match first_entry_not_its_own(path)? {
         None => Ok(()),
         Some(name) => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -282,6 +317,19 @@ pub fn secure(path: &Path) -> io::Result<()> {
             ),
         )),
     }
+}
+
+/// The first entry in an owner-only `path` that the lobby did not write, that
+/// another account owns or that carries access of its own, or that grants
+/// access to anyone but the current user.
+fn first_entry_not_its_own(path: &Path) -> io::Result<Option<String>> {
+    if let Some(name) = first_foreign_entry(path)? {
+        return Ok(Some(name));
+    }
+    if let Some(name) = first_entry_with_access_of_its_own(path)? {
+        return Ok(Some(name));
+    }
+    first_entry_not_private(path)
 }
 
 /// The first entry in `path` that grants access to anyone but the current
@@ -732,11 +780,38 @@ mod tests {
     #[test]
     fn a_new_directory_is_created_private() {
         let parent = temp_dir("parent");
-        let dir = parent.join("data");
-        prepare(&dir).expect("prepare");
+        let dir = parent.join("nested").join("data");
+        let mut checked = false;
+        prepare_with(&dir, |created| {
+            assert!(
+                owner_only(created).expect("read"),
+                "private before anything else ran"
+            );
+            checked = true;
+        })
+        .expect("prepare");
+        assert!(checked, "the directory was created by this call");
         assert!(owner_only(&dir).expect("read"));
         prepare(&dir).expect("prepare again");
         let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn a_directory_that_holds_a_stranger_as_it_is_created_is_refused() {
+        for stranger in ["notes.txt", "attach.secret.x.tmp"] {
+            let parent = temp_dir("raced");
+            let dir = parent.join("data");
+            let refused = prepare_with(&dir, |created| {
+                std::fs::write(created.join(stranger), b"planted").expect("plant");
+            })
+            .expect_err("refused");
+            assert!(
+                matches!(&refused, HomeProblem::Io(_, error) if error.kind() == io::ErrorKind::PermissionDenied),
+                "{refused}"
+            );
+            assert!(refused.to_string().contains(stranger), "{refused}");
+            let _ = std::fs::remove_dir_all(parent);
+        }
     }
 
     #[cfg(windows)]
