@@ -600,7 +600,9 @@ fn renames_and_removals_are_guarded_by_revision_and_removal_cascades_to_attachme
 }
 
 /// A page following the live feed: it reloads the lobby on a reset and
-/// applies every later item to what it loaded.
+/// applies every later item to what it loaded. It is the manager page's rule
+/// written again in Rust, so what it proves is the daemon's side: the feed
+/// and the snapshot positions agree. The page's own script is not run here.
 struct Follower {
     stream: EventStream,
     companions: BTreeMap<String, Value>,
@@ -675,6 +677,8 @@ fn companions_of(lobby: &Value) -> BTreeMap<String, Value> {
         .collect()
 }
 
+/// Two followers of the feed, one joining late, hold the same lobby after
+/// every change: the daemon's feed and snapshots converge.
 #[test]
 fn two_pages_following_the_feed_converge_after_every_change() {
     let install = Install::new("converge");
