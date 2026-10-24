@@ -404,6 +404,7 @@ async function loadJournal(before) {
 function journalArrived(entry) {
   // New entries join the list when it shows the newest ones.
   if (journalView && journalView.live) {
+    if (journalView.entries.some((shown) => shown.seq === entry.seq)) return;
     journalView.entries.unshift(entry);
     if (journalView.list) journalView.list.prepend(entryLine(entry));
   }
@@ -416,7 +417,10 @@ async function renderJournal() {
   const result = await loadJournal(null);
   if (journalView !== mine) return;
   if (!result.ok) { view.replaceChildren(element("h1", "", "Journal"), element("p", "error", sentence(result))); return; }
-  mine.entries = result.body.entries;
+  // Entries that arrived while the page loaded and lie above it stay on top;
+  // the page already holds the rest.
+  const arrived = mine.entries.filter((entry) => entry.seq > result.body.upper);
+  mine.entries = arrived.concat(result.body.entries);
   mine.next = result.body.next;
   drawJournal();
 }
