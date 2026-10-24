@@ -97,12 +97,12 @@ pub fn ensure(dir: &Path, port: u16, budget: Duration) -> Result<Daemon, String>
             wait_for(port, deadline)?
         }
     };
-    let secret = verify(dir, port, &document)?;
+    verify(dir, port, &document)?;
     if document.build_id == own_build {
         return Ok(Daemon {
             dir: dir.to_path_buf(),
             port,
-            secret,
+            secret: trusted_secret(dir)?,
             discovery: document,
         });
     }
@@ -116,7 +116,7 @@ pub fn ensure(dir: &Path, port: u16, budget: Duration) -> Result<Daemon, String>
     }
     start(dir, port).map_err(|error| format!("cannot start the daemon: {error}"))?;
     let document = wait_for(port, deadline)?;
-    let secret = verify(dir, port, &document)?;
+    verify(dir, port, &document)?;
     if document.build_id != own_build {
         return Err(format!(
             "the daemon on 127.0.0.1:{port} still runs another build after a restart"
@@ -125,8 +125,19 @@ pub fn ensure(dir: &Path, port: u16, budget: Duration) -> Result<Daemon, String>
     Ok(Daemon {
         dir: dir.to_path_buf(),
         port,
-        secret,
+        secret: trusted_secret(dir)?,
         discovery: document,
+    })
+}
+
+/// The attach secret, once the daemon is verified: refused when the file
+/// grants access to anyone but its owner or was not sealed by this user.
+fn trusted_secret(dir: &Path) -> Result<AttachSecret, String> {
+    AttachSecret::read(dir).map_err(|error| {
+        format!(
+            "cannot use the attach secret in {}: {error}",
+            display_path(dir)
+        )
     })
 }
 
@@ -166,8 +177,9 @@ fn wait_for(port: u16, deadline: Instant) -> Result<Discovery, String> {
 }
 
 /// Verifies that the daemon described by `document` serves `dir` and owns the
-/// port, and only then reads the attach secret.
-pub fn verify(dir: &Path, port: u16, document: &Discovery) -> Result<AttachSecret, String> {
+/// port. Comparing fingerprints sends nothing anywhere, so it is made even
+/// when the secret's file is not private; only using the secret needs that.
+pub fn verify(dir: &Path, port: u16, document: &Discovery) -> Result<(), String> {
     let other_install = || {
         format!(
             "the daemon on 127.0.0.1:{port} serves another data directory than {}",
@@ -177,8 +189,15 @@ pub fn verify(dir: &Path, port: u16, document: &Discovery) -> Result<AttachSecre
     let not_owner = |why: &str| {
         format!("refusing the process on 127.0.0.1:{port}: {why}; the attach secret was not sent")
     };
-    let secret = AttachSecret::read(dir).map_err(|_| other_install())?;
-    if secret.fingerprint() != document.store_fingerprint {
+    let fingerprint =
+        AttachSecret::installed_fingerprint(dir).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => other_install(),
+            _ => format!(
+                "cannot read the attach secret in {}: {error}",
+                display_path(dir)
+            ),
+        })?;
+    if fingerprint != document.store_fingerprint {
         return Err(other_install());
     }
     if !lock::is_held(dir)
@@ -199,7 +218,7 @@ pub fn verify(dir: &Path, port: u16, document: &Discovery) -> Result<AttachSecre
             "it is not the process that holds the daemon lock",
         ));
     }
-    Ok(secret)
+    Ok(())
 }
 
 /// Whether the lock holder `holder` is the one and only process listening.

@@ -149,8 +149,11 @@ pub fn run() -> Result<(), String> {
         }
         Err(LockProblem::Io(error)) => return Err(format!("cannot lock {shown}: {error}")),
     };
-    let secret = AttachSecret::load_or_create(&dir)
+    let (secret, renewal) = AttachSecret::load_or_renew(&dir)
         .map_err(|error| format!("cannot read the attach secret in {shown}: {error}"))?;
+    if let Some(renewal) = renewal {
+        trace::line(renewal.describe());
+    }
     let port = resolve_port()?;
     let build_id =
         discovery::build_id().map_err(|error| format!("cannot read this executable: {error}"))?;

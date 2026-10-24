@@ -9,7 +9,9 @@
 //! * [`Peer`], the stdio harness that drives a spawned `companion-lobby
 //!   attach` the way an MCP host does and matches answers by request id;
 //! * [`hosts`], the MCP conversations recorded from real hosts, used as
-//!   fixtures.
+//!   fixtures;
+//! * [`PLANTED_ATTACH_SECRET`], an attach secret someone other than the
+//!   daemon wrote, for tests that plant it in a data directory.
 //!
 //! The fake provider and service roles and the synthetic adapters join it when
 //! the daemon first reaches a service. Nothing here reaches the live network.
@@ -21,6 +23,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub use peer::Peer;
+
+/// An attach secret as plain hex text, known to whoever planted it: the
+/// daemon must never let it attach anyone.
+pub const PLANTED_ATTACH_SECRET: &str = include_str!("../fixtures/planted/attach.secret");
 
 /// A temporary directory, removed with everything in it on drop.
 #[derive(Debug)]

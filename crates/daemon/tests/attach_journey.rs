@@ -1103,6 +1103,129 @@ fn the_daemon_narrows_a_widened_data_directory_again_when_it_starts() {
     );
 }
 
+/// Grants Everyone read access to `path` with `icacls`: `inherited` makes it an
+/// inheritable entry on a directory, otherwise an entry of the file's own.
+#[cfg(windows)]
+fn grant_everyone(path: &Path, inherited: bool) {
+    let grant = if inherited {
+        "*S-1-1-0:(OI)(CI)R"
+    } else {
+        "*S-1-1-0:R"
+    };
+    let granted = Command::new("icacls")
+        .arg(path)
+        .args(["/grant", grant])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .expect("run icacls");
+    assert!(granted.success());
+}
+
+/// Attaches with `secret` the way the shim does, returning the HTTP status.
+fn attach_status(install: &Install, secret: &str, companion: &str) -> u16 {
+    let bearer = format!("Bearer {secret}");
+    let body = json!({ "companion": companion }).to_string();
+    loopback::send(
+        install.port,
+        &Call {
+            method: "POST",
+            path: "/mcp/attach",
+            headers: &[("Authorization", &bearer)],
+            body: body.as_bytes(),
+            timeout: Duration::from_secs(5),
+        },
+    )
+    .expect("attach")
+    .status
+}
+
+#[cfg(windows)]
+#[test]
+fn a_secret_planted_while_the_data_directory_was_open_never_attaches_anyone() {
+    use lobby_daemon::win32::is_owner_only;
+    use lobby_testkit::PLANTED_ATTACH_SECRET;
+
+    let planted = PLANTED_ATTACH_SECRET.trim();
+    let install = Install::new("planted");
+    install.open();
+    install.create("ada", "Ada");
+    let secret_file = install.dir().join("attach.secret");
+    let sealed = std::fs::read(&secret_file).expect("read the secret file");
+    let first = install.secret();
+    assert!(
+        !String::from_utf8_lossy(&sealed).contains(first.expose()),
+        "the secret is sealed at rest"
+    );
+    assert!(install.stop().status.success());
+
+    // While no daemon runs, someone opens the directory to everyone and
+    // plants a secret they know.
+    grant_everyone(&install.dir(), true);
+    std::fs::write(&secret_file, planted).expect("plant a secret");
+
+    // The daemon narrows the directory, then will not use what it found.
+    install.open();
+    assert!(is_owner_only(&install.dir()).expect("read the DACL"));
+    let renewed = install.secret();
+    assert_ne!(renewed.expose(), planted);
+    assert_ne!(renewed, first);
+    assert_ne!(
+        std::fs::read(&secret_file).expect("read"),
+        planted.as_bytes()
+    );
+    let trace = std::fs::read_to_string(install.dir().join("trace.log")).expect("trace.log");
+    assert!(trace.contains("did not unseal"), "{trace}");
+    install.create("bea", "Bea");
+    assert_eq!(attach_status(&install, planted, "bea"), 401);
+    let mut host = install.attach("bea");
+    assert_eq!(
+        host.ask(&initialize(0))["result"]["serverInfo"]["name"],
+        "companion-lobby"
+    );
+    host.close_stdin();
+    assert_eq!(
+        host.wait_exit(Duration::from_secs(20))
+            .and_then(|s| s.code()),
+        Some(0)
+    );
+
+    // The shim checks the file itself: a secret others may read is refused.
+    grant_everyone(&secret_file, false);
+    let mut shim = install.attach("bea");
+    let status = shim
+        .wait_exit(Duration::from_secs(20))
+        .expect("the shim exits");
+    assert_eq!(status.code(), Some(1));
+    let stderr = shim.stderr_text();
+    assert!(
+        stderr.contains("grants access to someone other than its owner"),
+        "stderr: {stderr}"
+    );
+    assert!(install.stop().status.success());
+
+    // A lobby file that carries access of its own while the directory is
+    // open was planted or read; the daemon refuses to start and touches
+    // nothing.
+    grant_everyone(&install.dir(), true);
+    std::fs::write(&secret_file, planted).expect("plant a secret");
+    let refused = install.command(&install.exe, &["run"]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains(
+            "attach.secret is owned by another account or carries access entries of its own"
+        ),
+        "stderr: {stderr}"
+    );
+    assert!(!is_owner_only(&install.dir()).expect("read the DACL"));
+    assert_eq!(
+        std::fs::read(&secret_file).expect("read"),
+        planted.as_bytes()
+    );
+    assert!(install.discovery().is_none(), "no daemon started");
+}
+
 /// Attaches as `companion` the way the shim does, returning the attachment id and its token.
 fn attach_directly(install: &Install, companion: &str) -> (String, String) {
     let bearer = format!("Bearer {}", install.secret().expose());

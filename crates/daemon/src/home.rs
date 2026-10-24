@@ -199,10 +199,13 @@ pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
 /// directory whose access was widened since is narrowed again or refused.
 ///
 /// An owner-only directory is left as it is. One that is not is restricted
-/// only when everything in it is a file the lobby itself writes, and checked
-/// again afterwards; a directory holding anything else is refused untouched,
-/// because restricting it would rewrite the access of everything inside a
-/// folder the lobby does not own.
+/// only when everything in it is a file the lobby itself writes, owned by the
+/// current user and with no access of its own beyond what it inherits from
+/// the directory, and checked again afterwards. A directory holding anything
+/// else is refused untouched: restricting it would rewrite the access of a
+/// folder the lobby does not own, and a lobby file someone else owns or
+/// opened up for themselves while the directory was open may have been
+/// planted or read, which narrowing the directory would hide.
 pub fn secure(path: &Path) -> io::Result<()> {
     if owner_only(path)? {
         return Ok(());
@@ -213,6 +216,15 @@ pub fn secure(path: &Path) -> io::Result<()> {
             format!(
                 "the directory is not private to its owner and holds {stranger}, which Companion Lobby did not write; \
                  choose an empty directory for {DATA_DIR_ENV}"
+            ),
+        ));
+    }
+    if let Some(planted) = first_entry_with_access_of_its_own(path)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "the directory is not private to its owner, and {planted} is owned by another account or carries access entries of its own; \
+                 Companion Lobby left the directory as it is: remove {planted} after checking it, and start again"
             ),
         ));
     }
@@ -246,6 +258,26 @@ fn first_foreign_entry(path: &Path) -> io::Result<Option<String>> {
         let name = entry.file_name().to_string_lossy().into_owned();
         if !(entry.file_type()?.is_file() && is_lobby_file(&name)) {
             return Ok(Some(name));
+        }
+    }
+    Ok(None)
+}
+
+/// The first entry in `path` that another account owns, or whose access does
+/// not come from the directory alone: on Windows a DACL entry of its own,
+/// elsewhere an owner other than the directory's.
+fn first_entry_with_access_of_its_own(path: &Path) -> io::Result<Option<String>> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        #[cfg(windows)]
+        let plain = crate::win32::has_only_inherited_entries(&entry.path())?;
+        #[cfg(unix)]
+        let plain = {
+            use std::os::unix::fs::MetadataExt;
+            entry.metadata()?.uid() == std::fs::metadata(path)?.uid()
+        };
+        if !plain {
+            return Ok(Some(entry.file_name().to_string_lossy().into_owned()));
         }
     }
     Ok(None)
@@ -448,6 +480,29 @@ mod tests {
         let dir = temp_dir("subfolder");
         std::fs::create_dir(dir.join("trace.log")).expect("a folder named like a lobby file");
         assert!(secure(&dir).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_shared_directory_holding_a_lobby_file_with_access_of_its_own_is_refused_untouched() {
+        let dir = temp_dir("planted");
+        std::fs::write(dir.join("trace.log"), b"x").expect("file");
+        std::fs::write(dir.join("attach.secret"), b"planted").expect("file");
+        let granted = std::process::Command::new("icacls")
+            .arg(dir.join("attach.secret"))
+            .args(["/grant", "*S-1-1-0:R"])
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("run icacls");
+        assert!(granted.success());
+        let error = secure(&dir).expect_err("refused");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("attach.secret"), "{error}");
+        assert!(
+            !owner_only(&dir).expect("read"),
+            "the directory is left as it is"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
