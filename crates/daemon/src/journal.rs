@@ -254,6 +254,13 @@ impl Journal {
         let below = below.parse::<u64>().ok()?;
         (upper <= self.high_water() && below <= upper.saturating_add(1)).then_some((upper, below))
     }
+
+    /// Makes every append from sequence number `from` on fail, as a full or
+    /// unwritable disk would.
+    #[cfg(test)]
+    pub(crate) fn refuse_appends_from(&mut self, from: u64) {
+        self.refuse_from = Some(from);
+    }
 }
 
 /// The entries of generation `n` that parse, with their sequence numbers.

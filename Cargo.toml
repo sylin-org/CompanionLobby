@@ -30,7 +30,7 @@ lobby-daemon = { path = "crates/daemon" }
 bytes = "=1.12.1"
 dirs = "=6.0.0"
 getrandom = "=0.3.4"
-http-body-util = "=0.1.5"
+http-body-util = { version = "=0.1.5", features = ["channel"] }
 hyper = { version = "=1.12.0", features = ["server", "http1"] }
 hyper-util = { version = "=0.1.21", features = ["tokio", "server", "server-graceful", "http1"] }
 netstat2 = "=0.11.2"

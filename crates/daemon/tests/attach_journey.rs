@@ -921,17 +921,19 @@ fn a_daemon_of_another_build_is_replaced_and_stop_lets_go_of_its_executable() {
     let current = lobby_daemon::discovery::build_id_of(Path::new(EXE)).expect("build id");
     assert_ne!(before.build_id, current);
 
-    // This build's shim stops it and starts this build in its place.
+    // This build's shim stops it and starts this build in its place, which
+    // remembers the companion the older one committed.
     install.create("ada", "Ada");
     let mut shim = install.attach("ada");
+    assert_eq!(
+        shim.ask(&initialize(0))["result"]["serverInfo"]["name"],
+        "companion-lobby"
+    );
+    shim.close_stdin();
     let status = shim
         .wait_exit(Duration::from_secs(30))
         .expect("the shim exits");
-    assert_eq!(
-        status.code(),
-        Some(1),
-        "the restarted daemon starts with no companions"
-    );
+    assert_eq!(status.code(), Some(0));
     let after = install.discovery().expect("the new daemon answers");
     assert_eq!(after.build_id, current);
     assert_ne!(after.lock_holder_pid, before.lock_holder_pid);

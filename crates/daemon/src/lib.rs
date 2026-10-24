@@ -7,18 +7,20 @@
 //!   ([`attach`]) and how every subcommand finds, verifies, starts and stops
 //!   the daemon ([`contact`], [`lock`], [`discovery`], [`loopback`], [`stop`],
 //!   [`browser`]);
-//! * the lobby's state, held in memory, with commands that validate before
-//!   they apply ([`domain`]), and the catalog a mind sees, projected from it
-//!   ([`projections`], [`mcp`]);
+//! * the lobby itself ([`domain`]): one command pipeline that validates,
+//!   journals, commits to the state file, journals the outcome and emits
+//!   events, and one event pipeline of small handlers; the state file
+//!   ([`store`]) is the truth and the journal ([`journal`]) the attribution;
+//! * what is projected from them and holds no truth ([`projections`]): the
+//!   catalog a mind sees ([`mcp`]), and the manager page with its live feed
+//!   ([`manager`]);
 //! * the data directory and the attach secret ([`home`], [`keyring`]), the
 //!   daemon's own trace log ([`trace`]) and, on Windows, the crate's one module
 //!   allowed `unsafe` (`win32`).
 //!
-//! The modules [`store`], [`journal`], [`calls`], [`broker`], [`registry`]
-//! and [`manager`] hold no code yet; each says what it will own when the
-//! state file, the journal and the adapters arrive. Then every change will
-//! validate, apply, commit to the state file, journal and emit events, and
-//! adapters will run synchronously on blocking threads with no lock held.
+//! The modules [`calls`], [`broker`] and [`registry`] hold no code yet; each
+//! says what it will own when the adapters arrive, which will run
+//! synchronously on blocking threads with no lock held.
 //!
 //! The `companion-lobby` binary is a thin front over [`cli`].
 

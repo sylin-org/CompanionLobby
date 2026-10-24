@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark">
+<title>Companion Lobby</title>
+<link rel="stylesheet" href="/manager.css">
+<script src="/manager.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#view">Skip to the page</a>
+<header class="masthead">
+  <a class="brand" href="/" data-link>Companion <small>Lobby</small></a>
+  <nav class="primary-nav" aria-label="Sections">
+    <a href="/" data-link data-section="companions">Companions</a>
+    <a href="/journal" data-link data-section="journal">Journal</a>
+  </nav>
+  <span id="live" class="live" role="status">Connecting</span>
+</header>
+<p id="condition" class="condition" role="alert" hidden></p>
+<main id="view" tabindex="-1"></main>
+<p id="notice" role="status" aria-live="polite"></p>
+</body>
+</html>
