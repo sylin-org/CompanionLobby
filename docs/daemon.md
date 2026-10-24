@@ -41,7 +41,9 @@ so a copy of the file is useless to another account or another machine;
 elsewhere it is text with mode 0600. When the daemon starts it replaces the
 secret with a fresh one if there is none, if the file does not unseal as one
 this user sealed, or if the file grants access to anyone but its owner, and
-says which in `trace.log`. Hosts' shims read the secret each time they
+says which in `trace.log`. Replacing a secret that was there is a command the
+lobby initiates, `renew_attach_secret`, journaled pending and then settled;
+when the pending entry cannot be written the daemon does not start. Hosts' shims read the secret each time they
 attach, so a replaced secret needs no change anywhere. A sealed secret does
 not survive a profile reset or a move to another machine; the daemon then
 writes a new one.
@@ -170,7 +172,9 @@ cannot be written; the journal's health says so.
 
 The commands are `create_companion`, `rename_companion` and
 `remove_companion`, which only the sponsor issues through the operator API,
-and `attach` and `detach`, which a mind issues through its shim. A rename or
+and `attach` and `detach`, which a mind issues through its shim; the lobby
+itself issues `detach` in the cascade and `renew_attach_secret` when it
+starts. A rename or
 removal that names a revision the companion has moved past is refused with
 409. A removal while minds are attached as the companion is refused with 409
 unless it confirms the cascade. A mind attached by moniker stays attached

@@ -32,7 +32,9 @@
 //! while minds are attached as the companion unless the sponsor confirms the
 //! cascade. An attachment exists only because the attach shim presented the
 //! per-install secret and named a companion by id or moniker; it keeps the
-//! token its shim presents on every later request.
+//! token its shim presents on every later request. When the daemon starts and
+//! finds an attach secret that could have been read or planted, replacing it
+//! is a command the lobby initiates, journaled like any other.
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -144,6 +146,7 @@ const RENAME_COMPANION: &str = "rename_companion";
 const REMOVE_COMPANION: &str = "remove_companion";
 const ATTACH: &str = "attach";
 const DETACH: &str = "detach";
+const RENEW_ATTACH_SECRET: &str = "renew_attach_secret";
 
 impl Lobby {
     /// Opens the state file and the journal in `dir`. `command` is the path
@@ -177,6 +180,38 @@ impl Lobby {
         let result = command(&mut core);
         core.settle_events(&self.feed, &self.command);
         result
+    }
+
+    /// Replaces an attach secret that could have been read or planted, a
+    /// command the lobby initiates when it starts: journaled pending, then
+    /// `write` puts a fresh secret in place, then journaled settled. When the
+    /// pending entry cannot be written, nothing is replaced.
+    pub fn renew_attach_secret<T>(
+        &self,
+        write: impl FnOnce() -> io::Result<T>,
+    ) -> Result<T, Refusal> {
+        self.run(|core| {
+            core.begin(Initiator::Lobby, None, RENEW_ATTACH_SECRET)?;
+            match write() {
+                Ok(written) => {
+                    core.settle(Initiator::Lobby, None, RENEW_ATTACH_SECRET, Outcome::Done);
+                    Ok(written)
+                }
+                Err(error) => {
+                    trace::line(&format!("a new attach secret could not be written: {error}"));
+                    core.settle(
+                        Initiator::Lobby,
+                        None,
+                        RENEW_ATTACH_SECRET,
+                        Outcome::Internal,
+                    );
+                    Err(Refusal::new(
+                        Outcome::Internal,
+                        "The lobby could not write a new attach secret; the trace log in the data directory says why.",
+                    ))
+                }
+            }
+        })
     }
 
     /// Creates a companion; the moniker must be free.
@@ -794,6 +829,49 @@ mod tests {
             Outcome::NotFound
         );
         assert_eq!(lobby.companions().len(), 1);
+    }
+
+    #[test]
+    fn renewing_the_attach_secret_is_journaled_as_the_lobby_pending_then_settled() {
+        let dir = Dir::new("renew");
+        let lobby = dir.lobby();
+        let written = lobby
+            .renew_attach_secret(|| Ok::<_, io::Error>(7))
+            .expect("renewed");
+        assert_eq!(written, 7);
+        let failed = lobby
+            .renew_attach_secret(|| Err::<(), _>(io::Error::other("disk full")))
+            .expect_err("the write failed");
+        assert_eq!(failed.outcome, Outcome::Internal);
+        let entries: Vec<(String, String, String)> = dir
+            .journal()
+            .iter()
+            .map(|entry| {
+                assert!(entry.get("companion").is_none(), "{entry}");
+                assert!(entry.get("attachment").is_none(), "{entry}");
+                (
+                    entry["initiator"].as_str().expect("initiator").to_owned(),
+                    entry["command"].as_str().expect("command").to_owned(),
+                    entry["outcome"].as_str().expect("outcome").to_owned(),
+                )
+            })
+            .collect();
+        let renew = |outcome: &str| {
+            (
+                "lobby".to_owned(),
+                RENEW_ATTACH_SECRET.to_owned(),
+                outcome.to_owned(),
+            )
+        };
+        assert_eq!(
+            entries,
+            [
+                renew("pending"),
+                renew("done"),
+                renew("pending"),
+                renew("internal")
+            ]
+        );
     }
 
     #[test]

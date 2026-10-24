@@ -12,7 +12,7 @@
 //! lock, and replaces it with a fresh one when it is missing, when it does
 //! not unseal as this user's, or when the file grants access to anyone but
 //! its owner: a secret someone else could have read or planted is never
-//! used. The shim makes the same check before it reads the secret, and
+//! used, and replacing one is a command the lobby journals. The shim makes the same check before it reads the secret, and
 //! refuses rather than replaces, since only the lock holder writes it.
 //!
 //! Every attachment then gets its own [`AttachmentToken`], which lives only in
@@ -52,7 +52,7 @@ impl fmt::Debug for AttachSecret {
     }
 }
 
-/// Why the daemon wrote a new attach secret when it started.
+/// Why the daemon must write a new attach secret when it starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Renewal {
     /// There was none.
@@ -64,6 +64,12 @@ pub enum Renewal {
 }
 
 impl Renewal {
+    /// Whether a secret that was there is replaced, which the lobby journals;
+    /// an install's first secret replaces nothing.
+    pub fn replaces_one(self) -> bool {
+        !matches!(self, Self::Created)
+    }
+
     /// A sentence for the trace log.
     pub fn describe(self) -> &'static str {
         match self {
@@ -79,21 +85,27 @@ impl Renewal {
 }
 
 impl AttachSecret {
-    /// Reads the secret for the daemon, which holds the daemon lock, writing a
-    /// fresh one when there is none or the one there cannot be trusted.
-    pub fn load_or_renew(dir: &Path) -> io::Result<(Self, Option<Renewal>)> {
-        let renewal = match Self::read(dir) {
-            Ok(secret) => return Ok((secret, None)),
+    /// Reads the secret for the daemon, which holds the daemon lock: the
+    /// secret, or why [`AttachSecret::renew`] must write a fresh one because
+    /// there is none or the one there cannot be trusted.
+    pub fn load(dir: &Path) -> io::Result<Result<Self, Renewal>> {
+        match Self::read(dir) {
+            Ok(secret) => Ok(Ok(secret)),
             Err(error) => match error.kind() {
-                io::ErrorKind::NotFound => Renewal::Created,
-                io::ErrorKind::InvalidData => Renewal::Unreadable,
-                io::ErrorKind::PermissionDenied => Renewal::Exposed,
-                _ => return Err(error),
+                io::ErrorKind::NotFound => Ok(Err(Renewal::Created)),
+                io::ErrorKind::InvalidData => Ok(Err(Renewal::Unreadable)),
+                io::ErrorKind::PermissionDenied => Ok(Err(Renewal::Exposed)),
+                _ => Err(error),
             },
-        };
+        }
+    }
+
+    /// Writes a fresh secret in place of whatever `dir` holds, owner-only and
+    /// sealed. Only the daemon that holds the lock calls it.
+    pub fn renew(dir: &Path) -> io::Result<Self> {
         let secret = Self(random_hex()?);
         atomic_write(&secret_path(dir), &seal(&secret.0)?)?;
-        Ok((secret, Some(renewal)))
+        Ok(secret)
     }
 
     /// The fingerprint of the secret in `dir`, read without the privacy
@@ -283,12 +295,22 @@ mod tests {
         dir
     }
 
+    /// What the daemon does when it starts: the secret, renewed when it must be.
+    fn load_or_renew(dir: &Path) -> io::Result<(AttachSecret, Option<Renewal>)> {
+        match AttachSecret::load(dir)? {
+            Ok(secret) => Ok((secret, None)),
+            Err(renewal) => Ok((AttachSecret::renew(dir)?, Some(renewal))),
+        }
+    }
+
     #[test]
     fn the_secret_is_created_once_sealed_and_read_back() {
         let dir = private_dir("once");
-        let (first, renewal) = AttachSecret::load_or_renew(&dir).expect("create");
+        let (first, renewal) = load_or_renew(&dir).expect("create");
         assert_eq!(renewal, Some(Renewal::Created));
-        let (again, renewal) = AttachSecret::load_or_renew(&dir).expect("read");
+        assert!(!Renewal::Created.replaces_one());
+        assert!(Renewal::Unreadable.replaces_one() && Renewal::Exposed.replaces_one());
+        let (again, renewal) = load_or_renew(&dir).expect("read");
         assert_eq!(renewal, None);
         assert_eq!(first, again);
         assert_eq!(AttachSecret::read(&dir).expect("read"), first);
@@ -338,7 +360,7 @@ mod tests {
         crate::store::write_new(&dir.join(ATTACH_SECRET_FILE), content.as_bytes()).expect("plant");
         let refused = AttachSecret::read(&dir).expect_err("the shim refuses it");
         assert_eq!(refused.kind(), io::ErrorKind::InvalidData);
-        let (renewed, renewal) = AttachSecret::load_or_renew(&dir).expect("renew");
+        let (renewed, renewal) = load_or_renew(&dir).expect("renew");
         assert_eq!(renewal, Some(Renewal::Unreadable));
         assert!(!renewed.matches(&planted));
         assert_ne!(
@@ -353,7 +375,7 @@ mod tests {
     #[test]
     fn a_secret_others_may_read_is_refused_to_the_shim_and_renewed_by_the_daemon() {
         let dir = private_dir("exposed");
-        let (first, _) = AttachSecret::load_or_renew(&dir).expect("create");
+        let (first, _) = load_or_renew(&dir).expect("create");
         let granted = std::process::Command::new("icacls")
             .arg(dir.join(ATTACH_SECRET_FILE))
             .args(["/grant", "*S-1-1-0:R"])
@@ -363,7 +385,7 @@ mod tests {
         assert!(granted.success());
         let refused = AttachSecret::read(&dir).expect_err("the shim refuses it");
         assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
-        let (renewed, renewal) = AttachSecret::load_or_renew(&dir).expect("renew");
+        let (renewed, renewal) = load_or_renew(&dir).expect("renew");
         assert_eq!(renewal, Some(Renewal::Exposed));
         assert_ne!(renewed, first);
         assert!(crate::win32::is_private_file(&dir.join(ATTACH_SECRET_FILE)).expect("read"));
@@ -382,7 +404,7 @@ mod tests {
             .expect("open it to others");
         let refused = AttachSecret::read(&dir).expect_err("the shim refuses it");
         assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
-        let (renewed, renewal) = AttachSecret::load_or_renew(&dir).expect("renew");
+        let (renewed, renewal) = load_or_renew(&dir).expect("renew");
         assert_eq!(renewal, Some(Renewal::Exposed));
         assert!(!renewed.matches(&planted));
         let mode = std::fs::metadata(&path).expect("meta").permissions().mode();

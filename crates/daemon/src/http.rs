@@ -173,11 +173,6 @@ pub fn run() -> Result<(), String> {
         }
         Err(LockProblem::Io(error)) => return Err(format!("cannot lock {shown}: {error}")),
     };
-    let (secret, renewal) = AttachSecret::load_or_renew(&dir)
-        .map_err(|error| format!("cannot read the attach secret in {shown}: {error}"))?;
-    if let Some(renewal) = renewal {
-        trace::line(renewal.describe());
-    }
     let command = std::env::current_exe()
         .map(|exe| home::display_path(&exe))
         .map_err(|error| format!("cannot read this executable's path: {error}"))?;
@@ -185,6 +180,8 @@ pub fn run() -> Result<(), String> {
         trace::line(&format!("start refused: {problem}"));
         format!("{problem} (in {shown})")
     })?;
+    let secret = attach_secret(&dir, &lobby)
+        .map_err(|problem| format!("cannot use the attach secret in {shown}: {problem}"))?;
     let port = resolve_port()?;
     let build_id =
         discovery::build_id().map_err(|error| format!("cannot read this executable: {error}"))?;
@@ -208,6 +205,24 @@ pub fn run() -> Result<(), String> {
     });
     finish(&dir, lock);
     result
+}
+
+/// The install's attach secret, written fresh when there is none or the one
+/// there cannot be trusted; replacing one that was there is journaled.
+fn attach_secret(dir: &Path, lobby: &Lobby) -> Result<AttachSecret, String> {
+    let renewal = match AttachSecret::load(dir).map_err(|error| error.to_string())? {
+        Ok(secret) => return Ok(secret),
+        Err(renewal) => renewal,
+    };
+    let secret = if renewal.replaces_one() {
+        lobby
+            .renew_attach_secret(|| AttachSecret::renew(dir))
+            .map_err(|refusal| refusal.message)?
+    } else {
+        AttachSecret::renew(dir).map_err(|error| error.to_string())?
+    };
+    trace::line(renewal.describe());
+    Ok(secret)
 }
 
 fn finish(dir: &Path, lock: DaemonLock) {
