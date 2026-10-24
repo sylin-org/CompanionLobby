@@ -9,21 +9,30 @@
 //! * elsewhere: `$XDG_STATE_HOME/companion-lobby`;
 //! * `LOBBY_DATA_DIR` overrides all of them.
 //!
-//! Any path whose final component is `.companion-lobby` is refused outright and
-//! never read. The daemon, the attach shim, `open` and `stop` all resolve the
-//! directory the same way, so a host's shim and the sponsor's own commands
-//! meet the same daemon. Whoever creates the directory restricts it to its
-//! owner, and the daemon restricts and checks it again on every start.
+//! Any path that is, or lies inside, a `.companion-lobby` directory is refused
+//! outright and never read, locked or written. The check runs on the path as
+//! the platform resolves it: `..` folded, the trailing dots and spaces
+//! Windows ignores stripped, an NTFS stream suffix cut off, and the longest
+//! existing prefix canonicalized, so a junction, a symbolic link or a short
+//! 8.3 name that leads there is refused too. The daemon, the attach shim,
+//! `open` and `stop` all resolve the directory the same way, so a host's shim
+//! and the sponsor's own commands meet the same daemon.
+//!
+//! Whoever creates the directory restricts it to its owner. A directory that
+//! is not owner-only is restricted only when everything in it is a file the
+//! lobby itself writes; anything else is refused rather than re-permissioned,
+//! so a mistyped `LOBBY_DATA_DIR` never rewrites the access of a folder the
+//! lobby does not own.
 
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The environment variable that overrides the data directory.
 pub const DATA_DIR_ENV: &str = "LOBBY_DATA_DIR";
 
-/// The final component this product refuses to use.
+/// The directory name this product never uses, nor anything inside it.
 const REFUSED_COMPONENT: &str = ".companion-lobby";
 
 /// Why the data directory could not be used.
@@ -31,7 +40,7 @@ const REFUSED_COMPONENT: &str = ".companion-lobby";
 pub enum HomeProblem {
     /// The platform reported no base folder.
     NoBaseFolder,
-    /// The path ends in a component this product never uses.
+    /// The path is, or lies inside, a directory this product never uses.
     Refused(PathBuf),
     /// The directory could not be created or restricted.
     Io(PathBuf, io::Error),
@@ -45,7 +54,7 @@ impl fmt::Display for HomeProblem {
             ),
             Self::Refused(path) => write!(
                 f,
-                "{} ends in {REFUSED_COMPONENT}, which Companion Lobby never uses; choose another LOBBY_DATA_DIR",
+                "{} is or lies inside {REFUSED_COMPONENT}, which Companion Lobby never uses; choose another LOBBY_DATA_DIR",
                 display_path(path)
             ),
             Self::Io(path, error) => {
@@ -80,13 +89,53 @@ pub fn choose(
     Ok(path)
 }
 
-/// Whether `path` ends in the refused component, compared without case.
+/// Whether `path`, as the platform resolves it, is or lies inside a
+/// `.companion-lobby` directory.
 pub fn refused(path: &Path) -> bool {
-    path.components()
-        .next_back()
-        .map(|last| last.as_os_str())
-        .and_then(OsStr::to_str)
-        .is_some_and(|last| last.eq_ignore_ascii_case(REFUSED_COMPONENT))
+    let resolved = lexical(path);
+    names_refused(&resolved) || canonical_prefix(&resolved).is_some_and(|real| names_refused(&real))
+}
+
+/// The absolute form of `path` with `.` and `..` folded without touching the
+/// file system. On Windows `std::path::absolute` also strips the trailing dots
+/// and spaces the Win32 layer ignores.
+fn lexical(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut folded = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                folded.pop();
+            }
+            other => folded.push(other.as_os_str()),
+        }
+    }
+    folded
+}
+
+/// The canonical form of the longest prefix of `path` that exists, which
+/// resolves junctions, symbolic links and 8.3 short names.
+fn canonical_prefix(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|ancestor| ancestor.exists())
+        .and_then(|existing| std::fs::canonicalize(existing).ok())
+}
+
+fn names_refused(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        Component::Normal(name) => is_refused_name(name),
+        _ => false,
+    })
+}
+
+/// Compared without case, ignoring trailing dots and spaces and any `:stream`
+/// suffix, the way Windows resolves a name.
+fn is_refused_name(name: &OsStr) -> bool {
+    let name = name.to_string_lossy();
+    let name = name.split(':').next().unwrap_or_default();
+    name.trim_end_matches(['.', ' '])
+        .eq_ignore_ascii_case(REFUSED_COMPONENT)
 }
 
 #[cfg(windows)]
@@ -198,19 +247,78 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_ending_in_the_refused_component_is_never_used() {
-        for path in ["/home/someone/.companion-lobby", "/x/.Companion-Lobby"] {
-            assert!(matches!(
-                choose(Some(PathBuf::from(path)), None),
-                Err(HomeProblem::Refused(_))
-            ));
+    fn a_directory_inside_the_refused_one_is_never_used() {
+        for path in [
+            "/home/someone/.companion-lobby",
+            "/x/.Companion-Lobby",
+            "/x/.companion-lobby/inner",
+            "/x/.companion-lobby/sub/..",
+            "/x/.companion-lobby/./inner/../deeper",
+            "/x/.companion-lobby.",
+            "/x/.companion-lobby. .",
+            "/x/.companion-lobby ",
+            "/x/.companion-lobby::$INDEX_ALLOCATION",
+        ] {
+            assert!(
+                matches!(
+                    choose(Some(PathBuf::from(path)), None),
+                    Err(HomeProblem::Refused(_))
+                ),
+                "{path}"
+            );
         }
-        assert!(!refused(Path::new("/x/.companion-lobby/inner")));
         assert!(!refused(Path::new("/x/companion-lobby")));
+        assert!(!refused(Path::new("/x/.companion-lobby-other")));
+        assert!(!refused(Path::new("/x/.companion-lobby/..")), "that is /x");
         assert!(matches!(
-            prepare(Path::new("/nowhere/.companion-lobby")),
+            prepare(Path::new("/nowhere/.companion-lobby/inner")),
             Err(HomeProblem::Refused(_))
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_spellings_of_the_refused_directory_are_refused() {
+        for path in [
+            r"C:\Users\x\.companion-lobby\sub\..",
+            r"C:\Users\x\.COMPANION-LOBBY\",
+            r"C:/Users/x/.companion-lobby/inner",
+            r"\?\C:\Users\x\.companion-lobby",
+        ] {
+            assert!(refused(Path::new(path)), "{path}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_that_leads_into_the_refused_directory_is_refused() {
+        let root = std::env::temp_dir().join(format!(
+            "lobby-junction-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        let target = root.join(REFUSED_COMPONENT);
+        std::fs::create_dir_all(&target).expect("target");
+        let alias = root.join("alias");
+        let made = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&alias)
+            .arg(&target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("run mklink");
+        assert!(made.success());
+        assert!(
+            !names_refused(&lexical(&alias)),
+            "only the link leads there"
+        );
+        assert!(refused(&alias));
+        assert!(refused(&alias.join("not-yet-created")));
+        assert!(!refused(&root.join("elsewhere")));
+        let _ = std::fs::remove_dir(&alias);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
