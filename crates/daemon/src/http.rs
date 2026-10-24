@@ -52,7 +52,7 @@ use tokio::sync::{Notify, Semaphore};
 
 use crate::discovery::{DISCOVERY_PATH, Discovery};
 use crate::domain::{Lobby, Refusal};
-use crate::home::{self, HomeProblem};
+use crate::home;
 use crate::keyring::{AttachSecret, AttachmentToken};
 use crate::lock::{DaemonLock, DaemonRecord, LockProblem};
 use crate::{discovery, mcp, trace};
@@ -149,12 +149,6 @@ pub fn run() -> Result<(), String> {
         }
         Err(LockProblem::Io(error)) => return Err(format!("cannot lock {shown}: {error}")),
     };
-    if let Err(error) = home::secure(&dir) {
-        trace::line(&format!(
-            "start refused: the data directory is not owner-only: {error}"
-        ));
-        return Err(HomeProblem::Io(dir.clone(), error).to_string());
-    }
     let secret = AttachSecret::load_or_create(&dir)
         .map_err(|error| format!("cannot read the attach secret in {shown}: {error}"))?;
     let port = resolve_port()?;

@@ -164,16 +164,19 @@ const fn platform_leaf() -> &'static str {
     }
 }
 
-/// Creates the directory if it is missing, restricting a new directory to its owner.
+/// Creates the directory if it is missing, restricting a new directory to its
+/// owner, then [`secure`]s it. Nothing is written into the directory before
+/// it is known to be the lobby's own.
 pub fn prepare(path: &Path) -> Result<(), HomeProblem> {
     if refused(path) {
         return Err(HomeProblem::Refused(path.to_path_buf()));
     }
-    if path.is_dir() {
-        return Ok(());
+    if !path.is_dir() {
+        std::fs::create_dir_all(path)
+            .map_err(|error| HomeProblem::Io(path.to_path_buf(), error))?;
+        restrict_to_owner(path).map_err(|error| HomeProblem::Io(path.to_path_buf(), error))?;
     }
-    std::fs::create_dir_all(path).map_err(|error| HomeProblem::Io(path.to_path_buf(), error))?;
-    restrict_to_owner(path).map_err(|error| HomeProblem::Io(path.to_path_buf(), error))
+    secure(path).map_err(|error| HomeProblem::Io(path.to_path_buf(), error))
 }
 
 /// Restricts a directory to the current user: on Windows a protected DACL
@@ -191,26 +194,85 @@ pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Restricts the directory to its owner and checks that it took: the daemon
-/// does this on every start, before it reads or creates the attach secret, so
-/// a directory whose access was widened since is narrowed again or refused.
+/// Makes sure the directory belongs to its owner alone, or refuses it. The
+/// daemon does this on every start, before it writes anything there, so a
+/// directory whose access was widened since is narrowed again or refused.
+///
+/// An owner-only directory is left as it is. One that is not is restricted
+/// only when everything in it is a file the lobby itself writes, and checked
+/// again afterwards; a directory holding anything else is refused untouched,
+/// because restricting it would rewrite the access of everything inside a
+/// folder the lobby does not own.
 pub fn secure(path: &Path) -> io::Result<()> {
+    if owner_only(path)? {
+        return Ok(());
+    }
+    if let Some(stranger) = first_foreign_entry(path)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "the directory is not private to its owner and holds {stranger}, which Companion Lobby did not write; \
+                 choose an empty directory for {DATA_DIR_ENV}"
+            ),
+        ));
+    }
     restrict_to_owner(path)?;
-    #[cfg(windows)]
-    let owner_only = crate::win32::is_owner_only(path)?;
-    #[cfg(unix)]
-    let owner_only = {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path)?.permissions().mode() & 0o077 == 0
-    };
-    if owner_only {
+    if owner_only(path)? {
         Ok(())
     } else {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "the directory still grants access to someone other than its owner",
+            "the directory still grants access to someone other than its owner, or another account owns it",
         ))
     }
+}
+
+fn owner_only(path: &Path) -> io::Result<bool> {
+    #[cfg(windows)]
+    {
+        crate::win32::is_owner_only(path)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Ok(std::fs::metadata(path)?.permissions().mode() & 0o077 == 0)
+    }
+}
+
+/// The first entry in `path` that is not one of the files the lobby writes.
+fn first_foreign_entry(path: &Path) -> io::Result<Option<String>> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !(entry.file_type()?.is_file() && is_lobby_file(&name)) {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether `name` is a file the lobby itself writes in the data directory.
+fn is_lobby_file(name: &str) -> bool {
+    use crate::keyring::ATTACH_SECRET_FILE;
+    use crate::lock::{INSTANCE_FILE, LOCK_FILE, RECORD_FILE};
+    use crate::trace::{TRACE_FILE, TRACE_PREVIOUS};
+    let temporary = |file: &str| {
+        name.strip_prefix(file)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .and_then(|rest| rest.strip_suffix(".tmp"))
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()))
+    };
+    [
+        ATTACH_SECRET_FILE,
+        LOCK_FILE,
+        INSTANCE_FILE,
+        RECORD_FILE,
+        TRACE_FILE,
+        TRACE_PREVIOUS,
+    ]
+    .contains(&name)
+        || temporary(ATTACH_SECRET_FILE)
+        || temporary(RECORD_FILE)
 }
 
 /// A path as an operator should read it: on Windows, without the `\\?\` or
@@ -321,17 +383,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn securing_a_directory_leaves_it_to_its_owner_alone() {
+    fn temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "lobby-home-{}-{}",
+            "lobby-home-{label}-{}-{}",
             std::process::id(),
             uuid::Uuid::now_v7().simple()
         ));
         std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    #[test]
+    fn a_shared_directory_holding_only_lobby_files_is_narrowed_to_its_owner() {
+        let dir = temp_dir("lobby");
+        for name in [
+            "attach.secret",
+            "daemon.lock",
+            "trace.log",
+            "daemon.json.42.tmp",
+        ] {
+            std::fs::write(dir.join(name), b"x").expect("file");
+        }
+        assert!(!owner_only(&dir).expect("read"), "a temp folder is shared");
         secure(&dir).expect("secure");
-        #[cfg(windows)]
-        assert!(crate::win32::is_owner_only(&dir).expect("read the DACL"));
+        assert!(owner_only(&dir).expect("read"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -344,6 +419,37 @@ mod tests {
         // Securing again changes nothing and still succeeds.
         secure(&dir).expect("secure again");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_shared_directory_holding_other_files_is_refused_untouched() {
+        for stranger in ["notes.txt", "daemon.json.tmp", "attach.secret.x.tmp"] {
+            let dir = temp_dir("foreign");
+            std::fs::write(dir.join("trace.log"), b"x").expect("file");
+            std::fs::write(dir.join(stranger), b"x").expect("file");
+            let error = secure(&dir).expect_err("refused");
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{stranger}");
+            assert!(
+                !owner_only(&dir).expect("read"),
+                "the access of a folder the lobby does not own is not rewritten"
+            );
+            assert!(matches!(prepare(&dir), Err(HomeProblem::Io(..))));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        let dir = temp_dir("subfolder");
+        std::fs::create_dir(dir.join("trace.log")).expect("a folder named like a lobby file");
+        assert!(secure(&dir).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_new_directory_is_created_private() {
+        let parent = temp_dir("parent");
+        let dir = parent.join("data");
+        prepare(&dir).expect("prepare");
+        assert!(owner_only(&dir).expect("read"));
+        prepare(&dir).expect("prepare again");
+        let _ = std::fs::remove_dir_all(parent);
     }
 
     #[cfg(windows)]

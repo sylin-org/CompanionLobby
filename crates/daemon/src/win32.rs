@@ -12,7 +12,8 @@
 //! * **The owner-only data directory.** The directory gets a protected DACL
 //!   with one entry, full control for the current user, inherited by
 //!   everything inside it; and the daemon checks on every start that it still
-//!   has exactly that.
+//!   has exactly that and that the current user owns it, since an owner can
+//!   always rewrite a DACL.
 //! * **An exclusive listening port.** The listener is bound with
 //!   `SO_EXCLUSIVEADDRUSE`, so no other socket can share the port while the
 //!   daemon runs.
@@ -36,8 +37,9 @@ use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, AddAccessAllowedAceEx,
     CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid,
     GetSecurityDescriptorControl, GetTokenInformation, InitializeAcl, OBJECT_INHERIT_ACE,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
-    TOKEN_QUERY, TOKEN_USER, TokenUser,
+    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SE_DACL_PROTECTED, TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenOwner,
+    TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
@@ -136,21 +138,25 @@ pub fn restrict_to_owner(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Whether `path` has a protected DACL whose every entry allows the current
-/// user and no one else.
+/// Whether `path` is owned by the current user (or by the default owner its
+/// token gives new objects, which differs when the process runs elevated) and
+/// has a protected DACL whose every entry allows the current user and no one
+/// else.
 pub fn is_owner_only(path: &Path) -> io::Result<bool> {
     let user = CurrentUser::query()?;
+    let default_owner = DefaultOwner::query()?;
     let wide = wide(path);
+    let mut owner: PSID = null_mut();
     let mut dacl: *mut ACL = null_mut();
     let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
     // SAFETY: every out pointer is a live local; on success `descriptor` is a
-    // LocalAlloc'd block that `dacl` points into, freed below.
+    // LocalAlloc'd block that `owner` and `dacl` point into, freed below.
     let status = unsafe {
         GetNamedSecurityInfoW(
             wide.as_ptr(),
             SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            null_mut(),
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
             null_mut(),
             &mut dacl,
             null_mut(),
@@ -160,9 +166,17 @@ pub fn is_owner_only(path: &Path) -> io::Result<bool> {
     if status != 0 {
         return Err(io::Error::from_raw_os_error(status as i32));
     }
-    // SAFETY: `descriptor` and `dacl` were just returned by the system and stay
-    // valid until the LocalFree below; `user` outlives the comparison.
-    let verdict = unsafe { dacl_is_owner_only(descriptor, dacl, user.sid()) };
+    // SAFETY: `owner` is null or a valid SID inside `descriptor`, which lives
+    // until the LocalFree below; both token SIDs live as long as their owners.
+    let owned = !owner.is_null()
+        && unsafe { EqualSid(owner, user.sid()) != 0 || EqualSid(owner, default_owner.sid()) != 0 };
+    let verdict = if owned {
+        // SAFETY: `descriptor` and `dacl` were just returned by the system and
+        // stay valid until the LocalFree below; `user` outlives the comparison.
+        unsafe { dacl_is_owner_only(descriptor, dacl, user.sid()) }
+    } else {
+        Ok(false)
+    };
     // SAFETY: `descriptor` was allocated by GetNamedSecurityInfoW for us to free.
     unsafe {
         LocalFree(descriptor);
@@ -216,14 +230,14 @@ unsafe fn dacl_is_owner_only(
     Ok(true)
 }
 
-/// The current process's user, read from its token.
-struct CurrentUser {
-    /// A TOKEN_USER followed by the SID it points to, 8-byte aligned.
+/// One piece of the current process's token, read into an aligned buffer.
+struct TokenInformation {
+    /// The structure the class names, followed by the SID it points to, 8-byte aligned.
     buffer: Vec<u64>,
 }
 
-impl CurrentUser {
-    fn query() -> io::Result<Self> {
+impl TokenInformation {
+    fn query(class: TOKEN_INFORMATION_CLASS) -> io::Result<Self> {
         let mut token: HANDLE = null_mut();
         // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no
         // closing; `token` receives a real handle closed below.
@@ -233,14 +247,14 @@ impl CurrentUser {
         let mut needed = 0u32;
         // SAFETY: a size query with no buffer; `needed` is a local.
         unsafe {
-            GetTokenInformation(token, TokenUser, null_mut(), 0, &mut needed);
+            GetTokenInformation(token, class, null_mut(), 0, &mut needed);
         }
         let mut buffer = vec![0u64; (needed as usize).div_ceil(size_of::<u64>())];
         // SAFETY: `buffer` holds at least `needed` writable bytes.
         let filled = unsafe {
             GetTokenInformation(
                 token,
-                TokenUser,
+                class,
                 buffer.as_mut_ptr().cast(),
                 needed,
                 &mut needed,
@@ -256,11 +270,35 @@ impl CurrentUser {
         }
         Ok(Self { buffer })
     }
+}
+
+/// The current process's user, read from its token.
+struct CurrentUser(TokenInformation);
+
+impl CurrentUser {
+    fn query() -> io::Result<Self> {
+        TokenInformation::query(TokenUser).map(Self)
+    }
 
     fn sid(&self) -> PSID {
         // SAFETY: the buffer was filled by GetTokenInformation(TokenUser), so it
         // starts with an aligned TOKEN_USER whose SID points into the buffer.
-        unsafe { (*self.buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+        unsafe { (*self.0.buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+    }
+}
+
+/// The owner the current process's token gives the objects it creates.
+struct DefaultOwner(TokenInformation);
+
+impl DefaultOwner {
+    fn query() -> io::Result<Self> {
+        TokenInformation::query(TokenOwner).map(Self)
+    }
+
+    fn sid(&self) -> PSID {
+        // SAFETY: the buffer was filled by GetTokenInformation(TokenOwner), so it
+        // starts with an aligned TOKEN_OWNER whose SID points into the buffer.
+        unsafe { (*self.0.buffer.as_ptr().cast::<TOKEN_OWNER>()).Owner }
     }
 }
 
