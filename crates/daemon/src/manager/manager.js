@@ -1,7 +1,8 @@
 "use strict";
 
 // The manager page holds no truth. It loads the lobby, follows the live feed,
-// and loads the lobby again whenever the feed says to reset. Text reaches the
+// and loads the lobby again whenever the feed says to reset or a change it
+// asked for was refused because the lobby changed first. Text reaches the
 // page only through textContent; nothing becomes markup.
 
 // ---------- small helpers ----------
@@ -110,17 +111,11 @@ function attachedText(count) {
 
 const lobby = { companions: new Map(), journalHealthy: true, position: 0, loaded: false };
 let resynchronizing = true;
+let loads = 0;
+// Whether the feed is open; when it was refused or ended for good, the page
+// loads the lobby anyway and opens the feed again a few seconds later.
+let following = false;
 const buffered = [];
-
-async function loadLobby() {
-  const result = await call("/api/lobby");
-  if (!result.ok) return false;
-  lobby.companions = new Map(result.body.companions.map(companion => [companion.id, companion]));
-  lobby.position = result.body.feed.position;
-  lobby.journalHealthy = result.body.journal.healthy;
-  lobby.loaded = true;
-  return true;
-}
 
 // Applies one feed item the loaded lobby does not include yet.
 function applyItem(seq, item) {
@@ -133,14 +128,25 @@ function applyItem(seq, item) {
   return true;
 }
 
+// Loads the lobby again. Only the latest load applies: a reset that arrives
+// while an older load runs makes that load's answer stale, and the items
+// buffered meanwhile wait for the latest one.
 async function resynchronize() {
+  const mine = ++loads;
   resynchronizing = true;
   setLive("Loading", false);
-  const fresh = await loadLobby();
+  const result = await call("/api/lobby");
+  if (mine !== loads) return;
+  if (result.ok) {
+    lobby.companions = new Map(result.body.companions.map(companion => [companion.id, companion]));
+    lobby.position = result.body.feed.position;
+    lobby.journalHealthy = result.body.journal.healthy;
+    lobby.loaded = true;
+  }
   resynchronizing = false;
   for (const [seq, item] of buffered.splice(0)) applyItem(seq, item);
-  setLive(fresh ? "Live" : "Could not load the lobby; retrying", fresh);
-  if (!fresh) setTimeout(resynchronize, 2000);
+  setLive(result.ok ? (following ? "Live" : "Loaded; live updates are paused") : "Could not load the lobby; retrying", result.ok && following);
+  if (!result.ok) setTimeout(() => { if (mine === loads) resynchronize(); }, 2000);
   refresh(true);
 }
 
@@ -151,8 +157,12 @@ function setLive(text, on) {
 }
 
 function startFeed() {
-  if (!window.EventSource) { setLive("Live updates are not available in this browser", false); resynchronize(); return; }
+  if (!window.EventSource) { setLive("Live updates are not available in this browser", false); return; }
   const source = new EventSource("/api/events");
+  source.onopen = () => {
+    following = true;
+    if (!resynchronizing) setLive("Live", true);
+  };
   source.onmessage = message => {
     let item;
     try { item = JSON.parse(message.data); } catch { return; }
@@ -162,7 +172,20 @@ function startFeed() {
     if (resynchronizing) buffered.push([seq, item]);
     else if (applyItem(seq, item)) refresh(false);
   };
-  source.onerror = () => setLive("Reconnecting", false);
+  source.onerror = () => {
+    following = false;
+    if (source.readyState !== EventSource.CLOSED) { setLive("Reconnecting", false); return; }
+    source.close();
+    resynchronize();
+    setTimeout(startFeed, 5000);
+  };
+}
+
+// A reply holds the companion as the command left it; the feed may already
+// have brought a later revision, which the reply must not overwrite.
+function keepNewer(companion) {
+  const held = lobby.companions.get(companion.id);
+  if (!held || held.revision < companion.revision) lobby.companions.set(companion.id, companion);
 }
 
 // ---------- the router: every state of the page is a route ----------
@@ -312,10 +335,10 @@ function renameForm(companion) {
     save.disabled = false;
     if (!result.ok) {
       note(sentence(result), true);
-      if (result.status === 409) refresh(true);
+      if (result.status === 409) resynchronize();
       return;
     }
-    lobby.companions.set(result.body.companion.id, result.body.companion);
+    keepNewer(result.body.companion);
     note("Saved.");
     refresh(true);
   });
@@ -361,7 +384,7 @@ function removal(companion) {
     const result = await call("/api/companions/" + encodeURIComponent(companion.id), "DELETE", { expectedRevision: companion.revision, cascade: count > 0 });
     if (!result.ok) {
       note(sentence(result), true);
-      if (result.status === 409) refresh(true);
+      if (result.status === 409) resynchronize();
       return;
     }
     lobby.companions.delete(companion.id);
@@ -459,5 +482,8 @@ function drawJournal() {
 
 // ---------- start ----------
 
+// The lobby loads once at start whatever the feed does; the feed's own reset
+// loads it again, and only the latest load applies.
 render();
 startFeed();
+resynchronize();
