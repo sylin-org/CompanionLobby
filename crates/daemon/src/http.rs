@@ -3,14 +3,16 @@
 //! The daemon listens on 127.0.0.1 only. Every request passes the same
 //! envelope, in this order, before any body is read:
 //!
-//! 1. the `Host` header must name 127.0.0.1; `localhost` is redirected to
-//!    127.0.0.1 on the same port, and any other name is refused, so a page
-//!    that points its own hostname at the loopback address reaches nothing;
+//! 1. the `Host` header must name 127.0.0.1, with no port or the bound one;
+//!    `localhost` is redirected to 127.0.0.1 on the same port, and any other
+//!    name or port is refused, so a page that points its own hostname at the
+//!    loopback address reaches nothing;
 //! 2. a declared body larger than 1 MiB is refused, and a body that grows past
 //!    it while arriving is refused too; headers are capped at 8 KiB; a head
 //!    must arrive within 30 seconds and a body within 10 seconds after it;
 //! 3. operator mutations under `/api/` need JSON and same-origin browser
-//!    evidence: an `Origin` equal to the page's own origin, and a
+//!    evidence: an `Origin` equal to the page's own origin (built from the
+//!    bound port, never from the request), and a
 //!    `Sec-Fetch-Site` that is absent or `same-origin`;
 //! 4. `/mcp` refuses any browser evidence at all (`Origin`, `Referer` or a
 //!    `Sec-Fetch-*` header). Attaching requires the per-install attach secret
@@ -20,7 +22,8 @@
 //!
 //! Every response is sent with `Cache-Control: no-store`,
 //! `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`. Only
-//! the discovery document carries cross-origin headers.
+//! the discovery document carries cross-origin headers, and what it says to a
+//! browser leaves out everything that identifies the install.
 //!
 //! `POST /api/stop` stops accepting connections, lets every accepted request
 //! finish, and only then lets the process exit.
@@ -270,7 +273,9 @@ enum HostRule {
     Foreign,
 }
 
-fn host_rule(host: Option<&str>) -> HostRule {
+/// The rule for a `Host` header on a daemon bound to `port`. A port other than
+/// the bound one is foreign: the daemon knows where it listens.
+fn host_rule(host: Option<&str>, port: u16) -> HostRule {
     let Some(host) = host else {
         return HostRule::Foreign;
     };
@@ -278,7 +283,13 @@ fn host_rule(host: Option<&str>) -> HostRule {
         // IPv6 literals, [::1] included: the daemon listens on 127.0.0.1 only.
         return HostRule::Foreign;
     }
-    let name = host.split_once(':').map_or(host, |(name, _)| name);
+    let (name, named_port) = match host.split_once(':') {
+        Some((name, named_port)) => (name, Some(named_port)),
+        None => (host, None),
+    };
+    if named_port.is_some_and(|named_port| named_port != port.to_string()) {
+        return HostRule::Foreign;
+    }
     if name == "127.0.0.1" {
         HostRule::Loopback
     } else if name.eq_ignore_ascii_case("localhost") {
@@ -294,7 +305,7 @@ fn header_text(headers: &HeaderMap, name: impl header::AsHeaderName) -> Option<&
 
 async fn route(app: &App, request: Request<Incoming>) -> Reply {
     let headers = request.headers();
-    match host_rule(header_text(headers, header::HOST)) {
+    match host_rule(header_text(headers, header::HOST), app.port) {
         HostRule::Loopback => {}
         HostRule::Redirect => {
             let target = request
@@ -324,18 +335,18 @@ async fn route(app: &App, request: Request<Incoming>) -> Reply {
     let path = request.uri().path().to_owned();
     match (&method, path.as_str()) {
         (&Method::GET | &Method::OPTIONS, DISCOVERY_PATH) => {
-            discovery_reply(app, method == Method::OPTIONS)
+            discovery_reply(app, method == Method::OPTIONS, browser_evidence(headers))
         }
         (&Method::GET, "/") => page(app),
         (&Method::GET, "/api/companions") => json_reply(
             StatusCode::OK,
             json!({ "companions": app.lobby.companions().iter().map(companion_json).collect::<Vec<_>>() }),
         ),
-        (&Method::POST, "/api/companions") => match operator_body(request).await {
+        (&Method::POST, "/api/companions") => match operator_body(app, request).await {
             Ok(body) => create_companion(app, &body),
             Err(refused) => refused.reply(),
         },
-        (&Method::POST, "/api/stop") => match operator_body(request).await {
+        (&Method::POST, "/api/stop") => match operator_body(app, request).await {
             Ok(_) => {
                 trace::line("stop requested over HTTP");
                 app.request_stop();
@@ -414,12 +425,11 @@ async fn read_body(request: Request<Incoming>) -> Result<Bytes, Problem> {
 }
 
 /// The operator write guard: JSON, and browser evidence that the request
-/// came from the page's own origin.
-async fn operator_body(request: Request<Incoming>) -> Result<Bytes, Problem> {
+/// came from the page's own origin, which the daemon knows from its own port.
+async fn operator_body(app: &App, request: Request<Incoming>) -> Result<Bytes, Problem> {
     let headers = request.headers();
-    let host = header_text(headers, header::HOST).unwrap_or_default();
     let same_origin =
-        header_text(headers, header::ORIGIN) == Some(format!("http://{host}").as_str());
+        header_text(headers, header::ORIGIN) == Some(discovery::manager_origin(app.port).as_str());
     let fetch_site_ok =
         header_text(headers, "sec-fetch-site").is_none_or(|site| site == "same-origin");
     if !is_json(headers) || !same_origin || !fetch_site_ok {
@@ -654,9 +664,14 @@ fn refusal_reply(refusal: &Refusal) -> Reply {
     problem(status, refusal.outcome, &refusal.message)
 }
 
-fn discovery_reply(app: &App, preflight: bool) -> Reply {
+/// The discovery document. A request with browser evidence gets the fields a
+/// page needs to find the daemon and nothing that identifies this install or
+/// its process; the shim, which sends none, gets the whole document.
+fn discovery_reply(app: &App, preflight: bool, from_browser: bool) -> Reply {
     let mut reply = if preflight {
         empty_reply(StatusCode::NO_CONTENT)
+    } else if from_browser {
+        json_reply(StatusCode::OK, app.discovery.for_pages())
     } else {
         json_reply(
             StatusCode::OK,
@@ -796,20 +811,24 @@ mod tests {
 
     #[test]
     fn only_the_loopback_address_is_served_and_localhost_is_redirected() {
-        assert_eq!(host_rule(Some("127.0.0.1:5219")), HostRule::Loopback);
-        assert_eq!(host_rule(Some("127.0.0.1")), HostRule::Loopback);
-        assert_eq!(host_rule(Some("localhost:5219")), HostRule::Redirect);
-        assert_eq!(host_rule(Some("LOCALHOST")), HostRule::Redirect);
+        let rule = |host: Option<&str>| host_rule(host, 5219);
+        assert_eq!(rule(Some("127.0.0.1:5219")), HostRule::Loopback);
+        assert_eq!(rule(Some("127.0.0.1")), HostRule::Loopback);
+        assert_eq!(rule(Some("localhost:5219")), HostRule::Redirect);
+        assert_eq!(rule(Some("LOCALHOST")), HostRule::Redirect);
         for foreign in [
             "[::1]:5219",
             "evil.test",
             "127.0.0.1.evil.test",
             "localhost.evil.test:5219",
+            "127.0.0.1:5220",
+            "127.0.0.1:05219",
+            "localhost:80",
             "",
         ] {
-            assert_eq!(host_rule(Some(foreign)), HostRule::Foreign, "{foreign}");
+            assert_eq!(rule(Some(foreign)), HostRule::Foreign, "{foreign}");
         }
-        assert_eq!(host_rule(None), HostRule::Foreign);
+        assert_eq!(rule(None), HostRule::Foreign);
     }
 
     #[test]

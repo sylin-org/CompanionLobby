@@ -5,7 +5,9 @@
 //! the install fingerprint and the lock holder's pid. Fields are only ever
 //! added, so a page that probes the loopback port for a running daemon keeps
 //! working. It is the one document served with cross-origin headers, and it
-//! says nothing about companions.
+//! says nothing about companions. A request that carries browser evidence
+//! gets only [`Discovery::for_pages`]: the build id, the fingerprint and the
+//! pid would let any website recognize this install across sites.
 //!
 //! The attach shim reads it to decide whether the daemon on the port is the
 //! right one: the same product, the same build, the same install, and the
@@ -62,6 +64,19 @@ impl Discovery {
     }
 }
 
+impl Discovery {
+    /// What a web page may read: the compatible fields and the protocol
+    /// revisions, nothing that identifies the install, its build or its process.
+    pub fn for_pages(&self) -> serde_json::Value {
+        serde_json::json!({
+            "product": self.product,
+            "discoveryVersion": self.discovery_version,
+            "managerOrigin": self.manager_origin,
+            "protocolVersions": self.protocol_versions,
+        })
+    }
+}
+
 /// The manager page's origin on `port`.
 pub fn manager_origin(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
@@ -109,6 +124,26 @@ mod tests {
         assert_eq!(value["protocolVersions"][3], "2025-11-25");
         let rendered = value.to_string();
         assert!(!rendered.contains("companion\"") && !rendered.contains("secret"));
+    }
+
+    #[test]
+    fn pages_read_the_compatible_fields_and_nothing_that_identifies_the_install() {
+        let document = Discovery::new(5219, "build", "fingerprint");
+        let page = document.for_pages();
+        assert_eq!(page["product"], "companion-lobby");
+        assert_eq!(page["discoveryVersion"], 1);
+        assert_eq!(page["managerOrigin"], "http://127.0.0.1:5219");
+        assert_eq!(page["protocolVersions"][3], "2025-11-25");
+        let rendered = page.to_string();
+        for private in [
+            "buildId",
+            "storeFingerprint",
+            "lockHolderPid",
+            "\"build\"",
+            "\"fingerprint\"",
+        ] {
+            assert!(!rendered.contains(private), "{private} in {rendered}");
+        }
     }
 
     #[test]

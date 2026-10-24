@@ -46,17 +46,20 @@ port while the daemon runs.
 
 Every request passes these rules in order, before any body is read:
 
-1. **Host.** The `Host` header must name `127.0.0.1`. `localhost` is
-   redirected (308) to `127.0.0.1` on the same port. Any other name,
-   including `[::1]`, is refused with 403, so a web page that points its own
-   hostname at the loopback address reaches nothing, reads included.
+1. **Host.** The `Host` header must name `127.0.0.1`, with no port or the
+   daemon's own. `localhost` is redirected (308) to `127.0.0.1` on the same
+   port. Any other name or port, including `[::1]`, is refused with 403, so a
+   web page that points its own hostname at the loopback address reaches
+   nothing, reads included.
 2. **Size.** Request heads are capped at 8 KiB (431 beyond). A declared body
    over 1 MiB is refused with 413 before it is read; a body that grows past
    1 MiB while arriving is refused too. A peer has 30 seconds to send its head
    and 10 seconds after it to send its body (408 beyond), so a trickled body
    cannot hold one of the 128 request slots or a stop's drain.
 3. **Operator writes** (`POST /api/...`) must be `application/json` and carry
-   same-origin browser evidence: an `Origin` equal to `http://<Host>`, and a
+   same-origin browser evidence: an `Origin` equal to
+   `http://127.0.0.1:<port>`, built from the port the daemon is bound to and
+   never from the request, and a
    `Sec-Fetch-Site` that is absent or `same-origin`. Anything else is 403.
 4. **Attachments** (`/mcp...`) must carry no browser evidence at all: an
    `Origin`, `Referer` or any `Sec-Fetch-Site`, `Sec-Fetch-Mode` or
@@ -109,6 +112,12 @@ the daemon's executable, so two processes agree exactly when they run the same
 bytes. `storeFingerprint` is derived from the attach secret with a one-way,
 domain-separated hash; it identifies the install without revealing the secret.
 
+A request that carries browser evidence (an `Origin`, `Referer` or any
+`Sec-Fetch-*` header) gets only `product`, `discoveryVersion`,
+`managerOrigin` and `protocolVersions`. The build id, the fingerprint and the
+pid are stable per install, so a page that could read them would recognize
+this machine across sites; the shim sends no browser evidence and reads the
+whole document.
 ## The attach shim
 
 A host configuration names `companion-lobby attach <companion>`. The shim:

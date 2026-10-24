@@ -425,6 +425,40 @@ fn the_envelope_refuses_foreign_hosts_browsers_and_missing_secrets() {
     hygiene(&head);
     assert!(head.contains("access-control-allow-origin: *"));
     assert!(!body.contains(secret.expose()));
+    // A page reads only what finds the daemon, nothing that identifies the install.
+    for evidence in ["Origin: http://page.test", "Sec-Fetch-Mode: cors"] {
+        let (status, _, body) = raw(
+            port,
+            &format!(
+                "GET /api/discovery HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{evidence}\r\nConnection: close\r\n\r\n"
+            ),
+        );
+        assert_eq!(status, 200);
+        let page: Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(page["product"], "companion-lobby");
+        assert_eq!(page["discoveryVersion"], 1);
+        assert_eq!(page["managerOrigin"], format!("http://127.0.0.1:{port}"));
+        for private in ["storeFingerprint", "buildId", "lockHolderPid"] {
+            assert!(page.get(private).is_none(), "{evidence} read {private}");
+        }
+    }
+    let (_, _, body) = raw(
+        port,
+        &format!(
+            "GET /api/discovery HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    let whole: Value = serde_json::from_str(&body).expect("JSON");
+    assert_eq!(whole["storeFingerprint"], secret.fingerprint());
+    // A Host naming another port is foreign: the daemon knows its own.
+    let (status, _, _) = raw(
+        port,
+        &format!(
+            "GET /api/discovery HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            port.wrapping_add(1)
+        ),
+    );
+    assert_eq!(status, 403);
     let (status, head, _) = raw(
         port,
         &format!(
@@ -546,6 +580,8 @@ fn the_envelope_refuses_foreign_hosts_browsers_and_missing_secrets() {
             format!("Origin: http://127.0.0.1:{port}\r\nSec-Fetch-Site: cross-site\r\n"),
             403,
         ),
+        // The page's origin is built from the bound port, not from the Host.
+        ("Origin: http://127.0.0.1\r\n".to_owned(), 403),
     ] {
         let (status, _, _) = raw(
             port,
