@@ -11,11 +11,15 @@
 //! * [`hosts`], the MCP conversations recorded from real hosts, used as
 //!   fixtures;
 //! * [`PLANTED_ATTACH_SECRET`], an attach secret someone other than the
-//!   daemon wrote, for tests that plant it in a data directory.
+//!   daemon wrote, for tests that plant it in a data directory;
+//! * [`events::EventStream`], a server-sent events client that follows a
+//!   live feed the way the manager page does;
+//! * [`secrets_in`], the secrets-grep every projection must pass.
 //!
 //! The fake provider and service roles and the synthetic adapters join it when
 //! the daemon first reaches a service. Nothing here reaches the live network.
 
+pub mod events;
 pub mod hosts;
 mod peer;
 
@@ -69,6 +73,18 @@ impl Drop for TempHome {
     }
 }
 
+/// The secrets among `secrets` that appear anywhere in `haystack`, in lower
+/// or upper case, each named by its first eight characters only, so a failing
+/// test never prints a whole secret.
+pub fn secrets_in(haystack: &[u8], secrets: &[&str]) -> Vec<String> {
+    let text = String::from_utf8_lossy(haystack).to_ascii_lowercase();
+    secrets
+        .iter()
+        .filter(|secret| !secret.is_empty() && text.contains(&secret.to_ascii_lowercase()))
+        .map(|secret| format!("{}..", secret.chars().take(8).collect::<String>()))
+        .collect()
+}
+
 /// A loopback port that nothing listened on a moment ago.
 pub fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
@@ -87,6 +103,17 @@ mod tests {
         assert!(path.is_dir());
         drop(home);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn the_secrets_grep_finds_a_secret_in_either_case_and_names_it_partly() {
+        let secret = "abcdef0123456789abcdef0123456789";
+        let found = secrets_in(
+            b"{\"x\":\"ABCDEF0123456789ABCDEF0123456789\"}",
+            &[secret, "other"],
+        );
+        assert_eq!(found, vec!["abcdef01..".to_owned()]);
+        assert!(secrets_in(b"nothing here", &[secret]).is_empty());
     }
 
     #[test]
