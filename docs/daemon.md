@@ -8,13 +8,17 @@ page, `stop` drains it.
 ## Files in the data directory
 
 The data directory is resolved as `README.md` describes; `LOBBY_DATA_DIR`
-overrides it and a path ending in `.companion-lobby` is refused. Whoever
-creates the directory restricts it to its owner, and the daemon restricts it
-again on every start and checks that it took before it reads or creates the
-attach secret, refusing to start otherwise. On Windows that is a protected
-DACL with one entry, full control for the current user, inherited by
-everything inside, set and read through the Win32 security API; elsewhere it
-is mode 0700.
+overrides it and a path that leads into a `.companion-lobby` directory is
+refused. Whoever creates the directory restricts it to its owner. On every
+start, before it writes anything there, the daemon checks that the directory
+is still owner-only. If it is not, the daemon narrows it again only when
+everything inside is a file the daemon itself writes, and checks that it
+took; a directory holding anything else is refused and left untouched, so
+pointing `LOBBY_DATA_DIR` at a shared folder never rewrites that folder's
+access. On Windows owner-only means the current user owns the directory and
+it has a protected DACL with one entry, full control for the current user,
+inherited by everything inside, set and read through the Win32 security API;
+elsewhere it is mode 0700.
 
 `attach.secret` is protected by that owner-only directory alone; it is not
 sealed with DPAPI. Sealing arrives with credential material, and
