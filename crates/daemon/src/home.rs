@@ -548,7 +548,7 @@ mod tests {
             "daemon.json.42-7.tmp",
             "lobby.json",
             "journal.jsonl",
-            "journal.4.jsonl",
+            "journal.5.jsonl",
         ] {
             std::fs::write(dir.join(name), b"x").expect("file");
         }
@@ -576,7 +576,7 @@ mod tests {
             "daemon.json.tmp",
             "daemon.json.42.tmp",
             "attach.secret.x.tmp",
-            "journal.5.jsonl",
+            "journal.6.jsonl",
             "lobby.json.old",
         ] {
             let dir = temp_dir("foreign");

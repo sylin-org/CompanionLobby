@@ -408,9 +408,12 @@ impl Lobby {
         }
     }
 
-    /// A page of the journal; see [`Journal::page`].
+    /// A page of the journal; see [`crate::journal::Reader::page`]. The
+    /// lobby is held only while the reader is taken, never while the files
+    /// are read.
     pub fn journal_page(&self, before: Option<&str>, limit: usize) -> Result<Page, PageProblem> {
-        self.core().journal.page(before, limit)
+        let reader = self.core().journal.reader();
+        reader.page(before, limit)
     }
 
     /// Subscribes to the live feed after the position `last`.

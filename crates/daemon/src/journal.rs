@@ -24,11 +24,17 @@
 //! A page of the journal is read newest first and fenced by a cursor that
 //! names the store and the highest entry the first page saw, so entries
 //! appended meanwhile never shift a later page, and a cursor from another
-//! journal is refused rather than misread.
+//! journal is refused rather than misread. A page is read through a
+//! [`Reader`], taken from the journal in a moment and used without it, so
+//! reading never holds up an append; it reads the generations newest first
+//! and stops once it has the page, and reads again when a rotation moved the
+//! files while it read.
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lobby_contracts::{CompanionId, Initiator, JournalEntry, JournalKind, Outcome};
@@ -36,8 +42,8 @@ use serde_json::{Map, Value, json};
 
 /// The live file's name.
 pub const JOURNAL_FILE: &str = "journal.jsonl";
-/// How many files the journal keeps: the live one and the rotated ones before it.
-pub const GENERATIONS: usize = 5;
+/// How many files the journal keeps: the live one and the five rotated before it.
+pub const GENERATIONS: usize = 6;
 /// The live file while a rotation moves it to generation 1.
 pub const ROTATING_FILE: &str = "journal.rotating.jsonl";
 /// The oldest generation while a rotation drops it.
@@ -48,6 +54,10 @@ pub const GENERATION_BYTES: u64 = 1024 * 1024;
 pub const PAGE_DEFAULT: usize = 50;
 /// A page's longest length.
 pub const PAGE_MAX: usize = 100;
+/// How many times a page is read again when rotations keep moving the files.
+const PAGE_ATTEMPTS: usize = 8;
+/// How long a page waits for a rotation under way to finish.
+const ROTATION_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// The name of generation `n`: 0 is the live file, 1 the one rotated last.
 pub fn generation_name(n: usize) -> String {
@@ -63,12 +73,13 @@ pub fn is_journal_file(name: &str) -> bool {
     name == ROTATING_FILE || name == RETIRING_FILE || read_order().any(|file| file == name)
 }
 
-/// The files that hold entries: every generation, and the live file a
-/// rotation set aside and did not finish moving.
+/// The files that hold entries, newest first: the live file, the live file a
+/// rotation set aside and did not finish moving, then every rotated
+/// generation.
 fn read_order() -> impl Iterator<Item = String> {
-    (0..GENERATIONS)
-        .map(generation_name)
+    std::iter::once(JOURNAL_FILE.to_owned())
         .chain(std::iter::once(ROTATING_FILE.to_owned()))
+        .chain((1..GENERATIONS).map(generation_name))
 }
 
 /// What a command or a call asks the journal to record; the journal adds the
@@ -92,8 +103,21 @@ pub struct Journal {
     store_id: String,
     next_seq: u64,
     generation_bytes: u64,
+    /// Counts each rotation's start and its end, so a reader sees an odd
+    /// number while one runs and a changed number after one ran.
+    rotations: Arc<AtomicU64>,
     #[cfg(test)]
     refuse_from: Option<u64>,
+}
+
+/// What reading a page needs, taken from the journal in a moment so the
+/// files are read without holding it.
+#[derive(Debug, Clone)]
+pub struct Reader {
+    dir: PathBuf,
+    store_id: String,
+    high_water: u64,
+    rotations: Arc<AtomicU64>,
 }
 
 /// A page of entries, newest first.
@@ -140,6 +164,7 @@ impl Journal {
             store_id: store_id.to_owned(),
             next_seq: highest + 1,
             generation_bytes,
+            rotations: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             refuse_from: None,
         })
@@ -214,8 +239,16 @@ impl Journal {
         Ok(entry)
     }
 
-    /// Moves the live file to generation 1, all or nothing.
+    /// Moves the live file to generation 1, all or nothing, telling readers
+    /// that the files moved.
     fn rotate(&self) -> io::Result<()> {
+        self.rotations.fetch_add(1, Ordering::AcqRel);
+        let rotated = self.move_generations();
+        self.rotations.fetch_add(1, Ordering::AcqRel);
+        rotated
+    }
+
+    fn move_generations(&self) -> io::Result<()> {
         let live = self.dir.join(JOURNAL_FILE);
         let rotating = self.dir.join(ROTATING_FILE);
         if rotating.exists() {
@@ -266,15 +299,62 @@ impl Journal {
         Ok(())
     }
 
+    /// Reads a page; see [`Reader::page`].
+    pub fn page(&self, before: Option<&str>, limit: usize) -> Result<Page, PageProblem> {
+        self.reader().page(before, limit)
+    }
+
+    /// A reader of the journal as it stands now: its pages end at the
+    /// entry written last before this call.
+    pub fn reader(&self) -> Reader {
+        Reader {
+            dir: self.dir.clone(),
+            store_id: self.store_id.clone(),
+            high_water: self.high_water(),
+            rotations: Arc::clone(&self.rotations),
+        }
+    }
+
+    /// Makes every append from sequence number `from` on fail, as a full or
+    /// unwritable disk would.
+    #[cfg(test)]
+    pub(crate) fn refuse_appends_from(&mut self, from: u64) {
+        self.refuse_from = Some(from);
+    }
+}
+
+impl Reader {
     /// Reads a page of at most `limit` entries, newest first: the first page
     /// when `before` is `None`, otherwise the page after the one that handed
-    /// out that cursor.
+    /// out that cursor. A page read while a rotation moved the files is read
+    /// again.
     pub fn page(&self, before: Option<&str>, limit: usize) -> Result<Page, PageProblem> {
         let limit = limit.clamp(1, PAGE_MAX);
         let (upper, below) = match before {
-            None => (self.high_water(), u64::MAX),
+            None => (self.high_water, u64::MAX),
             Some(cursor) => self.parse_cursor(cursor).ok_or(PageProblem::Cursor)?,
         };
+        for _ in 0..PAGE_ATTEMPTS {
+            let seen = self.rotations.load(Ordering::Acquire);
+            if seen % 2 == 1 {
+                std::thread::sleep(ROTATION_PAUSE);
+                continue;
+            }
+            let page = self.read(upper, below, limit)?;
+            if self.rotations.load(Ordering::Acquire) == seen {
+                return Ok(page);
+            }
+        }
+        Err(PageProblem::Io(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "the journal rotated while it was read",
+        )))
+    }
+
+    /// Reads generations newest first until more than `limit` entries at or
+    /// below `upper` and below `below` are in hand: each generation holds
+    /// only entries older than the one before it.
+    fn read(&self, upper: u64, below: u64, limit: usize) -> Result<Page, PageProblem> {
         let mut entries: Vec<(u64, Value)> = Vec::new();
         for name in read_order() {
             entries.extend(
@@ -283,6 +363,9 @@ impl Journal {
                     .into_iter()
                     .filter(|(seq, _)| *seq <= upper && *seq < below),
             );
+            if entries.len() > limit {
+                break;
+            }
         }
         entries.sort_by_key(|(seq, _)| std::cmp::Reverse(*seq));
         entries.dedup_by_key(|(seq, _)| *seq);
@@ -310,14 +393,7 @@ impl Journal {
         }
         let upper = upper.parse::<u64>().ok()?;
         let below = below.parse::<u64>().ok()?;
-        (upper <= self.high_water() && below <= upper.saturating_add(1)).then_some((upper, below))
-    }
-
-    /// Makes every append from sequence number `from` on fail, as a full or
-    /// unwritable disk would.
-    #[cfg(test)]
-    pub(crate) fn refuse_appends_from(&mut self, from: u64) {
-        self.refuse_from = Some(from);
+        (upper <= self.high_water && below <= upper.saturating_add(1)).then_some((upper, below))
     }
 }
 
@@ -604,6 +680,66 @@ mod tests {
         );
         assert_eq!(after[2..], before[..GENERATIONS - 3]);
         assert!(!dir.join(RETIRING_FILE).exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_reader_taken_before_rotations_still_reads_its_own_page() {
+        let (dir, mut journal) = full_journal("reader");
+        let reader = journal.reader();
+        let upper = journal.high_water();
+        let before = journal.rotations.load(Ordering::Acquire);
+        // Few enough that the reader's page is not yet retired.
+        for _ in 0..5 {
+            journal.append(note("attach")).expect("append");
+        }
+        let after = journal.rotations.load(Ordering::Acquire);
+        assert!(after > before, "the appends rotated the journal");
+        assert_eq!(after % 2, 0, "no rotation is left under way");
+        let page = reader.page(None, 5).expect("page");
+        assert_eq!(
+            sequences(&page),
+            ((upper - 4)..=upper).rev().collect::<Vec<_>>()
+        );
+        assert_eq!(page.upper, upper);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_page_of_recent_entries_reads_no_older_generation() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (dir, journal) = full_journal("newest-first");
+        let oldest = generation_name(GENERATIONS - 1);
+        // Shared with no one: any read of the oldest generation fails.
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.join(&oldest))
+            .expect("hold");
+        let upper = journal.high_water();
+        let page = journal.page(None, 3).expect("the newest page");
+        assert_eq!(
+            sequences(&page),
+            ((upper - 2)..=upper).rev().collect::<Vec<_>>()
+        );
+        let mut next = page.next;
+        let mut reached = false;
+        while let Some(cursor) = next {
+            match journal.page(Some(&cursor), 3) {
+                Ok(page) => next = page.next,
+                Err(PageProblem::Io(_)) => {
+                    reached = true;
+                    break;
+                }
+                Err(PageProblem::Cursor) => panic!("a cursor this journal gave"),
+            }
+        }
+        assert!(
+            reached,
+            "paging back far enough reads the oldest generation"
+        );
+        drop(held);
         let _ = std::fs::remove_dir_all(dir);
     }
 
