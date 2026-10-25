@@ -71,10 +71,12 @@ vocabulary of service nouns, and service adapters may duplicate each other.
 | `lobby-conformance` (unpublished) | `crates/conformance` | contracts, daemon, testkit |
 
 Adapters and the daemon use the test kit as a dev-dependency. The daemon's
-test build also turns on its own `synthetic` feature, which compiles the test
-kit's synthetic adapters into the registry so the conformance suite's host
-scenarios run them through the real binary; a plain or release build never
-contains them. A second service
+test build also turns on its own `synthetic` feature, which builds a second,
+test-only command, `companion-lobby-synthetic`: the same daemon and shim,
+with a registry of its own composed from the test kit's synthetic adapters,
+so the conformance suite's host scenarios run them through a real binary.
+The product registry never names them, and `companion-lobby`, even built
+with every test feature on, contains neither. A second service
 adapter on the same atproto credential, `lobby-service-bluesky`, is created
 only after the first service adapter passes the conformance suite.
 
