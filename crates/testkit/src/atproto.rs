@@ -37,6 +37,22 @@
 //! * the revocation endpoint ends the grant a refresh or access token
 //!   belongs to: after it, the grant's refresh token refreshes nothing.
 //!
+//! The PDS mints a service's proof at
+//! `GET /xrpc/com.atproto.server.getServiceAuth?aud=..&lxm=..&exp=..` the
+//! way the reference PDS does for an OAuth grant: the access token under
+//! the `DPoP` scheme (a DPoP-bound token under `Bearer` is the reference
+//! PDS's "Malformed token" 400), a proof of the request made with the key
+//! the grant is bound to, carrying `ath` for that token and the PDS's own
+//! nonce (one of its own, never the authorization server's), an `exp` at
+//! most 130 seconds out, and a granted `rpc:<lxm>?aud=*` (or this very
+//! audience) permission, without which it answers 403 `ScopeMissingError`.
+//! A proof without the PDS's nonce is answered 401 with a fresh
+//! `DPoP-Nonce` and `use_dpop_nonce`, in the body by default or in the
+//! `WWW-Authenticate` header after [`AtprotoWorld::challenge_in_header`].
+//! Each proof it mints is a JWT-shaped token kept in the world's
+//! [`Proofs`], which the fake services that trust this world consult
+//! instead of resolving the account's signing key.
+//!
 //! Tokens are DPoP-bound and live [`AtprotoWorld::access_lifetime`] seconds,
 //! an hour unless a test says otherwise. An access token is JWT-shaped unless
 //! [`AtprotoWorld::opaque_tokens`] says otherwise; the adapter must not care.
@@ -103,6 +119,8 @@ struct Pushed {
 struct Grant {
     did: String,
     scope: String,
+    /// What the current access token was granted.
+    granted: String,
     client_id: String,
     key: VerifyingKey,
     refresh: String,
@@ -137,6 +155,10 @@ struct Book {
     jtis: HashSet<String>,
     nonces: VecDeque<String>,
     issued: Vec<String>,
+    /// The PDS's own nonce, which rotates on every challenge.
+    pds_nonce: String,
+    pds_jtis: HashSet<String>,
+    challenge_in_header: bool,
 }
 
 impl Book {
@@ -161,11 +183,50 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// A proof the PDS minted for a service: who it proves, for which
+/// audience and method, until when, under which id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceProof {
+    /// The token the service is presented.
+    pub token: String,
+    /// The account it proves, its `iss`.
+    pub issuer: String,
+    /// The audience it is for, its `aud`.
+    pub audience: String,
+    /// The method it allows, its `lxm`.
+    pub method: String,
+    /// When it expires, in seconds since the Unix epoch.
+    pub expires_at: i64,
+    /// Its `jti`.
+    pub id: String,
+}
+
+/// Every proof one world's PDS minted, shared with the fake services that
+/// trust that world.
+#[derive(Debug, Clone, Default)]
+pub struct Proofs(Arc<Mutex<Vec<ServiceProof>>>);
+
+impl Proofs {
+    /// The proof `token`, when this world's PDS minted it.
+    pub fn verify(&self, token: &str) -> Option<ServiceProof> {
+        locked(&self.0)
+            .iter()
+            .find(|proof| proof.token == token)
+            .cloned()
+    }
+
+    /// Every proof minted so far, oldest first.
+    pub fn minted(&self) -> Vec<ServiceProof> {
+        locked(&self.0).clone()
+    }
+}
+
 /// A fake authorization server and PDS on their own loopback listeners.
 pub struct AtprotoWorld {
     server: Listener,
     pds: Listener,
     book: Arc<Mutex<Book>>,
+    proofs: Proofs,
 }
 
 impl Default for AtprotoWorld {
@@ -177,20 +238,40 @@ impl Default for AtprotoWorld {
 impl AtprotoWorld {
     /// Starts a world with no accounts.
     pub fn start() -> Self {
-        let book = Arc::new(Mutex::new(Book::default()));
+        let book = Arc::new(Mutex::new(Book {
+            pds_nonce: unique_token("pds-nonce"),
+            ..Book::default()
+        }));
+        let proofs = Proofs::default();
         let origins = Arc::new(Mutex::new((String::new(), String::new())));
         let (serving, server_origins) = (book.clone(), origins.clone());
         let server = Listener::start(move |request| {
             let (server, pds) = locked(&server_origins).clone();
             answer_server(&serving, &server, &pds, request)
         });
-        let (resourcing, pds_origins) = (book.clone(), origins.clone());
+        let (resourcing, pds_origins, minting) = (book.clone(), origins.clone(), proofs.clone());
         let pds = Listener::start(move |request| {
             let (server, pds) = locked(&pds_origins).clone();
-            answer_pds(&resourcing, &server, &pds, request)
+            answer_pds(&resourcing, &minting, &server, &pds, request)
         });
         *locked(&origins) = (server.origin(), pds.origin());
-        Self { server, pds, book }
+        Self {
+            server,
+            pds,
+            book,
+            proofs,
+        }
+    }
+
+    /// Every proof this world's PDS minted, shared with whoever checks them.
+    pub fn proofs(&self) -> Proofs {
+        self.proofs.clone()
+    }
+
+    /// Makes the PDS say `use_dpop_nonce` in the `WWW-Authenticate` header
+    /// from now on, as the reference PDS does, instead of in the body.
+    pub fn challenge_in_header(&self, in_header: bool) {
+        locked(&self.book).challenge_in_header = in_header;
     }
 
     /// The authorization server's origin, which also answers as the DID
@@ -412,8 +493,14 @@ fn answer_server(book: &Mutex<Book>, origin: &str, pds: &str, request: &Received
     }
 }
 
-fn answer_pds(book: &Mutex<Book>, server: &str, pds: &str, request: &Received) -> Reply {
-    let book = locked(book);
+fn answer_pds(
+    book: &Mutex<Book>,
+    proofs: &Proofs,
+    server: &str,
+    pds: &str,
+    request: &Received,
+) -> Reply {
+    let mut book = locked(book);
     match (request.method.as_str(), request.route()) {
         ("GET", "/.well-known/oauth-protected-resource") => {
             let names = book.pds_names.clone().unwrap_or_else(|| server.to_owned());
@@ -422,8 +509,117 @@ fn answer_pds(book: &Mutex<Book>, server: &str, pds: &str, request: &Received) -
                 &json!({ "resource": pds, "authorization_servers": [names] }),
             )
         }
+        ("GET", "/xrpc/com.atproto.server.getServiceAuth") => {
+            service_auth(&mut book, proofs, pds, request)
+        }
         _ => error(404, "NotFound"),
     }
+}
+
+/// An XRPC error the way a PDS answers one.
+fn xrpc_error(status: u16, code: &str, message: &str) -> Reply {
+    Reply::json(status, &json!({ "error": code, "message": message }))
+}
+
+/// `getServiceAuth` for an OAuth grant: see the module's documentation.
+fn service_auth(book: &mut Book, proofs: &Proofs, pds: &str, request: &Received) -> Reply {
+    let presented = request
+        .header("authorization")
+        .unwrap_or_default()
+        .to_owned();
+    let (scheme, token) = presented.split_once(' ').unwrap_or(("", ""));
+    let Some(grant) = book
+        .grants
+        .iter()
+        .find(|grant| grant.access == token && !grant.ended)
+        .cloned()
+    else {
+        return xrpc_error(401, "InvalidToken", "Token could not be verified");
+    };
+    if scheme != "DPoP" {
+        return xrpc_error(400, "InvalidToken", "Malformed token");
+    }
+    let url = format!("{pds}{}", request.route());
+    let proof = request.header("dpop").unwrap_or_default().to_owned();
+    let nonce = book.pds_nonce.clone();
+    let challenge = |book: &mut Book| {
+        let fresh = unique_token("pds-nonce");
+        book.pds_nonce = fresh.clone();
+        let reply = if book.challenge_in_header {
+            xrpc_error(401, "InvalidToken", "DPoP nonce mismatch").with_header(
+                "WWW-Authenticate",
+                r#"DPoP error="use_dpop_nonce", error_description="Resource server requires nonce in DPoP proof""#,
+            )
+        } else {
+            xrpc_error(401, "use_dpop_nonce", "DPoP nonce mismatch")
+        };
+        reply.with_header("DPoP-Nonce", &fresh)
+    };
+    let Ok((key, claims)) = check_proof(&proof, "GET", &url, &mut book.pds_jtis) else {
+        return xrpc_error(401, "InvalidDpopProof", "DPoP proof invalid");
+    };
+    if claims["nonce"].as_str() != Some(nonce.as_str()) {
+        return challenge(book);
+    }
+    if key != grant.key
+        || claims["ath"].as_str() != Some(base64url(&Sha256::digest(token.as_bytes())).as_str())
+    {
+        return xrpc_error(
+            401,
+            "InvalidDpopProof",
+            "DPoP proof does not match the token",
+        );
+    }
+    let (Some(audience), Some(method), Some(exp)) = (
+        request.query("aud"),
+        request.query("lxm"),
+        request.query("exp").and_then(|exp| exp.parse::<i64>().ok()),
+    ) else {
+        return xrpc_error(400, "InvalidRequest", "aud, lxm and exp are required");
+    };
+    let now = now_secs();
+    if !(now..=now + 130).contains(&exp) {
+        return xrpc_error(400, "BadExpiration", "exp is outside the accepted window");
+    }
+    let covers = grant.granted.split(' ').any(|word| {
+        word == format!("rpc:{method}?aud=*") || word == format!("rpc:{method}?aud={audience}")
+    });
+    if !covers {
+        return xrpc_error(
+            403,
+            "ScopeMissingError",
+            &format!("Missing required scope \"rpc:{method}?aud={audience}\""),
+        );
+    }
+    let id = unique_token("jti");
+    let token = format!(
+        "{}.{}.{}",
+        base64url(br##"{"typ":"JWT","alg":"ES256","kid":"#atproto"}"##),
+        base64url(
+            json!({ "iss": grant.did, "aud": audience, "lxm": method, "exp": exp, "iat": now, "jti": id })
+                .to_string()
+                .as_bytes()
+        ),
+        base64url(unique_token("signature").as_bytes())
+    );
+    book.issued.push(token.clone());
+    locked(&proofs.0).push(ServiceProof {
+        token: token.clone(),
+        issuer: grant.did,
+        audience,
+        method,
+        expires_at: exp,
+        id,
+    });
+    Reply::json(200, &json!({ "token": token }))
+}
+
+/// The seconds since the Unix epoch.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn document(account: &Account, pds: &str) -> Value {
@@ -646,6 +842,7 @@ fn exchange(
     book.grants.push(Grant {
         did: subject.clone(),
         scope: pushed.scope.clone(),
+        granted: scope.clone(),
         client_id: pushed.client_id,
         key: *key,
         refresh: refresh.clone(),
@@ -698,6 +895,7 @@ fn refresh(
     book.issued.push(rotated.clone());
     book.grants[index].refresh = rotated.clone();
     book.grants[index].access = access.clone();
+    book.grants[index].granted = scope.clone();
     let mut answer = token_answer(book, &access, &grant.did, &scope);
     answer["refresh_token"] = json!(rotated);
     Reply::json(200, &answer).with_header("DPoP-Nonce", nonce)
