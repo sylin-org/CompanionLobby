@@ -156,7 +156,10 @@ mod tests {
     /// The hash a recorded page names, and the page's text after it.
     fn recorded(text: &str) -> (&str, &str) {
         let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
-        (first.strip_prefix(RECORDED_AGAINST).unwrap_or_default(), rest)
+        (
+            first.strip_prefix(RECORDED_AGAINST).unwrap_or_default(),
+            rest,
+        )
     }
 
     #[test]
@@ -203,7 +206,9 @@ mod tests {
         }
         let (_, lobby) = RENDERED[0];
         assert!(
-            recorded(lobby).1.contains(&format!("{HANDLE} · Atmosphere")),
+            recorded(lobby)
+                .1
+                .contains(&format!("{HANDLE} · Atmosphere")),
             "the lobby names the account by its label"
         );
     }
