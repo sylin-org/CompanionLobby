@@ -554,11 +554,14 @@ fn the_public_world_refuses_loopback_and_private_targets_before_anything_is_sent
     // A name that parses as a public origin but resolves to this machine is
     // refused by the address policy itself, before a connection opens: an
     // account document on such a host, and an authorization server there.
+    // The check needs a resolver that keeps RFC 6761's promise for
+    // `.localhost` names; one that does not fails the test rather than
+    // letting it pass unchecked.
     let host = "lobby-policy-check.localhost";
-    if !resolves_to_this_machine(host) {
-        eprintln!("{host} does not resolve to this machine here; the policy check is skipped");
-        return;
-    }
+    assert!(
+        resolves_to_this_machine(host),
+        "{host} must resolve to this machine only, as RFC 6761 asks of every .localhost name, for the address policy to be checked here"
+    );
     assert_eq!(
         adapter
             .begin_sign_in(&request(&format!("did:web:{host}"), "state-policy-1"))
