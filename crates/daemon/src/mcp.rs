@@ -13,7 +13,8 @@
 //! attribution, never authority. Errors use the standard JSON-RPC codes only.
 //!
 //! A mind sees exactly the catalog the projections build for its companion,
-//! and calls only what is in it. A service tool's call is journaled, made and
+//! and calls only what is in it; a call to anything else is an error result
+//! that says the companion cannot reach that tool now, and to call reach. A service tool's call is journaled, made and
 //! settled by the lobby; its answer is the tool's result, or an error result
 //! whose text is the lobby's own sentence for the outcome, with the outcome's
 //! code and that same sentence in the structured content, since a host may
@@ -197,30 +198,17 @@ fn tools_call(
     if name != projections::REACH {
         return match tools.call(name, arguments) {
             Ok(answer) => success(id, result_json(&answer, false)),
-            Err(CallRefusal::UnknownTool) => rpc_error(id, INVALID_PARAMS, NO_SUCH_TOOL),
-            Err(CallRefusal::Ended(refusal)) => success(
-                id,
-                json!({
-                    "content": [{ "type": "text", "text": refusal.message }],
-                    "structuredContent": {
-                        "outcome": refusal.outcome.code(),
-                        "message": refusal.message,
-                    },
-                    "isError": true,
-                }),
-            ),
+            Err(CallRefusal::UnknownTool) => {
+                success(id, refusal_json(Outcome::NotFound, &not_reachable(name)))
+            }
+            Err(CallRefusal::Ended(refusal)) => {
+                success(id, refusal_json(refusal.outcome, &refusal.message))
+            }
         };
     }
     if !arguments.is_empty() {
         let message = "reach takes no arguments; call it with an empty object.";
-        return success(
-            id,
-            json!({
-                "content": [{ "type": "text", "text": message }],
-                "structuredContent": { "outcome": Outcome::InvalidInput.code(), "message": message },
-                "isError": true,
-            }),
-        );
+        return success(id, refusal_json(Outcome::InvalidInput, message));
     }
     let answer = projections::reach(companion, &tools.reached(), &tools.waiting());
     success(id, result_json(&answer, false))
@@ -245,9 +233,29 @@ pub const MESSAGE: &str = "message";
 /// facts within [`STRUCTURED_BUDGET`].
 pub const MESSAGE_LEFT_OUT: &str = "This answer's text did not fit beside its facts here, so only the facts are given; ask for less at once, such as a smaller page, to read it whole.";
 
-/// What a call to a tool this companion does not have answers, as the
-/// protocol error's message.
-pub const NO_SUCH_TOOL: &str = "This companion has no tool called that now; the sponsor may have revoked its connection. Call reach to see the tools it has.";
+/// The most characters of a tool's name a refusal repeats.
+const TOOL_NAME_SHOWN: usize = 64;
+
+/// What a call to `name`, a tool this companion does not have, answers:
+/// that it cannot reach that tool now, whatever the reason, and that reach
+/// says what it reaches. The name the mind sent is repeated quoted and
+/// bounded.
+pub fn not_reachable(name: &str) -> String {
+    let shown = Value::String(name.chars().take(TOOL_NAME_SHOWN).collect()).to_string();
+    format!(
+        "This companion cannot reach a tool called {shown} now. Call reach to see what it reaches and the tools it has there."
+    )
+}
+
+/// The error result of a call that ended with `outcome`, explained by
+/// `message`, which the structured form carries too.
+fn refusal_json(outcome: Outcome, message: &str) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": message }],
+        "structuredContent": { "outcome": outcome.code(), "message": message },
+        "isError": true,
+    })
+}
 
 /// The MCP result of a tool's answer: its rendered text, and its structured
 /// content when it has one and it fits within [`STRUCTURED_BUDGET`]. A host
@@ -413,7 +421,23 @@ mod tests {
 
         let unknown = ask(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"board_post","arguments":{}}}))
             .expect("unknown");
-        assert_eq!(unknown["error"]["code"], INVALID_PARAMS);
+        assert_eq!(unknown["result"]["isError"], true, "{unknown}");
+        assert_eq!(
+            unknown["result"]["structuredContent"]["outcome"],
+            "not_found"
+        );
+        assert_eq!(
+            unknown["result"]["content"][0]["text"],
+            "This companion cannot reach a tool called \"board_post\" now. Call reach to see what it reaches and the tools it has there."
+        );
+        assert_eq!(
+            unknown["result"]["structuredContent"]["message"],
+            unknown["result"]["content"][0]["text"]
+        );
+        assert!(
+            !not_reachable(&"x".repeat(1000)).contains(&"x".repeat(65)),
+            "the name is bounded"
+        );
         let extra = ask(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"reach","arguments":{"x":1}}}))
             .expect("extra");
         assert_eq!(extra["result"]["isError"], true);

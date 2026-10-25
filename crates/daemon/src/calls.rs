@@ -81,8 +81,9 @@ pub enum Standing {
     /// Ready again at a later revision: its account was signed in again
     /// while the call ran.
     SignedInAgain { place: String },
-    /// Revoked, or gone.
-    Revoked,
+    /// Revoked, or gone. `place` names the connection as the mind knows
+    /// it, or its service alone when the lobby keeps no record of it.
+    Revoked { place: String },
 }
 
 /// What a call answers once it settled, given where its connection stands:
@@ -100,9 +101,11 @@ pub fn settle(
         (Standing::Pinned, _) => {
             return result.map_err(|explained| (explained.outcome, explained.sentence.to_owned()));
         }
-        (Standing::Revoked, false) => (
+        (Standing::Revoked { place }, false) => (
             Outcome::Revoked,
-            "The sponsor revoked this connection while the read was on its way, so its answer is not shown. Call reach to see what this companion reaches now.".to_owned(),
+            format!(
+                "The sponsor revoked {place} while this read was on its way, so its answer is not shown. Call reach to see what this companion reaches now."
+            ),
         ),
         (Standing::NeedsSignIn { place }, false) => (
             Outcome::NeedsSignIn,
@@ -116,9 +119,11 @@ pub fn settle(
                 "The account behind {place} was signed in again while this read was on its way, so its answer is not shown; the read is safe to make again."
             ),
         ),
-        (Standing::Revoked, true) => (
+        (Standing::Revoked { place }, true) => (
             Outcome::Unknown,
-            "The sponsor revoked this connection while the write was on its way, so the lobby cannot say whether the service carried it out. Read the target before deciding whether to write again; the connection is gone until the sponsor opens it again.".to_owned(),
+            format!(
+                "The sponsor revoked {place} while this write was on its way, so the lobby cannot say whether the service carried it out. It is gone until the sponsor opens it again; then read the target before deciding whether to write again."
+            ),
         ),
         (Standing::NeedsSignIn { place }, true) => (
             Outcome::Unknown,
@@ -156,19 +161,20 @@ mod tests {
         let write = Effect::Write {
             retry: Retry::ReadFirst,
         };
-        let (read, said) =
-            settle(Effect::Read, &Standing::Revoked, done()).expect_err("never shown");
+        let revoked = Standing::Revoked {
+            place: "Board at main".to_owned(),
+        };
+        let (read, said) = settle(Effect::Read, &revoked, done()).expect_err("never shown");
         assert_eq!(read, Outcome::Revoked);
-        assert!(said.contains("Call reach"), "{said}");
-        let (late, said) = settle(write, &Standing::Revoked, done()).expect_err("never a success");
-        assert_eq!(late, Outcome::Unknown);
-        assert!(said.contains("Read the target before"));
         assert_eq!(
-            outcome(settle(
-                write,
-                &Standing::Revoked,
-                Err(Outcome::Refused.into())
-            )),
+            said,
+            "The sponsor revoked Board at main while this read was on its way, so its answer is not shown. Call reach to see what this companion reaches now."
+        );
+        let (late, said) = settle(write, &revoked, done()).expect_err("never a success");
+        assert_eq!(late, Outcome::Unknown);
+        assert!(said.contains("read the target before deciding"), "{said}");
+        assert_eq!(
+            outcome(settle(write, &revoked, Err(Outcome::Refused.into()))),
             Err(Outcome::Unknown),
             "a write the service may have carried out is never reported as refused"
         );

@@ -300,7 +300,9 @@ fn a_connection_revoked_while_a_reply_is_on_its_way_turns_it_into_an_unknown_out
     );
     let told = said(&late);
     assert!(
-        told.contains("Read the target before deciding whether to write again"),
+        told.starts_with(
+            "The sponsor revoked Tangent Space at main while this write was on its way"
+        ) && told.contains("read the target before deciding whether to write again"),
         "{told}"
     );
     assert_eq!(
@@ -327,12 +329,54 @@ fn a_connection_revoked_while_a_reply_is_on_its_way_turns_it_into_an_unknown_out
         "tangent_post",
         json!({ "topic": world.welcome, "text": "Again." }),
     );
-    assert_eq!(after["error"]["code"], -32602, "the tool is gone: {after}");
+    assert_eq!(
+        after["result"]["isError"], true,
+        "the tool is gone: {after}"
+    );
+    assert_eq!(
+        said(&after),
+        "This companion cannot reach a tool called \"tangent_post\" now. Call reach to see what it reaches and the tools it has there."
+    );
+    assert!(!said(&after).contains("revoked"), "never a guess at why");
     assert_eq!(
         world.space.listener().count(route),
         1,
         "nothing more reached the Space"
     );
+    install.stop();
+}
+
+#[test]
+fn a_read_cut_off_by_a_revoke_says_which_connection_and_to_call_reach() {
+    let world = world();
+    let (install, connection, mut peer) = connected(&world, "space-read-revoked");
+    let route = "/api/v1/experience/topics/welcome";
+    let held = world.space.listener().hold_answers(route);
+    peer.send(&json!({
+        "jsonrpc": "2.0", "id": 15, "method": "tools/call",
+        "params": { "name": "tangent_read_topic", "arguments": { "topic": world.welcome } }
+    }));
+    world.space.listener().wait_for_handled(route, 1);
+    let revoked = install.operator(
+        "POST",
+        &format!("/api/connections/{connection}/revoke"),
+        &json!({}),
+    );
+    assert_eq!(revoked.status, 200, "{}", text(&revoked));
+    drop(held);
+    let late = peer.answer(&json!(15));
+    assert_eq!(late["result"]["isError"], true, "{late}");
+    assert_eq!(late["result"]["structuredContent"]["outcome"], "revoked");
+    let told = said(&late);
+    assert_eq!(
+        told,
+        "The sponsor revoked Tangent Space at main while this read was on its way, so its answer is not shown. Call reach to see what this companion reaches now."
+    );
+    assert_eq!(
+        late["result"]["structuredContent"]["message"],
+        told.as_str()
+    );
+    assert!(!told.contains("Welcome"), "nothing of the Topic is shown");
     install.stop();
 }
 

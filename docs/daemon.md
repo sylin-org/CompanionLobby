@@ -364,8 +364,10 @@ beside it with every test feature on, carries no passbook material tag.
   or changed meanwhile, the late result never reaches the mind; a read
   answers `revoked`, and a write, which the service may have carried out,
   answers `outcome_unknown` so the mind reads before it retries. A tool the
-  companion cannot use is not in its catalog, and calling it is "Unknown
-  tool" (-32602) without reaching any service, except a tool whose
+  companion cannot use is not in its catalog, and calling it is an error
+  result with the outcome `not_found`, saying the companion cannot reach a
+  tool of that name now and to call `reach`, without reaching any service
+  or guessing why it is gone, except a tool whose
   connections wait for a sign-in: calling it is an error result with the
   outcome `needs_sign_in` and a sentence saying the tool comes back once the
   sponsor signs the account in again. `reach` names the connections that

@@ -2255,7 +2255,12 @@ impl Lobby {
                         place: format!("{title} at {}", connection.label),
                     }
                 }
-                _ => calls::Standing::Revoked,
+                Some(connection) => calls::Standing::Revoked {
+                    place: format!("{title} at {}", connection.label),
+                },
+                None => calls::Standing::Revoked {
+                    place: title.clone(),
+                },
             };
             let answer = match now {
                 Some(connection) if waits_on_this_call => Err(Refusal::new(

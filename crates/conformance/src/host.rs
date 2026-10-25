@@ -622,7 +622,10 @@ pub fn another_companion_sees_none_of_the_first_ones_tools(exe: &Path) {
     );
     for (id, arguments) in [(3, json!({ "at": "front" })), (4, json!({}))] {
         let borrowed = call(&mut second, id, "board_read", arguments);
-        assert_eq!(borrowed["error"]["code"], -32602, "{borrowed}");
+        assert_eq!(
+            borrowed["result"]["structuredContent"]["outcome"], "not_found",
+            "{borrowed}"
+        );
     }
     assert_eq!(board.listener().count("/posts"), 0);
 
@@ -775,7 +778,10 @@ pub fn a_late_result_after_a_revocation_is_never_a_success(exe: &Path) {
     );
 
     let after = call(&mut peer, 12, "board_read", json!({}));
-    assert_eq!(after["error"]["code"], -32602, "the tool is gone");
+    assert_eq!(
+        after["result"]["structuredContent"]["outcome"], "not_found",
+        "the tool is gone: {after}"
+    );
     assert_eq!(
         board.listener().count("/posts"),
         2,
@@ -866,7 +872,10 @@ pub fn revoking_the_credential_cascades_to_its_connections(exe: &Path) {
     );
     assert_eq!(names(&tools(&mut peer, 3)), ["reach"]);
     let refused = call(&mut peer, 4, "board_read", json!({}));
-    assert_eq!(refused["error"]["code"], -32602);
+    assert_eq!(
+        refused["result"]["structuredContent"]["outcome"],
+        "not_found"
+    );
     assert_eq!(front.listener().count("/posts"), 0);
     assert!(
         other.notification_within(LIST_CHANGED, QUIET).is_none(),
