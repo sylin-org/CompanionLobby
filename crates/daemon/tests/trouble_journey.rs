@@ -239,6 +239,19 @@ fn a_refused_renewal_shrinks_the_catalog_in_one_notice_and_signing_in_again_rest
     );
     let told = gone["result"]["content"][0]["text"].as_str().expect("text");
     assert!(told.contains("sign it in again"), "{told}");
+    assert!(told.contains("board at front"), "{told}");
+    let named = call(&mut peer, 30, "board_read", json!({ "at": "back" }));
+    assert_eq!(
+        named["result"]["structuredContent"]["outcome"],
+        "needs_sign_in"
+    );
+    let told = named["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text");
+    assert!(
+        told.contains("board at back"),
+        "the connection at names is the one said to wait: {told}"
+    );
     let reach = call(&mut peer, 4, "reach", json!({}));
     let said = reach["result"]["content"][0]["text"]
         .as_str()

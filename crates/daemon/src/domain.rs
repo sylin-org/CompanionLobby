@@ -1934,15 +1934,26 @@ impl Lobby {
             calls::find_tool(&reached.service, &reached.tools, name)
                 .map(|tool| (reached.service.clone(), tool))
         });
+        let named_at = arguments
+            .get(projections::AT)
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let Some((service, tool)) = found else {
             // A tool whose connections all wait for a sign-in is named, so
-            // the mind hears why it is gone and what brings it back.
+            // the mind hears why it is gone and what brings it back: the
+            // connection `at` names when it names one of them.
             let waiting = self.waiting(companion);
-            let named = waiting.iter().find(|(service, _)| {
+            let offers = |service: &ServiceName| {
                 self.registry.service(service).is_some_and(|adapter| {
                     calls::find_tool(service, &adapter.catalog(), name).is_some()
                 })
-            });
+            };
+            let named = waiting
+                .iter()
+                .find(|(service, label)| {
+                    named_at.as_deref() == Some(label.as_str()) && offers(service)
+                })
+                .or_else(|| waiting.iter().find(|(service, _)| offers(service)));
             return Err(match named {
                 Some((service, label)) => CallRefusal::Ended(Refusal::new(
                     Outcome::NeedsSignIn,
@@ -1971,7 +1982,23 @@ impl Lobby {
                 .map(|connection| connection.label.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
+            let waits = |label: &str| {
+                core.store.state().connections.iter().any(|connection| {
+                    connection.companion == companion
+                        && connection.service == service
+                        && connection.state == ConnectionState::NeedsSignIn
+                        && connection.label.as_str() == label
+                })
+            };
             let chosen = match &at {
+                Some(Value::String(label)) if waits(label) => {
+                    return Err(CallRefusal::Ended(Refusal::new(
+                        Outcome::NeedsSignIn,
+                        format!(
+                            "The {service} called {label} waits for the sponsor to sign its account in again on the manager page; it comes back then. at is one of: {labels}."
+                        ),
+                    )));
+                }
                 Some(Value::String(label)) => ready
                     .iter()
                     .find(|connection| connection.label.as_str() == label)
