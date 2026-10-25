@@ -451,6 +451,59 @@ pub fn tool(name: &str) -> Option<&'static Tool> {
 
 const INVALID: Outcome = Outcome::InvalidInput;
 
+/// The refusals that name the argument they refuse, one fixed sentence per
+/// argument a tool takes, so a mind reads which one to change.
+macro_rules! argument_sentences {
+    ($($name:literal),* $(,)?) => {
+        /// Every argument a refusal names.
+        #[cfg(test)]
+        const NAMED: &[&str] = &[$($name),*];
+
+        /// What a tool answers when `name`, which it needs, is missing.
+        fn missing(name: &str) -> &'static str {
+            match name {
+                $($name => concat!($name, " is missing; this tool needs it, as its description says."),)*
+                _ => "A required argument is missing; the tool's description names each one.",
+            }
+        }
+
+        /// What a tool answers when `name` is not text of a length it takes.
+        fn not_text(name: &str) -> &'static str {
+            match name {
+                $($name => concat!($name, " must be text, not empty, within the length the tool's description gives."),)*
+                _ => "An argument is not text of the length the tool's description gives.",
+            }
+        }
+
+        /// What a tool answers when `name` holds a reference of another Space.
+        pub(crate) fn foreign(name: &str) -> &'static str {
+            match name {
+                $($name => concat!($name, " holds a reference of another Space. Use a reference this Space gave, or pass at to act at the Space it came from."),)*
+                _ => references::FOREIGN,
+            }
+        }
+    };
+}
+
+argument_sentences!(
+    "scope",
+    "cursor",
+    "tangent",
+    "topic",
+    "around",
+    "checkpoint",
+    "text",
+    "reply_to",
+    "title",
+    "post",
+    "read_cursor",
+    "mode",
+    "prefix",
+    "participant",
+    "reason",
+    "statement",
+);
+
 fn text_argument<'a>(
     arguments: &'a Map<String, Value>,
     name: &str,
@@ -461,10 +514,7 @@ fn text_argument<'a>(
         Some(Value::String(text)) if !text.trim().is_empty() && text.chars().count() <= most => {
             Ok(Some(text.as_str()))
         }
-        Some(_) => Err(Explained::new(
-            INVALID,
-            "An argument is not text of the length the tool's description gives.",
-        )),
+        Some(_) => Err(Explained::new(INVALID, not_text(name))),
     }
 }
 
@@ -473,10 +523,7 @@ fn required<'a>(
     name: &str,
     most: usize,
 ) -> Result<&'a str, Explained> {
-    text_argument(arguments, name, most)?.ok_or(Explained::new(
-        INVALID,
-        "A required argument is missing; the tool's description names each one.",
-    ))
+    text_argument(arguments, name, most)?.ok_or(Explained::new(INVALID, missing(name)))
 }
 
 fn limit_argument(arguments: &Map<String, Value>, default: u64) -> Result<u64, Explained> {
@@ -769,7 +816,7 @@ fn scope_argument<'a>(
         return Ok(Some(scope));
     }
     if !scope.starts_with(&format!("{}::", through.address.as_str())) {
-        return Err(Explained::new(INVALID, references::FOREIGN));
+        return Err(Explained::new(INVALID, foreign("scope")));
     }
     Err(Explained::new(
         INVALID,
@@ -1816,6 +1863,36 @@ mod tests {
             in_its_words(tool("post").expect("post"), suspended.into()),
             Failed::Ended(suspended),
             "a refusal with its own reason keeps it"
+        );
+    }
+
+    #[test]
+    fn a_refused_argument_is_named_in_its_refusal() {
+        for tool in TOOLS {
+            for name in tool.arguments {
+                // limit and request_id have sentences of their own that name them.
+                if matches!(*name, "limit" | "request_id") {
+                    continue;
+                }
+                assert!(
+                    NAMED.contains(name),
+                    "{} takes {name}, which no refusal names",
+                    tool.name
+                );
+            }
+        }
+        let missing = required(&Map::new(), "topic", 10).expect_err("missing");
+        assert_eq!(
+            missing.sentence,
+            "topic is missing; this tool needs it, as its description says."
+        );
+        let mut given = Map::new();
+        given.insert("text".to_owned(), json!(42));
+        let not_text = text_argument(&given, "text", 10).expect_err("not text");
+        assert!(
+            not_text.sentence.starts_with("text must be text"),
+            "{}",
+            not_text.sentence
         );
     }
 

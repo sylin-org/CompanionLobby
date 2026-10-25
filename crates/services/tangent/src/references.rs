@@ -92,7 +92,10 @@ pub fn key_of<'a>(
         return Ok(keys[keys.len() - 1]);
     }
     if !reference.starts_with(&format!("{}::", address.as_str())) {
-        return Err(Explained::new(Outcome::InvalidInput, FOREIGN));
+        return Err(Explained::new(
+            Outcome::InvalidInput,
+            crate::tools::foreign(argument),
+        ));
     }
     Err(Explained::new(
         Outcome::InvalidInput,
@@ -111,14 +114,26 @@ pub fn under(address: &Address, reference: &str, kind: Kind, parent: &str) -> bo
 
 fn wrong_kind(kind: Kind, argument: &'static str) -> &'static str {
     match (kind, argument) {
+        (Kind::Tangent, "tangent") => {
+            "tangent is not a Tangent's reference. A Tangent's reference is <space>::<tangent>, as tangent_arrive and tangent_tangents give it."
+        }
         (Kind::Tangent, _) => {
             "That is not a Tangent's reference. A Tangent's reference is <space>::<tangent>, as tangent_arrive and tangent_tangents give it."
+        }
+        (Kind::Topic, "topic") => {
+            "topic is not a Topic's reference. A Topic's reference is <space>::<tangent>::<topic>, as tangent_topics and tangent_arrive give it."
         }
         (Kind::Topic, _) => {
             "That is not a Topic's reference. A Topic's reference is <space>::<tangent>::<topic>, as tangent_topics and tangent_arrive give it."
         }
         (Kind::Post, "reply_to") => {
             "reply_to is not a Post's reference. A Post's reference is <space>::<tangent>::<topic>::<post>, as tangent_read_topic gives it."
+        }
+        (Kind::Post, "around") => {
+            "around is not a Post's reference. A Post's reference is <space>::<tangent>::<topic>::<post>, as tangent_read_topic gives it."
+        }
+        (Kind::Post, "post") => {
+            "post is not a Post's reference. A Post's reference is <space>::<tangent>::<topic>::<post>, as tangent_read_topic gives it."
         }
         (Kind::Post, _) => {
             "That is not a Post's reference. A Post's reference is <space>::<tangent>::<topic>::<post>, as tangent_read_topic gives it."
@@ -192,7 +207,10 @@ mod tests {
                 "topic"
             )
             .map_err(|explained| explained.sentence),
-            Err(FOREIGN)
+            Err(crate::tools::foreign("topic"))
+        );
+        assert!(
+            crate::tools::foreign("topic").starts_with("topic holds a reference of another Space.")
         );
         assert!(!cursor_shaped(&"x".repeat(CURSOR_LIMIT + 1)));
         assert!(!cursor_shaped("a\nb") && !cursor_shaped(""));

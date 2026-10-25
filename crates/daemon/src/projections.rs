@@ -160,6 +160,36 @@ fn with_at(schema: &Value, title: &str, labels: &[&str]) -> Value {
     schema
 }
 
+/// The most characters of an argument's name a refusal repeats.
+const ARGUMENT_NAME_SHOWN: usize = 64;
+
+/// The refusal for a call of `projected`, the tool `tool` as a mind calls
+/// it, whose `arguments` hold one it does not take: that argument by name,
+/// and the ones it takes, `at` among them. None when it takes them all.
+pub fn unknown_argument(
+    projected: &str,
+    tool: &ToolDescriptor,
+    arguments: &Map<String, Value>,
+) -> Option<String> {
+    let mut takes: Vec<&str> = tool
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|properties| properties.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    takes.push(AT);
+    let given = arguments
+        .keys()
+        .find(|given| !takes.contains(&given.as_str()))?;
+    let shown: String = given.chars().take(ARGUMENT_NAME_SHOWN).collect();
+    let shown = Value::String(shown).to_string();
+    let takes: Vec<String> = takes.iter().map(|name| (*name).to_owned()).collect();
+    Some(format!(
+        "{projected} takes no argument called {shown}; it takes {}.",
+        listed(&takes)
+    ))
+}
+
 /// The answer to `reach` for `companion`, which reaches `reached` and whose
 /// connections `waiting` wait for the sponsor to sign their account in
 /// again: who the companion is, then for each service where it is, by the
@@ -862,6 +892,32 @@ mod tests {
                 .rendered()
                 .starts_with("You are ada, attached through Companion Lobby.")
         );
+    }
+
+    #[test]
+    fn an_argument_a_tool_does_not_take_is_named_with_the_ones_it_takes() {
+        let tool = ToolDescriptor {
+            name: ToolName::new("post").expect("tool"),
+            title: "Post".to_owned(),
+            description: "Posts.".to_owned(),
+            input_schema: json!({ "type": "object", "properties": { "text": { "type": "string" } } }),
+            effect: Effect::Write {
+                retry: lobby_contracts::Retry::ReadFirst,
+            },
+        };
+        let mut arguments = Map::new();
+        arguments.insert("text".to_owned(), json!("Hello."));
+        arguments.insert("at".to_owned(), json!("front"));
+        assert_eq!(unknown_argument("board_post", &tool, &arguments), None);
+        arguments.insert("txt".to_owned(), json!("Hello."));
+        assert_eq!(
+            unknown_argument("board_post", &tool, &arguments).as_deref(),
+            Some("board_post takes no argument called \"txt\"; it takes text and at.")
+        );
+        let mut long = Map::new();
+        long.insert("x\n".repeat(100), json!(1));
+        let said = unknown_argument("board_post", &tool, &long).expect("refused");
+        assert!(!said.contains('\n') && said.len() < 300, "{said}");
     }
 
     fn board(labels: &[&str]) -> Reached {

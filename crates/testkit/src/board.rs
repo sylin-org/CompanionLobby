@@ -57,6 +57,13 @@ pub const NOT_ADMITTED: &str =
 pub const READ_ONLY: &str =
     "The board admitted this companion to read only, so it cannot post there; reading still works.";
 
+/// What the adapter says when a post's `text` is missing, empty or too long.
+pub const TEXT_REFUSED: &str =
+    "text is missing or empty, or longer than 2000 characters; post 1 to 2000 characters.";
+
+/// What the adapter says when a read's `limit` is out of range.
+pub const LIMIT_REFUSED: &str = "limit is a whole number from 1 to 50.";
+
 /// One post on a fake board.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Post {
@@ -334,7 +341,7 @@ impl Board {
             Some(limit) => limit
                 .as_u64()
                 .filter(|limit| (1..=READ_MAX).contains(limit))
-                .ok_or(Outcome::InvalidInput)?,
+                .ok_or(Explained::new(Outcome::InvalidInput, LIMIT_REFUSED))?,
         };
         let path = format!("/posts?limit={limit}");
         let request =
@@ -400,7 +407,7 @@ impl Board {
             .get("text")
             .and_then(Value::as_str)
             .filter(|text| !text.trim().is_empty() && text.chars().count() <= POST_MAX)
-            .ok_or(Outcome::InvalidInput)?;
+            .ok_or(Explained::new(Outcome::InvalidInput, TEXT_REFUSED))?;
         let request = Request::new("POST", "/posts")
             .header("Authorization", format!("Badge {}", issued.badge))
             .json(json!({ "text": text }).to_string().into_bytes());

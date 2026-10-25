@@ -637,6 +637,11 @@ service may differ. `initialize` declares `listChanged: true`,
 and the shim relays a `notifications/tools/list_changed` each time the
 companion's connections change.
 
+A call that passes an argument its tool does not take is refused before
+anything is journaled or sent, naming that argument and the ones the tool
+takes, `at` among them; an adapter's own refusal of an argument names the
+argument too.
+
 A tool call answers the tool's result, whose text marks third-party passages
 as quoted strings, with its structured content when that serializes within
 the same 32 KiB budget as the text. A host may show a mind the structured

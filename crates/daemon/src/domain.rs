@@ -2106,6 +2106,14 @@ impl Lobby {
                 None => CallRefusal::UnknownTool,
             });
         };
+        // An argument the tool does not take is named back to the mind,
+        // with the ones it does take, before anything is journaled or sent.
+        if let Some(refusal) = projections::unknown_argument(name, &tool, &arguments) {
+            return Err(CallRefusal::Ended(Refusal::new(
+                Outcome::InvalidInput,
+                refusal,
+            )));
+        }
         let at = arguments.remove(projections::AT);
         let title = self.registry.service_title(&service);
         let ticket = self.run(|core| {

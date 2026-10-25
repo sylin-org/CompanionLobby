@@ -636,6 +636,65 @@ fn a_write_whose_own_renewal_succeeded_while_another_call_found_the_account_sign
 }
 
 #[test]
+fn an_argument_the_mind_got_wrong_is_named_in_the_refusal() {
+    let world = world();
+    let (install, _, mut peer) = connected(&world, "space-arguments");
+    let requests = world.space.listener().requests().len();
+    let misspelled = call(
+        &mut peer,
+        100,
+        "tangent_post",
+        json!({ "topic": world.welcome, "txt": "Hello." }),
+    );
+    assert_eq!(misspelled["result"]["isError"], true, "{misspelled}");
+    assert_eq!(
+        misspelled["result"]["structuredContent"]["outcome"],
+        "invalid_input"
+    );
+    assert_eq!(
+        said(&misspelled),
+        "tangent_post takes no argument called \"txt\"; it takes reply_to, request_id, text, topic and at."
+    );
+    let missing = call(&mut peer, 101, "tangent_read_topic", json!({}));
+    assert_eq!(
+        said(&missing),
+        "topic is missing; this tool needs it, as its description says."
+    );
+    let not_a_topic = call(
+        &mut peer,
+        102,
+        "tangent_read_topic",
+        json!({ "topic": world.opening }),
+    );
+    assert!(
+        said(&not_a_topic).starts_with("topic is not a Topic's reference."),
+        "{not_a_topic}"
+    );
+    let foreign = call(
+        &mut peer,
+        103,
+        "tangent_post",
+        json!({ "topic": "https://elsewhere.example.test::home::welcome", "text": "Hi." }),
+    );
+    assert!(
+        said(&foreign).starts_with("topic holds a reference of another Space."),
+        "{foreign}"
+    );
+    for answer in [&missing, &not_a_topic, &foreign] {
+        assert_eq!(
+            answer["result"]["structuredContent"]["message"],
+            said(answer).as_str()
+        );
+    }
+    assert_eq!(
+        world.space.listener().requests().len(),
+        requests,
+        "nothing reached the Space"
+    );
+    install.stop();
+}
+
+#[test]
 fn a_post_of_a_mebibyte_reaches_the_mind_cut_short_and_quoted_in_text_and_structure() {
     let world = world();
     let mallory = world

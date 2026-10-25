@@ -611,7 +611,13 @@ fn one_account_at_two_spaces_keeps_two_connections_that_never_leak() {
             &slot,
         )
         .expect_err("refused");
-    assert_eq!(refused.sentence, lobby_service_tangent::references::FOREIGN);
+    assert!(
+        refused
+            .sentence
+            .starts_with("topic holds a reference of another Space."),
+        "{}",
+        refused.sentence
+    );
     let read = adapter
         .call(
             &tool("read_topic"),
