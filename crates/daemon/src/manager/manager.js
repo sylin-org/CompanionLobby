@@ -1120,7 +1120,7 @@ async function revokeConnection(companion, connection) {
     return;
   }
   lobby.connections.set(connection.id, result.body.connection);
-  note(connection.label + " is revoked for " + companion.displayName + ".");
+  note(connection.label + " is revoked for " + companion.displayName + ". The lobby deleted what " + serviceTitle(connection.service) + " issued for it; the service may still take that until it expires there.");
   refresh(true, "connection-" + connection.id);
 }
 

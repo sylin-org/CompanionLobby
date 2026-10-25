@@ -175,9 +175,9 @@ the audience it declared and an XRPC method. The adapter answers only:
   is read;
 - a method the credential was granted, as `rpc:<method>?aud=*` or for that
   very audience. Without it the answer is that the account was signed in
-  before the service needed it, and that the sponsor can revoke the
-  account and sign the companion in again to grant it, before the PDS
-  hears anything.
+  before the service needed it, that revoking it and signing it in again
+  grants that, and that revoking it revokes its other connections too,
+  before the PDS hears anything.
 
 Holding the credential's lock, it renews the grant first when it is due,
 then asks the account's PDS:
