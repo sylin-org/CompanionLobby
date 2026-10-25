@@ -146,10 +146,12 @@ fn a_companion_connects_through_the_proof_exchange_reads_what_is_new_and_replies
     }
     let reach = call(&mut peer, 2, "reach", json!({}));
     let woke = said(&reach);
+    assert!(woke.starts_with("You are ada,"), "{woke}");
     assert!(
-        woke.starts_with("You are ada (moniker ada), attached through Companion Lobby. ada reaches Tangent Space at main ("),
-        "{woke}"
+        !woke.contains("(moniker"),
+        "a moniker that is the name is not said twice: {woke}"
     );
+    assert!(woke.contains("reaches Tangent Space at main ("), "{woke}");
     assert!(woke.contains("start with tangent_arrive"), "{woke}");
 
     // Reading what is new: other people's words arrive quoted, with the

@@ -176,8 +176,8 @@ pub fn reach(
     let tools: Vec<String> = catalog(reached).into_iter().map(|(name, _)| name).collect();
     let display = &companion.display_name;
     let mut sentences = vec![format!(
-        "You are {display} (moniker {moniker}), attached through Companion Lobby.",
-        moniker = companion.moniker
+        "You are {}, attached through Companion Lobby.",
+        named(companion)
     )];
     if reached.is_empty() && waiting.is_empty() {
         sentences.push(format!(
@@ -213,9 +213,12 @@ pub fn reach(
             }
             _ => listed(&places),
         };
+        // The tool to start with is one the first connection allows, as
+        // the structured answer names it.
         let first = place
-            .tools
+            .connections
             .first()
+            .and_then(|connection| connection.tools(place).next())
             .map(|first| first.name.projected(&place.service));
         let can = cans
             .first()
@@ -282,6 +285,17 @@ pub fn reach(
                 .collect::<Vec<_>>(),
             "tools": tools,
         })),
+    }
+}
+
+/// `companion` as a mind is told who it is: its display name, with its
+/// moniker beside it when the two differ.
+pub fn named(companion: &Companion) -> String {
+    let (display, moniker) = (companion.display_name.as_str(), companion.moniker.as_str());
+    if display == moniker {
+        display.to_owned()
+    } else {
+        format!("{display} (moniker {moniker})")
     }
 }
 
@@ -835,6 +849,19 @@ mod tests {
             display_name: DisplayName::new("Ada").expect("name"),
             sponsor: Sponsor::LOCAL,
         }
+    }
+
+    #[test]
+    fn a_companion_whose_name_is_its_moniker_is_named_once() {
+        assert_eq!(named(&ada()), "Ada (moniker ada)");
+        let mut plain = ada();
+        plain.display_name = DisplayName::new("ada").expect("name");
+        assert_eq!(named(&plain), "ada");
+        assert!(
+            reach(&plain, &[], &[])
+                .rendered()
+                .starts_with("You are ada, attached through Companion Lobby.")
+        );
     }
 
     fn board(labels: &[&str]) -> Reached {

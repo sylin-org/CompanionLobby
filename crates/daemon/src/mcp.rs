@@ -151,9 +151,9 @@ fn initialize(companion: &Companion, id: &Value, params: Option<&Value>) -> Valu
                 "version": env!("CARGO_PKG_VERSION"),
             },
             "instructions": format!(
-                "You are attached to Companion Lobby as the companion {} (moniker {}). Call reach \
-                 to learn what this companion can reach and which tools act there.",
-                companion.display_name, companion.moniker
+                "You are attached to Companion Lobby as the companion {}. Call reach to learn \
+                 what this companion can reach and which tools act there.",
+                projections::named(companion)
             ),
         }),
     )
@@ -197,7 +197,7 @@ fn tools_call(
     if name != projections::REACH {
         return match tools.call(name, arguments) {
             Ok(answer) => success(id, result_json(&answer, false)),
-            Err(CallRefusal::UnknownTool) => rpc_error(id, INVALID_PARAMS, "Unknown tool."),
+            Err(CallRefusal::UnknownTool) => rpc_error(id, INVALID_PARAMS, NO_SUCH_TOOL),
             Err(CallRefusal::Ended(refusal)) => success(
                 id,
                 json!({
@@ -241,14 +241,23 @@ pub const CUT_AND_LEFT_OUT: &str = " [Companion Lobby also left out this result'
 /// The field of a result's structured content that holds its text.
 pub const MESSAGE: &str = "message";
 
+/// The [`MESSAGE`] of a structured answer whose text did not fit beside its
+/// facts within [`STRUCTURED_BUDGET`].
+pub const MESSAGE_LEFT_OUT: &str = "This answer's text did not fit beside its facts here, so only the facts are given; ask for less at once, such as a smaller page, to read it whole.";
+
+/// What a call to a tool this companion does not have answers, as the
+/// protocol error's message.
+pub const NO_SUCH_TOOL: &str = "This companion has no tool called that now; the sponsor may have revoked its connection. Call reach to see the tools it has.";
+
 /// The MCP result of a tool's answer: its rendered text, and its structured
 /// content when it has one and it fits within [`STRUCTURED_BUDGET`]. A host
 /// may show a mind the structured form alone, so the text goes into it as
 /// [`MESSAGE`] beside the facts whenever both fit within that budget
-/// together; what other people wrote stays quoted there as in the text. A
-/// text that holds the whole answer says so when the structured form is
-/// left out; one that was cut short says that the answer is not whole, and
-/// the text with either note stays within its own budget.
+/// together, and as [`MESSAGE_LEFT_OUT`] when they do not; what other people
+/// wrote stays quoted there as in the text. A text that holds the whole
+/// answer says so when the structured form is left out; one that was cut
+/// short says that the answer is not whole, and the text with either note
+/// stays within its own budget.
 fn result_json(answer: &ToolResult, is_error: bool) -> Value {
     let structured = answer
         .structured
@@ -270,15 +279,16 @@ fn result_json(answer: &ToolResult, is_error: bool) -> Value {
         "isError": is_error,
     });
     if let Some(structured) = structured {
-        let mut told = structured.clone();
-        if let Value::Object(fields) = &mut told {
-            fields.insert(MESSAGE.to_owned(), Value::String(text));
-        }
-        result["structuredContent"] = if told.to_string().len() <= STRUCTURED_BUDGET {
-            told
-        } else {
-            structured.clone()
+        let told = |message: &str| {
+            let mut told = structured.clone();
+            if let Value::Object(fields) = &mut told {
+                fields.insert(MESSAGE.to_owned(), Value::String(message.to_owned()));
+            }
+            Some(told).filter(|told| told.to_string().len() <= STRUCTURED_BUDGET)
         };
+        result["structuredContent"] = told(&text)
+            .or_else(|| told(MESSAGE_LEFT_OUT))
+            .unwrap_or_else(|| structured.clone());
     }
     result
 }
@@ -437,13 +447,23 @@ mod tests {
             structured: Some(json!({ "posts": ["x".repeat(STRUCTURED_BUDGET * 2 / 3)] })),
         };
         let facts = result_json(&near, false);
-        assert!(
-            facts["structuredContent"].get(MESSAGE).is_none(),
-            "the facts are kept without the text when both do not fit"
+        assert_eq!(
+            facts["structuredContent"][MESSAGE], MESSAGE_LEFT_OUT,
+            "the facts are kept, with a message that says the text is not beside them"
         );
         assert_eq!(
             facts["structuredContent"]["posts"],
             near.structured.as_ref().expect("facts")["posts"]
+        );
+
+        let brim = ToolResult {
+            text: vec![lobby_contracts::Passage::Authored("Read.".to_owned())],
+            structured: Some(json!({ "posts": ["x".repeat(STRUCTURED_BUDGET - 20)] })),
+        };
+        let bare = result_json(&brim, false);
+        assert!(
+            bare["structuredContent"].get(MESSAGE).is_none(),
+            "facts that leave no room for any message go alone"
         );
 
         let large = ToolResult {
