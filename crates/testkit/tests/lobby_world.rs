@@ -39,6 +39,7 @@ fn lobby_world_prints_origins_that_answer_and_stops_when_its_input_closes() {
         ),
         ("board", "/about"),
         ("second-board", "/about"),
+        ("space", "/.well-known/tangent-auth"),
     ] {
         let origin = Address::parse(&value(name), AddressPolicy::LoopbackAllowed).expect(name);
         let answer = outbound
@@ -51,6 +52,8 @@ fn lobby_world_prints_origins_that_answer_and_stops_when_its_input_closes() {
         "/renewals/refuse",
         "/renewals/allow",
         "/keys/long",
+        "/space/tokens-end",
+        "/space/locked",
     ] {
         let origin =
             Address::parse(&value("control"), AddressPolicy::LoopbackAllowed).expect("control");
