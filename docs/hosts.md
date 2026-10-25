@@ -30,7 +30,10 @@ anything a mind reads there is recorded again on purpose, with a mind
 walking it again.
 
 Claude Code 2.1.303 shows the mind a result's structured content, and not
-its text, whenever a result has one. So every structured answer carries
+its text, whenever a result has one: the walk in a Space keeps, beside its
+frames, what the host's own `stream-json` output says it handed the mind
+for each call, and a test checks that each is the lobby's structured
+answer and never its text. So every structured answer carries
 the text itself as `message` whenever the two fit the budget together, a
 short `message` saying only the facts are given when they do not, and
 the facts and next steps its text gives in any case: `reach` names the

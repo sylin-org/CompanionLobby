@@ -100,15 +100,37 @@ pub fn claude_code() -> Recording {
 /// it, asks the Space what is new and learns who wrote each Post by name,
 /// reads the Topic of the newest Post, replies to Bea's Post there with a
 /// request id of its own choosing and marks the Topic read, with no refused
-/// call and every reference copied from an earlier answer. Its host showed it each result's structured
-/// content, which held the answer's text as `message`. The Space's origin
-/// in the frames is the one that walk ran against; a replay puts its own
-/// in its place.
+/// call and every reference copied from an earlier answer. Its host
+/// showed it each result's structured content, which held
+/// the answer's text as `message`; [`claude_code_in_a_space_shown`] is what
+/// it showed. The Space's origin in the frames is the one that walk ran
+/// against; a replay puts its own in its place.
 pub fn claude_code_in_a_space() -> Recording {
     parse(
         "claude-code 2.1.303",
         include_str!("../fixtures/hosts/claude-code-2.1.303-space.jsonl"),
     )
+}
+
+/// What Claude Code showed its mind as the result of each tool call of
+/// [`claude_code_in_a_space`], in order: the tool's name and the content
+/// the host handed the model, taken from the host's own `stream-json`
+/// output of the same walk, with nothing else of that stream kept.
+pub fn claude_code_in_a_space_shown() -> Vec<(String, String)> {
+    include_str!("../fixtures/hosts/claude-code-2.1.303-space-shown.jsonl")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let record: Value = serde_json::from_str(line).expect("a fixture line is JSON");
+            (
+                record["tool"].as_str().expect("a tool").to_owned(),
+                record["shown"]
+                    .as_str()
+                    .expect("the host showed text")
+                    .to_owned(),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -223,16 +245,34 @@ mod tests {
             "Bea",
             "the mind read who wrote the newest Post by name"
         );
-        for frame in recording
+    }
+
+    #[test]
+    fn the_space_recordings_host_showed_its_mind_the_structured_answer_alone() {
+        // The host's own record of what it handed the mind is the lobby's
+        // structured answer, byte for byte as JSON, and never the text, so
+        // the text reached the mind only as the answer's `message`.
+        let recording = claude_code_in_a_space();
+        let calls: Vec<&Value> = recording
             .sent()
             .filter(|frame| frame["method"] == "tools/call")
-        {
-            let answer = recording.answer_to(&frame["id"]).expect("an answer");
+            .collect();
+        let shown = claude_code_in_a_space_shown();
+        assert_eq!(shown.len(), calls.len(), "one result shown per call");
+        for (call, (tool, content)) in calls.iter().zip(&shown) {
+            assert_eq!(call["params"]["name"], tool.as_str());
+            let result = &recording.answer_to(&call["id"]).expect("an answer")["result"];
+            let text = result["content"][0]["text"].as_str().expect("text");
+            let structured = &result["structuredContent"];
+            assert!(structured.is_object(), "{tool} had a structured answer");
+            let seen: Value =
+                serde_json::from_str(content).expect("the host showed the structured JSON");
             assert_eq!(
-                answer["result"]["structuredContent"]["message"],
-                answer["result"]["content"][0]["text"],
-                "the structured form the host showed held the text too"
+                &seen, structured,
+                "{tool}: the host showed the structured form"
             );
+            assert_ne!(content, text, "{tool}: and not the text");
+            assert_eq!(seen["message"], text, "{tool}: whose message held the text");
         }
     }
 }

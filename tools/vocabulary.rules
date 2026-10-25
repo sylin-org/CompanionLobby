@@ -26,7 +26,8 @@ tombstone	i	\btombstones?\b	-
 file-names	i	\b(hub|forum|intake|participation|session|boundary|poller|perspective|operations|diagnostics|refs|lockfile)\.rs\b|manager\.html|atmosphere\.(css|js)|ascii-scenes\.js	-
 tool-names	s	\b(ListCompanions|WhoAmI|CatchUp|Service_Invoke|deliveryMode|enrollmentId)\b|\x22Connect\x22	-
 epics	s	\bEPICS?\b|EPIC-\d	-
-legacy	i	\bledgers?\b|\blease\b|red[ -]team|workstream|\bPA02\b|ADR 000[23]|supersed|\blegacy\b|\bformerly\b|renamed from|was previously|no longer|as before|\btoday\b|\bcurrently\b|half-migrated|boundary recovery|recovery zip|schemaVersion 3|\bv[23] state\b|harvest|docs/epics|serde\(alias|contract \x{00A7}	-
+legacy	i	\bledgers?\b|\blease\b|red[ -]team|workstream|\bPA02\b|ADR 000[23]|supersed|\blegacy\b|\bformerly\b|renamed from|was previously|no longer|as before|\btoday\b|\bcurrently\b|half-migrated|boundary recovery|recovery zip|schemaVersion 3|\bv[23] state\b|docs/epics|serde\(alias|contract \x{00A7}	-
+harvest	i	harvest	-
 stale-files	i	state\.json|\.bak\b|credential-quarantine|profile-media	-
 environment	s	COMPANION_LOBBY_[A-Z_]+|NEXT_PAGE_PORT	-
 markers	s	\b(TODO|FIXME|XXX)\b	-
