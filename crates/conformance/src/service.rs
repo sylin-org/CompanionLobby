@@ -43,6 +43,12 @@ pub trait ServiceFixture {
     /// Makes the service stop taking everything it issued so far, as one
     /// that restarted or expired them would.
     fn drop_issued(&self);
+    /// Makes the service issue every connection established from now on
+    /// leave to read and nothing more.
+    fn grant_reading_only(&self);
+    /// A call that writes, which a connection that may only read is not
+    /// allowed.
+    fn write(&self) -> (ToolName, ToolArguments);
 }
 
 /// Text a third party might write to steer a mind.
@@ -202,4 +208,33 @@ pub fn run(adapter: &dyn ServiceAdapter, fixture: &dyn ServiceFixture) {
         .expect("the next read answers");
     assert!(!again.text.is_empty());
     assert_eq!(slot.reissued().len(), 1, "and keeps using it");
+
+    // A connection the service issued less leave offers fewer tools, and a
+    // write it is not allowed is refused before anything reaches the
+    // service.
+    fixture.grant_reading_only();
+    let reading = adapter
+        .establish(&address, fixture.authority())
+        .expect("a connection that may only read is established");
+    let available = adapter.available(&reading);
+    let (write, written) = fixture.write();
+    assert!(
+        catalog.iter().any(|descriptor| descriptor.name == write),
+        "the write is a catalog tool"
+    );
+    assert!(available.contains(&tool), "it may read: {available:?}");
+    assert!(
+        !available.contains(&write),
+        "it is not offered the write: {available:?}"
+    );
+    let slot = HeldIssued::new(reading, fixture.authority());
+    let before = fixture.requests();
+    assert_eq!(
+        adapter
+            .call(&write, &written, &address, &slot)
+            .map(|_| ())
+            .map_err(|explained| explained.outcome),
+        Err(Outcome::NeedsPermission)
+    );
+    assert_eq!(fixture.requests(), before, "the service was not reached");
 }

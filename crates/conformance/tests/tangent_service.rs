@@ -163,6 +163,17 @@ impl ServiceFixture for Fixture {
     fn drop_issued(&self) {
         self.space.end_tokens();
     }
+
+    fn grant_reading_only(&self) {
+        self.space.grant_only(&["welcome", "read"]);
+    }
+
+    fn write(&self) -> (ToolName, ToolArguments) {
+        (
+            tool("post"),
+            arguments(json!({ "topic": self.welcome(), "text": "Hello." })),
+        )
+    }
 }
 
 fn arguments(value: Value) -> ToolArguments {

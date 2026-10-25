@@ -1,16 +1,18 @@
 //! The board: a synthetic service and its adapter.
 //!
 //! A board is a list of posts. It admits a member who presents a stamp from
-//! a passbook authority and gives back a badge; with the badge a member reads
-//! the newest posts and posts one. Each board names on its about page the
+//! a passbook authority and gives back a badge, saying what the badge lets
+//! its holder do: read the newest posts, and post one unless the board
+//! admits members to read only. Each board names on its about page the
 //! audience a stamp it takes must be for.
 //!
 //! The adapter speaks the board in the board's own words: it declares that
 //! a passbook account must be granted stamps for [`ADMIT_METHOD`], which the
 //! lobby asks for whenever it signs one in, establishes a connection by
 //! asking the lobby's authority for the stamp the board wants and trading
-//! it for a badge, which is all the connection keeps, and it
-//! offers two tools, `read` and `post`. Posts are written by other members,
+//! it for a badge, which with what the badge allows is all the connection
+//! keeps, and it offers two tools, `read` and `post`, of which a connection
+//! whose badge only reads has `read` alone. Posts are written by other members,
 //! so their text and authors reach a mind only as quoted passages. A board
 //! that stops taking a badge is asked to admit the member again, once, with
 //! a fresh stamp, and the connection keeps the new badge.
@@ -51,6 +53,10 @@ pub const POST_MAX: usize = 2000;
 pub const NOT_ADMITTED: &str =
     "The board does not admit this companion any more; the sponsor can open the connection again.";
 
+/// What the adapter says when the badge does not let the member post.
+pub const READ_ONLY: &str =
+    "The board admitted this companion to read only, so it cannot post there; reading still works.";
+
 /// One post on a fake board.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Post {
@@ -63,7 +69,8 @@ pub struct Post {
 #[derive(Debug)]
 struct Floor {
     audience: String,
-    badges: Vec<(String, String)>,
+    reading_only: bool,
+    badges: Vec<Badge>,
     presented: Vec<String>,
     posts: Vec<Post>,
 }
@@ -72,6 +79,15 @@ struct Floor {
 pub struct BoardServer {
     listener: Listener,
     floor: Arc<Mutex<Floor>>,
+}
+
+/// A badge a board gave out, whose holder it is, and whether it lets them
+/// post.
+#[derive(Debug)]
+struct Badge {
+    badge: String,
+    holder: String,
+    posts: bool,
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -84,6 +100,7 @@ impl BoardServer {
     pub fn start(authority: &PassbookAuthority) -> Self {
         let floor = Arc::new(Mutex::new(Floor {
             audience: unique_token("audience"),
+            reading_only: false,
             badges: Vec::new(),
             presented: Vec::new(),
             posts: Vec::new(),
@@ -132,13 +149,18 @@ impl BoardServer {
         locked(&self.floor)
             .badges
             .iter()
-            .map(|(badge, _)| badge.clone())
+            .map(|badge| badge.badge.clone())
             .collect()
     }
 
     /// Drops every badge it gave out, as a board that restarted would.
     pub fn drop_badges(&self) {
         locked(&self.floor).badges.clear();
+    }
+
+    /// Admits every member from now on to read only.
+    pub fn admit_to_read_only(&self) {
+        locked(&self.floor).reading_only = true;
     }
 }
 
@@ -149,8 +171,8 @@ fn answer(floor: &Mutex<Floor>, stamps: &crate::passbook::Verifier, request: &Re
         floor
             .badges
             .iter()
-            .find(|(known, _)| known == badge)
-            .map(|(_, holder)| holder.clone())
+            .find(|known| known.badge == badge)
+            .map(|known| (known.holder.clone(), known.posts))
     };
     match (request.method.as_str(), request.route()) {
         ("GET", "/about") => Reply::json(200, &json!({ "audience": floor.audience })),
@@ -169,8 +191,18 @@ fn answer(floor: &Mutex<Floor>, stamps: &crate::passbook::Verifier, request: &Re
             match minted.filter(|_| fits) {
                 Some(minted) => {
                     let badge = unique_token("badge");
-                    floor.badges.push((badge.clone(), minted.holder));
-                    Reply::json(200, &json!({ "badge": badge }))
+                    let posts = !floor.reading_only;
+                    floor.badges.push(Badge {
+                        badge: badge.clone(),
+                        holder: minted.holder,
+                        posts,
+                    });
+                    let may = if posts {
+                        vec!["read", "post"]
+                    } else {
+                        vec!["read"]
+                    };
+                    Reply::json(200, &json!({ "badge": badge, "may": may }))
                 }
                 None => Reply::json(401, &json!({ "error": "not admitted" })),
             }
@@ -193,9 +225,12 @@ fn answer(floor: &Mutex<Floor>, stamps: &crate::passbook::Verifier, request: &Re
             Reply::json(200, &json!({ "posts": posts }))
         }
         ("POST", "/posts") => {
-            let Some(author) = member(&floor) else {
+            let Some((author, posts)) = member(&floor) else {
                 return Reply::json(401, &json!({ "error": "no badge" }));
             };
+            if !posts {
+                return Reply::json(403, &json!({ "error": "this badge only reads" }));
+            }
             let Some(text) = request.json()["text"].as_str().map(str::to_owned) else {
                 return Reply::json(400, &json!({ "error": "text is required" }));
             };
@@ -218,15 +253,17 @@ impl Default for Board {
     }
 }
 
-/// What a board issued for one connection: the badge.
+/// What a board issued for one connection: the badge, and whether it lets
+/// the member post.
 struct Issued {
     badge: String,
+    posts: bool,
 }
 
 impl Issued {
     fn encode(&self) -> SealedIssued {
         SealedIssued::new(
-            json!({ "format": ISSUED_FORMAT, "badge": self.badge })
+            json!({ "format": ISSUED_FORMAT, "badge": self.badge, "posts": self.posts })
                 .to_string()
                 .into_bytes(),
         )
@@ -240,6 +277,7 @@ impl Issued {
         let badge = body["badge"].as_str().filter(|badge| !badge.is_empty())?;
         Some(Self {
             badge: badge.to_owned(),
+            posts: body["posts"].as_bool()?,
         })
     }
 }
@@ -451,12 +489,18 @@ impl ServiceAdapter for Board {
             }
             _ => return Err(Outcome::TemporarilyUnavailable.into()),
         }
-        let badge = serde_json::from_slice::<Value>(&admitted.body)
-            .ok()
-            .and_then(|body| body["badge"].as_str().map(str::to_owned))
+        let body = serde_json::from_slice::<Value>(&admitted.body)
+            .map_err(|_| Outcome::TemporarilyUnavailable)?;
+        let badge = body["badge"]
+            .as_str()
             .filter(|badge| !badge.is_empty())
+            .ok_or(Outcome::TemporarilyUnavailable)?
+            .to_owned();
+        let may = body["may"]
+            .as_array()
             .ok_or(Outcome::TemporarilyUnavailable)?;
-        Ok(Issued { badge }.encode())
+        let posts = may.iter().any(|may| may == "post");
+        Ok(Issued { badge, posts }.encode())
     }
 
     fn catalog(&self) -> Vec<ToolDescriptor> {
@@ -507,6 +551,14 @@ impl ServiceAdapter for Board {
         ]
     }
 
+    fn available(&self, issued: &SealedIssued) -> Vec<ToolName> {
+        match Issued::decode(issued) {
+            Some(Issued { posts: true, .. }) => vec![tool("read"), tool("post")],
+            Some(_) => vec![tool("read")],
+            None => Vec::new(),
+        }
+    }
+
     fn call(
         &self,
         tool: &ToolName,
@@ -531,6 +583,9 @@ impl ServiceAdapter for Board {
             _ => self.post(address, issued, arguments),
         };
         let issued = Issued::decode(&slot.read()?).ok_or(Outcome::Internal)?;
+        if tool.as_str() == "post" && !issued.posts {
+            return Err(Explained::new(Outcome::NeedsPermission, READ_ONLY));
+        }
         match perform(&issued) {
             // The board refused the badge before acting on the request, so
             // asking it to admit the member again and trying once more does

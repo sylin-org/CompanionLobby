@@ -269,6 +269,22 @@ impl ServiceFixture for BoardFixture {
     fn drop_issued(&self) {
         self.board.drop_badges();
     }
+
+    fn grant_reading_only(&self) {
+        self.board.admit_to_read_only();
+    }
+
+    fn write(&self) -> (ToolName, ToolArguments) {
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "text".to_owned(),
+            serde_json::Value::String("Hello.".to_owned()),
+        );
+        (
+            ToolName::new("post").expect("tool"),
+            ToolArguments(arguments),
+        )
+    }
 }
 
 #[test]
