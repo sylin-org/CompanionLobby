@@ -2186,20 +2186,38 @@ impl Lobby {
             &ticket.address,
             &slot,
         );
-        self.settle_renewal(broker.slot(), broker.refused().map_or(Ok(None), Err));
+        let refused = broker.refused();
+        let renewed_here = refused.is_some() || broker.slot().marked();
+        self.settle_renewal(broker.slot(), refused.map_or(Ok(None), Err));
         let answer = self.run(|core| {
-            let still_pinned = core
-                .store
-                .state()
-                .connection(ticket.connection)
-                .is_some_and(|connection| {
-                    connection.state == ConnectionState::Ready
-                        && connection.revision == ticket.revision
+            let now = core.store.state().connection(ticket.connection);
+            let still_pinned = now.is_some_and(|connection| {
+                connection.state == ConnectionState::Ready && connection.revision == ticket.revision
+            });
+            // This call's own minting found that the account needs signing
+            // in again, and left the connection waiting for that: the
+            // sponsor revoked nothing, and the service did nothing, since
+            // the call could not be made without a fresh proof.
+            let waits_on_this_call = renewed_here
+                && result.is_err()
+                && now.is_some_and(|connection| {
+                    connection.state == ConnectionState::NeedsSignIn
+                        && connection.revision == ticket.revision + 1
                 });
-            let answer = calls::settle(ticket.effect, still_pinned, result);
+            let answer = match now {
+                Some(connection) if waits_on_this_call => Err(Refusal::new(
+                    Outcome::NeedsSignIn,
+                    format!(
+                        "The account behind {title} at {label} needs the sponsor to sign it in again on the manager page; nothing was done there, and its tools come back once they do.",
+                        label = connection.label
+                    ),
+                )),
+                _ => calls::settle(ticket.effect, still_pinned, result)
+                    .map_err(|explained| Refusal::new(explained.outcome, explained.sentence)),
+            };
             let outcome = answer
                 .as_ref()
-                .map_or_else(|explained| explained.outcome, |_| Outcome::Done);
+                .map_or_else(|refusal| refusal.outcome, |_| Outcome::Done);
             let _ = core.record(call_note(
                 mind,
                 companion,
@@ -2209,9 +2227,7 @@ impl Lobby {
             ));
             Ok::<_, CallRefusal>(answer)
         })?;
-        answer.map_err(|explained| {
-            CallRefusal::Ended(Refusal::new(explained.outcome, explained.sentence))
-        })
+        answer.map_err(CallRefusal::Ended)
     }
 
     /// Keeps `issued`, which the service issued when a call established the

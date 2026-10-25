@@ -16,11 +16,12 @@
 //! and calls only what is in it. A service tool's call is journaled, made and
 //! settled by the lobby; its answer is the tool's result, or an error result
 //! whose text is the lobby's own sentence for the outcome, with the outcome's
-//! code in the structured content. The server declares that its tool list
+//! code and that same sentence in the structured content, since a host may
+//! show a mind the structured form alone. The server declares that its tool list
 //! changes: the lobby tells an attached host when the companion's connections
 //! change, over the attachment's notice stream (see [`crate::http`]).
 
-use lobby_contracts::{Companion, Label, ServiceName, ToolDescriptor, ToolResult};
+use lobby_contracts::{Companion, Label, Outcome, ServiceName, ToolDescriptor, ToolResult};
 use serde_json::{Map, Value, json};
 
 use crate::domain::CallRefusal;
@@ -201,17 +202,22 @@ fn tools_call(
                 id,
                 json!({
                     "content": [{ "type": "text", "text": refusal.message }],
-                    "structuredContent": { "outcome": refusal.outcome.code() },
+                    "structuredContent": {
+                        "outcome": refusal.outcome.code(),
+                        "message": refusal.message,
+                    },
                     "isError": true,
                 }),
             ),
         };
     }
     if !arguments.is_empty() {
+        let message = "reach takes no arguments; call it with an empty object.";
         return success(
             id,
             json!({
-                "content": [{ "type": "text", "text": "reach takes no arguments; call it with an empty object." }],
+                "content": [{ "type": "text", "text": message }],
+                "structuredContent": { "outcome": Outcome::InvalidInput.code(), "message": message },
                 "isError": true,
             }),
         );
@@ -384,6 +390,10 @@ mod tests {
         let extra = ask(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"reach","arguments":{"x":1}}}))
             .expect("extra");
         assert_eq!(extra["result"]["isError"], true);
+        assert_eq!(
+            extra["result"]["structuredContent"]["message"], extra["result"]["content"][0]["text"],
+            "a host that shows the structured form alone reads the sentence too"
+        );
         let bad = ask(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"reach","arguments":[]}}))
             .expect("bad");
         assert_eq!(bad["error"]["code"], INVALID_PARAMS);

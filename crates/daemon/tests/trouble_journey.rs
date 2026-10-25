@@ -262,6 +262,10 @@ fn a_refused_renewal_shrinks_the_catalog_in_one_notice_and_signing_in_again_rest
         "needs_sign_in"
     );
     let told = gone["result"]["content"][0]["text"].as_str().expect("text");
+    assert_eq!(
+        gone["result"]["structuredContent"]["message"], told,
+        "a host that shows the structured form alone reads the same sentence"
+    );
     assert!(told.contains("sign it in again"), "{told}");
     assert!(told.contains("Board at front"), "{told}");
     let named = call(&mut peer, 30, "board_read", json!({ "at": "back" }));

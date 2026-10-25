@@ -292,6 +292,10 @@ fn a_connection_revoked_while_a_reply_is_on_its_way_turns_it_into_an_unknown_out
         told.contains("Read the target before deciding whether to write again"),
         "{told}"
     );
+    assert_eq!(
+        late["result"]["structuredContent"]["message"],
+        told.as_str()
+    );
     assert!(
         world
             .space
@@ -335,6 +339,10 @@ fn a_space_that_refuses_reads_as_its_reason_with_a_next_step_and_a_suspension_to
     assert_eq!(refused["result"]["isError"], true, "{refused}");
     assert_eq!(refused["result"]["structuredContent"]["outcome"], "refused");
     assert_eq!(said(&refused), POST_DENIED);
+    assert_eq!(
+        refused["result"]["structuredContent"]["message"],
+        POST_DENIED
+    );
 
     // A Space that stops taking the token is given a fresh proof once; one
     // that suspended the account says so, and nothing loops.
@@ -389,6 +397,70 @@ fn a_token_the_space_stops_taking_is_exchanged_again_once_and_kept() {
         "the new token was kept for the next call"
     );
     install.stop();
+}
+
+/// Ada connected, then the Space stops taking its token and the account's
+/// server stops taking its sign-in: the next call must establish the
+/// connection again, and the proof it needs cannot be minted.
+fn signed_out_mid_call(world: &World, label: &str, id: i64, tool: &str, arguments: Value) {
+    let (install, _, mut peer) = connected(world, label);
+    let posts = world.space.posts().len();
+    world.space.end_tokens();
+    world.atproto.end_access_tokens();
+    world.atproto.refuse_refreshes();
+    let answer = call(&mut peer, id, tool, arguments);
+    assert_eq!(answer["result"]["isError"], true, "{answer}");
+    let structured = &answer["result"]["structuredContent"];
+    assert_eq!(
+        structured["outcome"], "needs_sign_in",
+        "never revoked or unknown: {answer}"
+    );
+    let told = said(&answer);
+    assert_eq!(
+        told,
+        "The account behind Tangent Space at main needs the sponsor to sign it in again on the manager page; nothing was done there, and its tools come back once they do."
+    );
+    assert_eq!(structured["message"], told.as_str());
+    peer.notification(LIST_CHANGED);
+    assert_eq!(names(&tools(&mut peer, id + 1)), ["reach"]);
+    let lobby = install.json("/api/lobby");
+    assert_eq!(lobby["credentials"][0]["state"], "needs_sign_in", "{lobby}");
+    assert_eq!(lobby["connections"][0]["state"], "needs_sign_in", "{lobby}");
+    let settled: Vec<String> = install
+        .journal()
+        .iter()
+        .filter(|entry| entry["kind"] == "settled")
+        .map(|entry| entry["outcome"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(settled, ["needs_sign_in"], "the journal says the same");
+    assert_eq!(world.space.posts().len(), posts, "nothing landed");
+    install.stop();
+}
+
+#[test]
+fn a_read_that_finds_the_account_needs_a_sign_in_says_exactly_that() {
+    let world = world();
+    let topic = world.welcome.clone();
+    signed_out_mid_call(
+        &world,
+        "space-signed-out-read",
+        60,
+        "tangent_read_topic",
+        json!({ "topic": topic }),
+    );
+}
+
+#[test]
+fn a_write_that_finds_the_account_needs_a_sign_in_says_so_and_never_lands() {
+    let world = world();
+    let topic = world.welcome.clone();
+    signed_out_mid_call(
+        &world,
+        "space-signed-out-write",
+        70,
+        "tangent_post",
+        json!({ "topic": topic, "text": "Hello again.", "request_id": "again-1" }),
+    );
 }
 
 #[test]

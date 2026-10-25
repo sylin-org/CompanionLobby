@@ -642,7 +642,12 @@ the whole answer, or, when the text was cut short too, that it does not and
 to ask for less at once. Or it answers an
 error result (`isError: true`) whose text is the
 adapter's or the lobby's own sentence for the outcome and whose
-`structuredContent` is `{"outcome": "<code>"}`.
+`structuredContent` is `{"outcome": "<code>", "message": "<that sentence>"}`,
+since a host may show a mind the structured form alone. A call whose own
+establishment of the connection found that the account needs signing in
+again answers `needs_sign_in` with the lobby's sentence naming the service
+and the connection, never as a revoke: the connection then waits for the
+sign-in, and the service did nothing, since the call could not be made.
 
 ## Stopping and rebuilding
 
