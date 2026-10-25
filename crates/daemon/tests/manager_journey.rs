@@ -201,6 +201,13 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
     );
     let back = install.arrive(&world.atproto.approve(&url));
     assert_eq!(back.status, 200, "{}", text(&back));
+    let done = text(&back);
+    assert!(
+        done.contains("<link rel=\"stylesheet\" href=\"/manager.css\">")
+            && done.contains("<a class=\"button primary\" href=\"/\">Back to the lobby</a>"),
+        "the page a sign-in lands on wears the lobby's look and leads back: {done}"
+    );
+    assert!(!done.contains(DID) && !done.contains(HANDLE), "{done}");
     let ended = install.json("/api/lobby")["signIns"].clone();
     assert_eq!(ended[0]["status"], "signed_in");
     assert_eq!(ended[0]["account"], HANDLE, "the handoff still names it");
@@ -234,6 +241,15 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
         [("atproto", HANDLE, DID), ("passbook", HOLDER, HOLDER)],
         "each account by its label, its key beside it for the details"
     );
+    for listed in [
+        install.json("/api/companions").to_string(),
+        install.json("/api/lobby")["companions"].to_string(),
+    ] {
+        assert!(
+            !listed.contains(DID),
+            "a companion never carries its key: {listed}"
+        );
+    }
 
     // Opening a connection: ready, and the mind's tools follow.
     let front = install.connected(&id, &passbook, &world.board, "front");
@@ -322,5 +338,27 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
 
     peer.close_stdin();
     peer.wait_exit(Duration::from_secs(10));
+
+    // Removing the companion: its own removal still reads as a sentence.
+    let mut detached = companion(&install, &id);
+    for _ in 0..100 {
+        if detached["attachments"] == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        detached = companion(&install, &id);
+    }
+    assert_eq!(detached["attachments"], 0);
+    let removed = install.operator(
+        "DELETE",
+        &format!("/api/companions/{id}"),
+        &json!({ "expectedRevision": detached["revision"] }),
+    );
+    assert_eq!(removed.status, 200, "{}", text(&removed));
+    let said: Vec<String> = sentences(&install, "finished=1&limit=1")
+        .iter()
+        .map(|entry| entry["sentence"].as_str().expect("a sentence").to_owned())
+        .collect();
+    assert_eq!(said, ["You removed a companion."]);
     install.stop();
 }

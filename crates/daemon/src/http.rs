@@ -1144,7 +1144,8 @@ fn complete_sign_in(lobby: &Lobby, kind: &str, pairs: Vec<(String, String)>) -> 
 }
 
 /// The page that says how a sign-in ended, from the outcome's wire name
-/// alone; the manager page says more. It loads nothing.
+/// alone, in the manager page's own stylesheet and with one way back to
+/// the lobby; the companion's page says more. It loads nothing else.
 fn sign_in_done(query: &str) -> Reply {
     let outcome = query_pairs(query)
         .into_iter()
@@ -1153,11 +1154,11 @@ fn sign_in_done(query: &str) -> Reply {
     let (status, said) = match outcome.as_deref() {
         Some("done") => (
             StatusCode::OK,
-            "The account is signed in. You can close this tab and return to the manager page.",
+            "The account is signed in. The companion's page in the lobby shows it.",
         ),
         Some("not_found") => (
             StatusCode::NOT_FOUND,
-            "Nothing was signed in: the lobby was not waiting for this sign-in. It may have been cancelled, expired or already finished; the manager page says which.",
+            "Nothing was signed in: the lobby was not waiting for this sign-in. It may have been cancelled, expired or already finished; the companion's page says which.",
         ),
         Some("conflict") => (
             StatusCode::CONFLICT,
@@ -1165,19 +1166,19 @@ fn sign_in_done(query: &str) -> Reply {
         ),
         Some("temporarily_unavailable" | "rate_limited") => (
             StatusCode::SERVICE_UNAVAILABLE,
-            "Nothing was signed in: the provider could not be reached, or asked the lobby to slow down. Try again from the manager page.",
+            "Nothing was signed in: the sign-in page could not be reached just now. Start the sign-in again from the companion's page.",
         ),
         Some("refused" | "invalid_input") => (
             StatusCode::FORBIDDEN,
-            "Nothing was signed in: the provider's answer did not prove the sign-in the lobby started. Start it again from the manager page.",
+            "Nothing was signed in: the sign-in page's answer did not prove the sign-in the lobby started. Start it again from the companion's page.",
         ),
         _ => (
             StatusCode::FORBIDDEN,
-            "Nothing was signed in. The trace log in the data directory says why.",
+            "Nothing was signed in. Start the sign-in again from the companion's page.",
         ),
     };
     let page = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Companion Lobby</title></head><body><p>{}</p></body></html>",
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">         <meta name=\"referrer\" content=\"no-referrer\">         <meta name=\"color-scheme\" content=\"dark\">         <title>Companion Lobby</title><link rel=\"stylesheet\" href=\"/manager.css\"></head>         <body><main><h1>Sign-in</h1><p class=\"lede\" role=\"status\">{}</p>         <a class=\"button primary\" href=\"/\">Back to the lobby</a></main></body></html>",
         html_escape(said)
     );
     let mut reply = with_hygiene(Response::new(Full::new(Bytes::from(page)).boxed()), status);
@@ -1188,7 +1189,9 @@ fn sign_in_done(query: &str) -> Reply {
     );
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'none'"),
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        ),
     );
     reply
 }

@@ -339,11 +339,16 @@ pub fn told(entry: &mut Value, names: &Names) {
 /// what, through which connection, and how it ended.
 pub fn sentence(entry: &Value, names: &Names) -> String {
     let text = |field: &str| entry[field].as_str().unwrap_or_default();
-    let companion = match entry["companion"].as_str() {
+    let named = entry["companion"]
+        .as_str()
+        .map(|id| Names::find(&names.companions, id));
+    let companion = match named {
         None => "a companion".to_owned(),
-        Some(id) => Names::find(&names.companions, id)
-            .map_or_else(|| "a companion since removed".to_owned(), str::to_owned),
+        Some(found) => found.map_or_else(|| "a companion since removed".to_owned(), str::to_owned),
     };
+    // Removing a companion takes its name with it, so its own removal names
+    // it only while it is still known.
+    let removed = named.flatten().unwrap_or("a companion");
     let service = capitalized(text("service"));
     let at = entry["connection"]
         .as_str()
@@ -374,10 +379,7 @@ pub fn sentence(entry: &Value, names: &Names) -> String {
             format!("renamed {companion}"),
             format!("rename {companion}"),
         ),
-        (_, "remove_companion") => (
-            format!("removed {companion}"),
-            format!("remove {companion}"),
-        ),
+        (_, "remove_companion") => (format!("removed {removed}"), format!("remove {removed}")),
         (_, "set_portrait") => (
             format!("changed the portrait of {companion}"),
             format!("change the portrait of {companion}"),
@@ -435,6 +437,7 @@ pub fn sentence(entry: &Value, names: &Names) -> String {
             "change the lobby".to_owned(),
         ),
     };
+    let sign_in = matches!(command, "begin_sign_in" | "complete_sign_in");
     let ended = match text("outcome") {
         "done" => return stopped(format!("{who} {done}")),
         "accepted" => return format!("{who} {done}; the service finishes it later."),
@@ -446,6 +449,8 @@ pub fn sentence(entry: &Value, names: &Names) -> String {
         "needs_sign_in" => "the account needs signing in again",
         "needs_permission" => "the account lacks the permission",
         "revoked" => "it had been revoked",
+        "temporarily_unavailable" if sign_in => "the sign-in page could not be reached",
+        "rate_limited" if sign_in => "the sign-in page asked the lobby to slow down",
         "temporarily_unavailable" => "it could not be reached",
         "rate_limited" => "it was asked to slow down",
         "outcome_unknown" => "whether it landed is unknown",
@@ -739,6 +744,14 @@ mod tests {
             (
                 json!({ "initiator": "lobby", "companion": gone, "kind": "command", "command": "detach", "outcome": "done" }),
                 "The lobby ended an attachment as a companion since removed.",
+            ),
+            (
+                json!({ "initiator": "sponsor", "companion": gone, "kind": "command", "command": "remove_companion", "outcome": "done" }),
+                "You removed a companion.",
+            ),
+            (
+                json!({ "initiator": "sponsor", "companion": ada, "kind": "command", "command": "begin_sign_in", "outcome": "temporarily_unavailable" }),
+                "You tried to start signing Ada in, but the sign-in page could not be reached.",
             ),
             (
                 json!({ "initiator": "sponsor", "kind": "command", "command": "create_companion", "outcome": "pending" }),

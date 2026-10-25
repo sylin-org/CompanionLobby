@@ -1666,6 +1666,9 @@ fn begin_refusal(outcome: Outcome, hint: &str) -> Refusal {
         }
         Outcome::Refused => "The provider refused to start a sign-in.",
         Outcome::Conflict => "A sign-in like this one is already waiting.",
+        Outcome::TemporarilyUnavailable | Outcome::RateLimited => {
+            "The sign-in page could not be reached just now, so nothing was started. Try again in a moment."
+        }
         other => return Refusal::from_adapter(other),
     };
     Refusal::new(outcome, message)
@@ -1678,6 +1681,9 @@ fn complete_refusal(outcome: Outcome) -> Refusal {
             "The provider's answer did not prove the sign-in the lobby started, so nothing was signed in. Start it again on the manager page."
         }
         Outcome::Unsupported => "The lobby cannot complete sign-ins of this kind.",
+        Outcome::TemporarilyUnavailable | Outcome::RateLimited => {
+            "The sign-in page could not be reached just now, so nothing was signed in. Start it again on the manager page in a moment."
+        }
         other => return Refusal::from_adapter(other),
     };
     Refusal::new(outcome, message)
@@ -2103,6 +2109,23 @@ fn name_refusal(what: &str, problem: NameProblem) -> Refusal {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn a_sign_in_page_out_of_reach_is_named_as_the_sign_in_page() {
+        for outcome in [Outcome::TemporarilyUnavailable, Outcome::RateLimited] {
+            for refusal in [begin_refusal(outcome, "ada"), complete_refusal(outcome)] {
+                assert_eq!(refusal.outcome, outcome);
+                assert!(
+                    refusal
+                        .message
+                        .starts_with("The sign-in page could not be reached just now"),
+                    "{}",
+                    refusal.message
+                );
+                assert!(!refusal.message.contains("service"), "{}", refusal.message);
+            }
+        }
+    }
 
     struct Dir(PathBuf);
 
