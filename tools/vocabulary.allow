@@ -39,3 +39,5 @@ crates/testkit/tests/lobby_world.rs	provider-tangent	The test probes the fake Sp
 crates/daemon/tests/space_journey.rs	provider-tangent	The journey connects a companion to the test kit's fake Space through the real daemon and the Tangent adapter.
 crates/daemon/tests/space_journey.rs	provider-atproto	The journey signs the companion in with the atproto adapter against the test kit's fake world.
 crates/daemon/tests/space_journey.rs	provider-atproto-wire	The journey checks the proof the fake PDS minted.
+crates/testkit/src/hosts.rs	provider-tangent	A recorded mind calls the Tangent adapter's tools by the names its host saw.
+crates/testkit/fixtures/hosts/claude-code-2.1.303-space.jsonl	provider-tangent	The frames a real host exchanged with the lobby while its mind used the Tangent adapter's tools.

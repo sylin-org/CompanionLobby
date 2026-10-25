@@ -90,6 +90,24 @@ pub fn claude_code() -> Recording {
     )
 }
 
+/// Claude Code 2.1.303 on Windows, run headless with `claude -p` and the
+/// haiku model, attached as Ada to a lobby whose only connection is the
+/// test kit's fake Space in `lobby-world`, given the task: find out where
+/// you can go, read what is new, and reply to the newest conversation in
+/// one friendly sentence.
+///
+/// The mind calls `reach`, arrives at the Space, reads the Topic of the
+/// newest Post and replies to it with a request id of its own choosing, with
+/// no refused call and no guessed name or argument. The Space's origin in
+/// the frames is the one that walk ran against; a replay puts its own in
+/// its place.
+pub fn claude_code_in_a_space() -> Recording {
+    parse(
+        "claude-code 2.1.303",
+        include_str!("../fixtures/hosts/claude-code-2.1.303-space.jsonl"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +138,37 @@ mod tests {
             .answer_to(&Value::from("server-discover-probe-1"))
             .expect("probe answer");
         assert_eq!(probe["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn the_space_recording_reaches_arrives_reads_and_replies_with_no_wrong_turn() {
+        let recording = claude_code_in_a_space();
+        let calls: Vec<&str> = recording
+            .sent()
+            .filter(|frame| frame["method"] == "tools/call")
+            .filter_map(|frame| frame["params"]["name"].as_str())
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                "reach",
+                "tangent_arrive",
+                "tangent_read_topic",
+                "tangent_post"
+            ]
+        );
+        for frame in recording
+            .sent()
+            .filter(|frame| frame["method"] == "tools/call")
+        {
+            let answer = recording.answer_to(&frame["id"]).expect("an answer");
+            assert_eq!(answer["result"]["isError"], false, "{answer}");
+        }
+        let post = recording
+            .sent()
+            .find(|frame| frame["params"]["name"] == "tangent_post")
+            .expect("the reply");
+        let arguments = &post["params"]["arguments"];
+        assert!(arguments["reply_to"].is_string() && arguments["request_id"].is_string());
     }
 }

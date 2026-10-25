@@ -17,8 +17,10 @@ use lobby_conformance::host::{Install, body, call, initialize, names, text, tool
 use lobby_daemon::mcp::LIST_CHANGED;
 use lobby_service_tangent::wire::PERMISSION_DENIED;
 use lobby_testkit::atproto::AtprotoWorld;
+use lobby_testkit::hosts;
 use lobby_testkit::secrets_in;
 use lobby_testkit::space::SpaceServer;
+use lobby_testkit::world::LobbyWorld;
 use serde_json::{Value, json};
 
 const SYNTHETIC: &str = env!("CARGO_BIN_EXE_companion-lobby-synthetic");
@@ -374,5 +376,116 @@ fn a_token_the_space_stops_taking_is_exchanged_again_once_and_kept() {
         2,
         "the new token was kept for the next call"
     );
+    install.stop();
+}
+
+/// The recorded frame with the Space's origin of the walk it was recorded
+/// on replaced by `origin`.
+fn moved(frame: &Value, recorded: &str, origin: &str) -> Value {
+    serde_json::from_str(&frame.to_string().replace(recorded, origin)).expect("still JSON")
+}
+
+#[test]
+fn the_recorded_claude_code_mind_in_a_space_replays_through_the_shim() {
+    let recording = hosts::claude_code_in_a_space();
+    let world = LobbyWorld::start();
+    let install = Install::new(Path::new(SYNTHETIC), "space-replay")
+        .with_env("LOBBY_AUTHSERVER", &world.authserver());
+    install.open();
+    let created = install.operator(
+        "POST",
+        "/api/companions",
+        &json!({ "moniker": "ada", "displayName": "Ada" }),
+    );
+    assert_eq!(created.status, 201, "{}", text(&created));
+    let ada = body(&created)["companion"]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let started = install.operator(
+        "POST",
+        "/api/sign-ins",
+        &json!({ "companion": ada, "kind": "atproto", "hint": "" }),
+    );
+    let url = body(&started)["url"].as_str().expect("url").to_owned();
+    assert_eq!(install.arrive(&world.atproto.approve(&url)).status, 200);
+    let credential = install.json("/api/lobby")["credentials"][0]["id"].clone();
+    let granted = install.operator(
+        "POST",
+        "/api/connections",
+        &json!({ "companion": ada, "credential": credential, "service": "tangent", "address": world.space.origin(), "label": "main" }),
+    );
+    assert_eq!(granted.status, 201, "{}", text(&granted));
+
+    let reach = recording
+        .sent()
+        .find(|frame| frame["params"]["name"] == "reach")
+        .and_then(|frame| recording.answer_to(&frame["id"]))
+        .expect("the recorded reach");
+    let recorded = reach["result"]["structuredContent"]["connections"][0]["address"]
+        .as_str()
+        .expect("the recorded Space")
+        .to_owned();
+    let origin = world.space.origin();
+    let before = world.space.posts().len();
+    let mut host = install.attach(&ada);
+    for frame in recording.sent() {
+        let frame = moved(frame, &recorded, &origin);
+        host.send(&frame);
+        let Some(id) = frame.get("id") else {
+            continue;
+        };
+        let answer = host.answer(id);
+        let expected = moved(
+            recording
+                .answer_to(id)
+                .expect("the recording has this answer"),
+            &recorded,
+            &origin,
+        );
+        assert_eq!(
+            answer["error"]["code"], expected["error"]["code"],
+            "{answer}"
+        );
+        if frame["method"] == "tools/list" {
+            let listed = |tools: &Value| -> Vec<String> {
+                tools
+                    .as_array()
+                    .expect("tools")
+                    .iter()
+                    .map(|tool| tool["name"].as_str().expect("name").to_owned())
+                    .collect()
+            };
+            assert_eq!(
+                listed(&answer["result"]["tools"]),
+                listed(&expected["result"]["tools"])
+            );
+        }
+        if frame["method"] == "tools/call" {
+            assert_eq!(answer["result"]["isError"], false, "{answer}");
+            let name = frame["params"]["name"].as_str().expect("name");
+            let (got, want) = (
+                &answer["result"]["structuredContent"],
+                &expected["result"]["structuredContent"],
+            );
+            match name {
+                "reach" => assert_eq!(got["tools"], want["tools"]),
+                "tangent_arrive" => {
+                    assert_eq!(got["attention"]["items"], want["attention"]["items"])
+                }
+                "tangent_read_topic" => assert_eq!(got["posts"], want["posts"]),
+                "tangent_post" => assert_eq!(
+                    got["post"], want["post"],
+                    "the same Post as when it was recorded"
+                ),
+                other => panic!("the recording calls {other}"),
+            }
+        }
+    }
+    host.close_stdin();
+    let posts = world.space.posts();
+    assert_eq!(posts.len(), before + 1, "the mind posted one reply");
+    let reply = posts.last().expect("the reply");
+    assert!(reply.reply_to.is_some() && reply.request_id.is_some());
     install.stop();
 }
