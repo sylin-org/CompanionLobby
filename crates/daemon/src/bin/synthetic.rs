@@ -17,7 +17,7 @@ use lobby_credential_atproto::{Atproto, World};
 use lobby_daemon::cli;
 use lobby_daemon::registry::{AUTHSERVER_ENV, Registry};
 use lobby_testkit::board::Board;
-use lobby_testkit::passbook::Passbook;
+use lobby_testkit::passbook::{self, Passbook};
 
 fn synthetic() -> Result<Registry, String> {
     let mut credentials: Vec<Arc<dyn CredentialAdapter>> = vec![Arc::new(Passbook::new())];
@@ -26,7 +26,12 @@ fn synthetic() -> Result<Registry, String> {
             .ok_or_else(|| format!("{AUTHSERVER_ENV} must be a loopback origin here"))?;
         credentials.push(Arc::new(Atproto::new(world)));
     }
-    Ok(Registry::new(credentials, vec![Arc::new(Board::new())]))
+    Ok(Registry::new(credentials, vec![Arc::new(Board::new())])
+        .titled(passbook::KIND, passbook::TITLE)
+        .titled(
+            lobby_credential_atproto::KIND,
+            lobby_credential_atproto::TITLE,
+        ))
 }
 
 fn main() -> ExitCode {

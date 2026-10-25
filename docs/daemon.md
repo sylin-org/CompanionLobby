@@ -86,11 +86,13 @@ never decodes either: only the adapter that encoded a blob reads it.
   "storeId": "<32 hex digits>",
   "revision": 3,
   "companions": [
-    { "id": "<32 hex digits>", "moniker": "ada", "displayName": "Ada", "revision": 1 }
+    { "id": "<32 hex digits>", "moniker": "ada", "displayName": "Ada", "revision": 1,
+      "portrait": "png" }
   ],
   "credentials": [
     { "id": "<32 hex digits>", "companion": "<companion id>", "kind": "<provider kind>",
-      "account": "<account key>", "permissions": ["<what the provider granted>"],
+      "account": "<account key>", "label": "<what the sponsor knows it by>",
+      "permissions": ["<what the provider granted>"],
       "state": "ready" }
   ],
   "connections": [
@@ -103,8 +105,15 @@ never decodes either: only the adapter that encoded a blob reads it.
 
 The store id is minted once per install and names the journal's entries.
 `revision` advances on every commit; each companion's own `revision`
-advances whenever it changes, and a rename or removal names the revision it
-read. A credential is `ready` or `revoked`, and its `permissions` are what
+advances whenever it changes, and a rename, a new portrait or a removal
+names the revision it read. A companion's `portrait` is `png`, `jpeg`,
+`webp` or `gif`, or `null` when it shows its initials; the image is kept
+beside the file as `<companion id>.portrait`, not sealed, since it is no
+secret, and is deleted with the companion. A credential's `account` is the
+provider's stable key for the account and its `label` what the sponsor
+knows the account by, as the provider's adapter reported it at sign-in: a
+handle or an account name. A credential is `ready` or `revoked`, and its
+`permissions` are what
 the provider granted at sign-in, in the provider's own words; only a new
 sign-in widens them. A connection is `ready` or
 `revoked`, and its `revision` advances on every change, so a call pinned to
@@ -379,16 +388,18 @@ state file and the journal before it answers.
 | Route | Rule | What it does |
 | --- | --- | --- |
 | `GET`, `OPTIONS /api/discovery` | Host | The discovery document; the only response with cross-origin headers. |
-| `GET /`, `/companion/<id>`, `/journal` | Host | The manager page. |
+| `GET /`, `/journal`, `/companion/<id>`, `/companion/<id>/attach`, `/companion/<id>/sign-in/<sign-in id>` | Host | The manager page; see [manager.md](manager.md). |
 | `GET /manager.css`, `/manager.js` | Host | Its stylesheet and script. |
-| `GET /api/lobby` | Host | `{"storeId", "feed": {"epoch", "position"}, "companions": [...], "credentials": [...], "connections": [...], "signIns": [...], "journal": {"healthy", "highWater"}}`, one consistent picture; `signIns` are the sign-ins the lobby waits on. A credential is `{"id", "companion", "kind", "account", "permissions", "state"}` and a connection `{"id", "companion", "credential", "service", "address", "label", "state", "revision"}`; neither ever carries material or what a service issued. |
-| `GET /api/companions` | Host | `{"companions": [{"id", "moniker", "displayName", "revision", "attachments", "hostConfig"}]}`. |
-| `GET /api/journal?before=<cursor>&limit=<n>` | Host | `{"entries", "upper", "next"}`, newest first; 409 for a cursor of another journal. |
+| `GET /api/lobby` | Host | `{"storeId", "feed": {"epoch", "position"}, "companions": [...], "credentials": [...], "connections": [...], "signIns": [...], "kinds": [...], "services": [...], "journal": {"healthy", "highWater"}}`, one consistent picture. `signIns` are the sign-ins the lobby waits on, then the last 64 it remembers ending, each `{"id", "companion", "kind", "account", "status", "expiresAt"}`, `account` being what the sponsor typed to name the account meant (empty when the provider's page chooses) and `status` one of `pending`, `signed_in`, `cancelled`, `expired` or `refused`; a sign-in past its time is ended as expired before the picture is taken. A credential is `{"id", "companion", "kind", "account", "label", "permissions", "state"}` and a connection `{"id", "companion", "credential", "service", "address", "label", "state", "revision"}`; neither ever carries material or what a service issued. `kinds` are the provider kinds the sponsor may sign in with, each `{"kind", "title"}`, the title being what the sponsor reads; `services` are the installed services, each `{"name", "title", "accepts"}`, `accepts` naming the kinds whose accounts can open a connection to it. |
+| `GET /api/companions` | Host | `{"companions": [{"id", "moniker", "displayName", "revision", "portrait", "attachments", "hostConfig"}]}`; `portrait` is the path of the companion's portrait, or `null`. |
+| `GET /api/companions/<id>/portrait` | Host | The companion's portrait, typed by its own leading bytes, or 404. |
+| `GET /api/journal?before=<cursor>&limit=<n>&companion=<id>&finished=1` | Host | `{"entries", "upper", "next"}`, newest first; 409 for a cursor of another journal. With `companion`, only the entries about that companion; with `finished=1`, only the entries that say how something ended, leaving out the pending ones. Each entry carries its `sentence`: who, as which companion, did what, through which connection, and how it ended, named the way the sponsor named them. |
 | `GET /api/events` | Host | The live feed, as server-sent events. |
 | `POST /api/companions` | operator write | Creates a companion from `{"moniker", "displayName"}`: 201 with `{"companion"}`, or 400 for an invalid name, 409 for a moniker in use. |
 | `PATCH /api/companions/<id>` | operator write | Renames from `{"expectedRevision", "moniker", "displayName"}` (either name may be left out): 200 with `{"companion"}`, or 400, 404, or 409 for a moved revision or a moniker in use. |
+| `PUT /api/companions/<id>/portrait` | operator write | Gives the companion a portrait from `{"expectedRevision", "image"}`, `image` being a `data:` URL of a PNG, JPEG, WebP or GIF image of at most 512 KiB, recognized by its own bytes, or `null` to go back to initials: 200 with `{"companion"}`, or 400 for anything else, 404, or 409 for a moved revision. |
 | `DELETE /api/companions/<id>` | operator write | Removes from `{"expectedRevision", "cascade"}`: 200 with `{"removed", "endedAttachments"}`, or 404, or 409 for a moved revision or live attachments without `"cascade": true`. |
-| `POST /api/sign-ins` | operator write | Starts a sign-in from `{"companion", "kind", "hint"}`: 201 with `{"signIn": {"id", "companion", "kind", "status", "expiresAt"}, "url"}`, `url` being where the sponsor's browser goes; or 404 for an unknown companion or kind, 409 when the companion already holds a ready credential of that kind or already waits on a sign-in of it. |
+| `POST /api/sign-ins` | operator write | Starts a sign-in from `{"companion", "kind", "hint"}`: 201 with `{"signIn": {"id", "companion", "kind", "account", "status", "expiresAt"}, "url"}`, `url` being where the sponsor's browser goes; or 404 for an unknown companion or kind, 409 when the companion already holds a ready credential of that kind or already waits on a sign-in of it. |
 | `POST /api/sign-ins/<id>/cancel` | operator write | Cancels a sign-in while it waits: 200 with `{"signIn"}`, or 404 when none with that id waits. |
 | `GET /signin/<kind>/return` | Host | Where a provider sends the browser back. Completes a sign-in the lobby waits for, once, and answers 303 to `/signin/<kind>/done?outcome=<outcome>` with no body, so the code and the `state` leave the address bar at once and nothing the provider sent rides on. |
 | `GET /signin/<kind>/done` | Host | The page that says how a sign-in ended, from the outcome alone: 200 when the account is signed in, 404 when the lobby was not waiting for it (cancelled, expired, finished or never started), 409 for an account another companion holds or a kind the companion already holds, 403 for a return that did not prove the sign-in, 503 when the provider could not be reached. It loads nothing and echoes nothing. |

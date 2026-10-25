@@ -114,7 +114,11 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
     let ada = install.create("ada");
     assert_eq!(
         install.json("/api/lobby")["kinds"],
-        json!(["passbook", "atproto"])
+        json!([
+            { "kind": "passbook", "title": "Passbook" },
+            { "kind": "atproto", "title": "Atmosphere" },
+        ]),
+        "each kind with the title the sponsor reads"
     );
 
     let started = begin(&install, &ada, "");
@@ -158,9 +162,16 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
         held[0]["account"], ADA,
         "the account the provider authenticated"
     );
+    assert_eq!(
+        held[0]["label"], "ada.example.test",
+        "the handle that resolves back to it, as the sponsor knows it"
+    );
     assert_eq!(held[0]["permissions"], json!(["atproto"]));
     assert_eq!(held[0]["state"], "ready");
-    assert_eq!(install.json("/api/lobby")["signIns"], json!([]));
+    let ended = install.json("/api/lobby")["signIns"].clone();
+    assert_eq!(ended.as_array().map(Vec::len), Some(1), "{ended}");
+    assert_eq!(ended[0]["status"], "signed_in");
+    assert_eq!(ended[0]["id"], waiting["id"]);
 
     // The wire, as the fake authorization server saw it.
     let requests = world.server().requests();
@@ -389,6 +400,14 @@ fn companion_lobby_refuses_a_loopback_authorization_server_and_reaches_nothing()
     // public network only.
     let product = Install::new(Path::new(PRODUCT), "product-kinds");
     product.open();
-    assert_eq!(product.json("/api/lobby")["kinds"], json!(["atproto"]));
+    assert_eq!(
+        product.json("/api/lobby")["kinds"],
+        json!([{ "kind": "atproto", "title": "Atmosphere" }])
+    );
+    assert_eq!(
+        product.json("/api/lobby")["services"],
+        json!([]),
+        "the product has no service installed yet"
+    );
     product.stop();
 }

@@ -42,8 +42,8 @@ pub use authorization::{Authorization, AuthorizationAsk, Secret};
 pub use companion::{Companion, CompanionId, DisplayName, Moniker, NameProblem};
 pub use connection::{Connection, ConnectionId, ConnectionState, Label};
 pub use credential::{
-    AccountKey, Credential, CredentialAdapter, CredentialId, CredentialState, ProviderKind,
-    SignInRequest, SignInReturn, SignInStart, SignedIn,
+    AccountKey, AccountLabel, Credential, CredentialAdapter, CredentialId, CredentialState,
+    ProviderKind, SignInRequest, SignInReturn, SignInStart, SignedIn,
 };
 pub use journal::{Initiator, JournalEntry, JournalKind};
 pub use material::{MaterialSlot, SealedIssued, SealedMaterial};

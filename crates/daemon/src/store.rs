@@ -2,8 +2,10 @@
 //!
 //! `lobby.json` in the data directory holds what the lobby remembers across
 //! restarts: the store id that names this install's journal, a revision that
-//! every commit advances, the companions, each with its own revision, their
-//! credentials, and their connections, each with its own revision. Material
+//! every commit advances, the companions, each with its own revision and the
+//! kind of its portrait when it has one, their credentials, each with the
+//! label the sponsor knows its account by, and their connections, each with
+//! its own revision. Material
 //! and what services issued never reach it: the keyring keeps those, sealed,
 //! beside it. Live attachments are runtime facts and never reach it either.
 //!
@@ -33,12 +35,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use lobby_contracts::{
-    AccountKey, Address, AddressPolicy, Companion, CompanionId, Connection, ConnectionId,
-    ConnectionState, Credential, CredentialId, CredentialState, DisplayName, Label, Moniker,
-    ProviderKind, ServiceName, Sponsor,
+    AccountKey, AccountLabel, Address, AddressPolicy, Companion, CompanionId, Connection,
+    ConnectionId, ConnectionState, Credential, CredentialId, CredentialState, DisplayName, Label,
+    Moniker, ProviderKind, ServiceName, Sponsor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::portrait::Portrait;
 
 /// The state file's name inside the data directory.
 pub const STATE_FILE: &str = "lobby.json";
@@ -56,6 +60,8 @@ pub struct CompanionRecord {
     pub companion: Companion,
     /// Advances on every change to this companion; a guarded change names it.
     pub revision: u64,
+    /// The kind of its portrait, kept beside the state file, when it has one.
+    pub portrait: Option<Portrait>,
 }
 
 /// The lobby's durable state.
@@ -200,6 +206,7 @@ struct CompanionForm {
     moniker: String,
     display_name: String,
     revision: u64,
+    portrait: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -209,6 +216,7 @@ struct CredentialForm {
     companion: String,
     kind: String,
     account: String,
+    label: String,
     permissions: Vec<String>,
     state: StateForm,
 }
@@ -311,6 +319,7 @@ fn encode(state: &State) -> Vec<u8> {
                 moniker: record.companion.moniker.as_str().to_owned(),
                 display_name: record.companion.display_name.as_str().to_owned(),
                 revision: record.revision,
+                portrait: record.portrait.map(|kind| kind.as_str().to_owned()),
             })
             .collect(),
         credentials: state
@@ -321,6 +330,7 @@ fn encode(state: &State) -> Vec<u8> {
                 companion: credential.companion.to_string(),
                 kind: credential.kind.as_str().to_owned(),
                 account: credential.account.as_str().to_owned(),
+                label: credential.label.as_str().to_owned(),
                 permissions: credential.permissions.clone(),
                 state: match credential.state {
                     CredentialState::Ready => StateForm::Ready,
@@ -388,6 +398,13 @@ fn decode(bytes: &[u8]) -> Result<State, String> {
         if entry.revision == 0 {
             return Err("holds a companion at revision 0".to_owned());
         }
+        let portrait = match entry.portrait.as_deref() {
+            None => None,
+            Some(kind) => Some(
+                Portrait::parse(kind)
+                    .ok_or_else(|| "holds a portrait of a kind it does not know".to_owned())?,
+            ),
+        };
         companions.push(CompanionRecord {
             companion: Companion {
                 id,
@@ -396,6 +413,7 @@ fn decode(bytes: &[u8]) -> Result<State, String> {
                 sponsor: Sponsor::LOCAL,
             },
             revision: entry.revision,
+            portrait,
         });
     }
     let credentials = form
@@ -407,6 +425,7 @@ fn decode(bytes: &[u8]) -> Result<State, String> {
                 companion: CompanionId::parse(&entry.companion)?,
                 kind: ProviderKind::new(&entry.kind)?,
                 account: AccountKey::new(&entry.account)?,
+                label: AccountLabel::new(&entry.label)?,
                 permissions: Credential::permissions_are_valid(&entry.permissions)
                     .then_some(entry.permissions)?,
                 state: match entry.state {
@@ -574,6 +593,7 @@ mod tests {
                 sponsor: Sponsor::LOCAL,
             },
             revision: 1,
+            portrait: None,
         }
     }
 
@@ -613,7 +633,7 @@ mod tests {
     fn a_file_this_build_does_not_read_is_refused_and_left_as_it_is() {
         let valid = r#"{"schema":1,"storeId":"0123456789abcdef0123456789abcdef","revision":0,"companions":[],"credentials":[],"connections":[]}"#;
         let company = r#"{"id":"0123456789abcdef0123456789abcdef","moniker":"ada","displayName":"Ada","revision":1}"#;
-        let stray = r#"{"id":"0123456789abcdef0123456789abcde0","companion":"0123456789abcdef0123456789abcde1","kind":"passbook","account":"holder-1","permissions":["stamp"],"state":"ready"}"#;
+        let stray = r#"{"id":"0123456789abcdef0123456789abcde0","companion":"0123456789abcdef0123456789abcde1","kind":"passbook","account":"holder-1","label":"holder-1","permissions":["stamp"],"state":"ready"}"#;
         for (bytes, why) in [
             (String::new(), "is empty"),
             ("  \n".to_owned(), "is empty"),

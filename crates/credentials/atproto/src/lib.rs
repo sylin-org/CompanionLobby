@@ -47,7 +47,9 @@
 //!    sponsor's account named, when it named one, and that PDS must name the
 //!    flight's authorization server.
 //! 4. The account is `sub`; the permissions are the granted scope; the
-//!    material is the session (see [`material`]).
+//!    material is the session (see [`material`]). The label the sponsor
+//!    sees is the first handle the document claims that resolves back to
+//!    `sub`; an account with no such handle is labelled by `sub` itself.
 //!
 //! Minting authorizations for services through the PDS joins with the first
 //! service adapter that asks for one; until then every ask is refused as
@@ -68,8 +70,9 @@ pub mod wire;
 use std::time::{Duration, Instant};
 
 use lobby_contracts::{
-    AccountKey, Address, Authorization, AuthorizationAsk, CredentialAdapter, MaterialSlot, Outcome,
-    ProviderKind, Secret, SignInRequest, SignInReturn, SignInStart, SignedIn,
+    AccountKey, AccountLabel, Address, Authorization, AuthorizationAsk, CredentialAdapter,
+    MaterialSlot, Outcome, ProviderKind, Secret, SignInRequest, SignInReturn, SignInStart,
+    SignedIn,
 };
 use lobby_outbound::Outbound;
 use serde_json::Value;
@@ -85,6 +88,10 @@ pub use crate::wire::World;
 
 /// The provider kind of this adapter.
 pub const KIND: &str = "atproto";
+
+/// What the sponsor reads for this kind of account on the manager page: the
+/// name its own community gives the network an atproto account lives in.
+pub const TITLE: &str = "Atmosphere";
 
 /// The scope every sign-in asks for: the account's identity.
 pub const SCOPE: &str = "atproto";
@@ -143,6 +150,22 @@ impl Atproto {
         let authserver =
             identity::authorization_server(&self.world, &self.outbound, &document.pds)?;
         Ok((authserver, Some((did, document.pds))))
+    }
+
+    /// What the sponsor knows the account `did` by: the first of `handles`,
+    /// claimed by its document, that resolves back to `did`, or `did` when
+    /// none does.
+    fn label(&self, did: &str, handles: &[String]) -> Result<AccountLabel, Outcome> {
+        for handle in handles {
+            match identity::resolve_handle(&self.world, &self.outbound, handle) {
+                Ok(resolved) if resolved == did => {
+                    return AccountLabel::new(handle).ok_or(Outcome::Refused);
+                }
+                Ok(_) | Err(Outcome::NotFound | Outcome::Refused) => {}
+                Err(other) => return Err(other),
+            }
+        }
+        AccountLabel::new(did).ok_or(Outcome::Refused)
     }
 
     /// Exchanges `code` for the session `flight` started, and checks what
@@ -302,6 +325,7 @@ impl CredentialAdapter for Atproto {
             return Err(Outcome::Refused);
         }
         let account = AccountKey::new(&subject).ok_or(Outcome::Refused)?;
+        let label = self.label(&subject, &document.handles)?;
         let material = Material {
             subject,
             access: Secret::new(tokens["access_token"].as_str().unwrap_or_default()),
@@ -314,6 +338,7 @@ impl CredentialAdapter for Atproto {
         };
         Ok(SignedIn {
             account,
+            label,
             permissions,
             material: material.encode(),
         })

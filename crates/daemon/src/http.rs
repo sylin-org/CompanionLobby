@@ -79,8 +79,9 @@ use crate::journal::{PAGE_DEFAULT, PageProblem};
 use crate::keyring::{AttachSecret, AttachmentToken};
 use crate::lock::{DaemonLock, DaemonRecord, LockProblem};
 use crate::manager;
+use crate::portrait::{self, Portrait};
 use crate::projections::{Reached, companion_json, connection_json, credential_json, sign_in_json};
-use crate::registry::Registry;
+use crate::registry::{Registry, capitalized};
 use crate::{discovery, mcp, trace};
 
 mod feed_body;
@@ -399,6 +400,13 @@ fn companion_in(path: &str) -> Option<CompanionId> {
         .and_then(CompanionId::parse)
 }
 
+/// The companion an `/api/companions/<id>/portrait` path names.
+fn portrait_in(path: &str) -> Option<CompanionId> {
+    path.strip_prefix("/api/companions/")
+        .and_then(|rest| rest.strip_suffix("/portrait"))
+        .and_then(CompanionId::parse)
+}
+
 /// The credential an `/api/credentials/<id>/revoke` path names.
 fn credential_revoked_in(path: &str) -> Option<CredentialId> {
     path.strip_prefix("/api/credentials/")
@@ -509,6 +517,17 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
             let id = companion_in(companion).unwrap_or_else(|| unreachable!("checked above"));
             match operator_body(app, request).await {
                 Ok(body) => blocking(app, move |lobby| rename_companion(lobby, id, &body)).await,
+                Err(refused) => refused.reply(),
+            }
+        }
+        (&Method::GET, portrait) if portrait_in(portrait).is_some() => {
+            let id = portrait_in(portrait).unwrap_or_else(|| unreachable!("checked above"));
+            blocking(app, move |lobby| portrait_reply(lobby, id)).await
+        }
+        (&Method::PUT, portrait) if portrait_in(portrait).is_some() => {
+            let id = portrait_in(portrait).unwrap_or_else(|| unreachable!("checked above"));
+            match operator_body(app, request).await {
+                Ok(body) => blocking(app, move |lobby| set_portrait(lobby, id, &body)).await,
                 Err(refused) => refused.reply(),
             }
         }
@@ -662,6 +681,7 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
         (_, other)
             if manager::is_page_path(other)
                 || companion_in(other).is_some()
+                || portrait_in(other).is_some()
                 || credential_revoked_in(other).is_some()
                 || connection_revoked_in(other).is_some()
                 || sign_in_cancelled_in(other).is_some()
@@ -891,7 +911,19 @@ fn snapshot_json(lobby: &Lobby) -> Value {
         "kinds": lobby
             .credential_kinds()
             .iter()
-            .map(ProviderKind::as_str)
+            .map(|kind| json!({ "kind": kind.as_str(), "title": lobby.registry().title(kind) }))
+            .collect::<Vec<_>>(),
+        "services": lobby
+            .registry()
+            .services()
+            .iter()
+            .map(|(name, accepts)| {
+                json!({
+                    "name": name.as_str(),
+                    "title": capitalized(name.as_str()),
+                    "accepts": accepts.iter().map(ProviderKind::as_str).collect::<Vec<_>>(),
+                })
+            })
             .collect::<Vec<_>>(),
         "journal": { "healthy": journal_healthy, "highWater": journal_high_water },
     })
@@ -987,6 +1019,77 @@ fn remove_companion(lobby: &Lobby, id: CompanionId, body: &[u8]) -> Reply {
         }
         Err(refusal) => refusal_reply(&refusal),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetPortrait {
+    expected_revision: u64,
+    image: Option<String>,
+}
+
+/// Gives a companion the portrait the page read from the chosen file, as a
+/// `data:` URL, or takes it away with `null`.
+fn set_portrait(lobby: &Lobby, id: CompanionId, body: &[u8]) -> Reply {
+    let Ok(request) = serde_json::from_slice::<SetPortrait>(body) else {
+        return problem(
+            StatusCode::BAD_REQUEST,
+            Outcome::InvalidInput,
+            "Send {\"expectedRevision\": ..., \"image\": <a data: URL or null>} and nothing else.",
+        );
+    };
+    let image = match request.image.as_deref() {
+        None => None,
+        Some(url) => match portrait::from_data_url(url) {
+            Some(bytes) => Some(bytes),
+            None => {
+                return problem(
+                    StatusCode::BAD_REQUEST,
+                    Outcome::InvalidInput,
+                    "That file could not be read as an image of at most 512 KiB.",
+                );
+            }
+        },
+    };
+    match lobby.set_portrait(id, request.expected_revision, image.as_deref()) {
+        Ok(view) => json_reply(
+            StatusCode::OK,
+            json!({ "companion": companion_json(&view, lobby.command()) }),
+        ),
+        Err(refusal) => refusal_reply(&refusal),
+    }
+}
+
+/// A companion's portrait, typed by its own bytes.
+fn portrait_reply(lobby: &Lobby, id: CompanionId) -> Reply {
+    let Some(bytes) = lobby.portrait(id) else {
+        return problem(
+            StatusCode::NOT_FOUND,
+            Outcome::NotFound,
+            "That companion has no portrait.",
+        );
+    };
+    let Some(kind) = Portrait::sniff(&bytes) else {
+        return problem(
+            StatusCode::NOT_FOUND,
+            Outcome::NotFound,
+            "That companion has no portrait.",
+        );
+    };
+    let mut reply = with_hygiene(
+        Response::new(Full::new(Bytes::from(bytes)).boxed()),
+        StatusCode::OK,
+    );
+    let headers = reply.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(kind.media_type()),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'"),
+    );
+    reply
 }
 
 #[derive(Deserialize)]
@@ -1170,9 +1273,22 @@ fn grant_connection(lobby: &Lobby, body: &[u8]) -> Reply {
 fn journal_reply(lobby: &Lobby, query: &str) -> Reply {
     let mut before = None;
     let mut limit = PAGE_DEFAULT;
+    let mut companion = None;
+    let mut finished = false;
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         match pair.split_once('=') {
             Some(("before", cursor)) if !cursor.is_empty() => before = Some(cursor.to_owned()),
+            Some(("finished", "1")) => finished = true,
+            Some(("companion", id)) => match CompanionId::parse(id) {
+                Some(id) => companion = Some(id),
+                None => {
+                    return problem(
+                        StatusCode::BAD_REQUEST,
+                        Outcome::InvalidInput,
+                        "companion is a companion's id.",
+                    );
+                }
+            },
             Some(("limit", count)) => match count.parse::<usize>() {
                 Ok(count) => limit = count,
                 Err(_) => {
@@ -1187,12 +1303,12 @@ fn journal_reply(lobby: &Lobby, query: &str) -> Reply {
                 return problem(
                     StatusCode::BAD_REQUEST,
                     Outcome::InvalidInput,
-                    "The journal takes before and limit, nothing else.",
+                    "The journal takes before, limit, companion and finished, nothing else.",
                 );
             }
         }
     }
-    match lobby.journal_page(before.as_deref(), limit) {
+    match lobby.journal_page(before.as_deref(), limit, companion, finished) {
         Ok(page) => json_reply(
             StatusCode::OK,
             json!({ "entries": page.entries, "upper": page.upper, "next": page.next }),

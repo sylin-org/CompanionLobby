@@ -18,9 +18,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lobby_contracts::{
-    AccountKey, Address, AddressPolicy, Authorization, AuthorizationAsk, CredentialAdapter,
-    MaterialSlot, Outcome, ProviderKind, SealedMaterial, Secret, SignInRequest, SignInReturn,
-    SignInStart, SignedIn,
+    AccountKey, AccountLabel, Address, AddressPolicy, Authorization, AuthorizationAsk,
+    CredentialAdapter, MaterialSlot, Outcome, ProviderKind, SealedMaterial, Secret, SignInRequest,
+    SignInReturn, SignInStart, SignedIn,
 };
 use lobby_outbound::{Failure, Outbound, Request};
 use serde_json::{Value, json};
@@ -30,6 +30,9 @@ use crate::{percent_encode, unique_token};
 
 /// The provider kind of the passbook adapter.
 pub const KIND: &str = "passbook";
+
+/// What the sponsor reads for a passbook account.
+pub const TITLE: &str = "Passbook";
 
 /// What every passbook sign-in grants: stamps for any audience.
 pub const PERMISSION: &str = "stamp";
@@ -303,9 +306,9 @@ impl CredentialAdapter for Passbook {
                 Outcome::NeedsSignIn => Outcome::Refused,
                 other => other,
             })?;
-        let account = answer["holder"]
-            .as_str()
-            .and_then(AccountKey::new)
+        let holder = answer["holder"].as_str().unwrap_or_default();
+        let (account, label) = AccountKey::new(holder)
+            .zip(AccountLabel::new(holder))
             .ok_or(Outcome::TemporarilyUnavailable)?;
         let key = answer["key"]
             .as_str()
@@ -317,6 +320,7 @@ impl CredentialAdapter for Passbook {
         };
         Ok(SignedIn {
             account,
+            label,
             permissions: vec![PERMISSION.to_owned()],
             material: material.encode(),
         })

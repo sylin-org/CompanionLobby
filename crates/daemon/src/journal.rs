@@ -357,6 +357,17 @@ impl Reader {
     /// out that cursor. A page read while a rotation moved the files is read
     /// again.
     pub fn page(&self, before: Option<&str>, limit: usize) -> Result<Page, PageProblem> {
+        self.page_where(before, limit, &|_| true)
+    }
+
+    /// Reads a page as [`Reader::page`] does, of the entries `keep` keeps
+    /// only; the cursor it hands out works the same.
+    pub fn page_where(
+        &self,
+        before: Option<&str>,
+        limit: usize,
+        keep: &dyn Fn(&Value) -> bool,
+    ) -> Result<Page, PageProblem> {
         let limit = limit.clamp(1, PAGE_MAX);
         let (upper, below) = match before {
             None => (self.high_water, u64::MAX),
@@ -368,7 +379,7 @@ impl Reader {
                 std::thread::sleep(ROTATION_PAUSE);
                 continue;
             }
-            let page = self.read(upper, below, limit)?;
+            let page = self.read(upper, below, limit, keep)?;
             if self.rotations.load(Ordering::Acquire) == seen {
                 return Ok(page);
             }
@@ -382,14 +393,20 @@ impl Reader {
     /// Reads generations newest first until more than `limit` entries at or
     /// below `upper` and below `below` are in hand: each generation holds
     /// only entries older than the one before it.
-    fn read(&self, upper: u64, below: u64, limit: usize) -> Result<Page, PageProblem> {
+    fn read(
+        &self,
+        upper: u64,
+        below: u64,
+        limit: usize,
+        keep: &dyn Fn(&Value) -> bool,
+    ) -> Result<Page, PageProblem> {
         let mut entries: Vec<(u64, Value)> = Vec::new();
         for name in read_order() {
             entries.extend(
                 read_entries(&self.dir, &name)
                     .map_err(PageProblem::Io)?
                     .into_iter()
-                    .filter(|(seq, _)| *seq <= upper && *seq < below),
+                    .filter(|(seq, value)| *seq <= upper && *seq < below && keep(value)),
             );
             if entries.len() > limit {
                 break;

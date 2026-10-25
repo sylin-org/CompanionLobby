@@ -12,9 +12,13 @@
 //! the labels and addresses are the sponsor's.
 //!
 //! The manager page's projections are built the same way: each companion as
-//! the page shows it, with the host configuration that names it, and the live
-//! feed, which turns every event the lobby emits into one item a page applies
-//! to what it last loaded.
+//! the page shows it, with the host configuration that names it, each
+//! credential with the label the sponsor knows its account by, each journal
+//! entry as one sentence in the sponsor's words, and the live feed, which
+//! turns every event the lobby emits into one item a page applies to what it
+//! last loaded. A sentence names companions, services and connections the
+//! way the sponsor named them, never by an id, and says how the entry ended
+//! in plain words, never by an outcome's wire name.
 //!
 //! Projections hold no truth and can always be rebuilt.
 
@@ -30,6 +34,8 @@ use tokio::sync::broadcast;
 
 use crate::domain::{CompanionView, Event, SignInView};
 use crate::journal;
+use crate::registry::capitalized;
+use crate::store::State;
 
 /// The name of the one tool every attachment has.
 pub const REACH: &str = "reach";
@@ -183,6 +189,7 @@ pub fn credential_json(credential: &Credential) -> Value {
         "companion": credential.companion.to_string(),
         "kind": credential.kind.as_str(),
         "account": credential.account.as_str(),
+        "label": credential.label.as_str(),
         "permissions": credential.permissions,
         "state": match credential.state {
             CredentialState::Ready => "ready",
@@ -197,6 +204,7 @@ pub fn sign_in_json(sign_in: &SignInView) -> Value {
         "id": sign_in.id,
         "companion": sign_in.companion.to_string(),
         "kind": sign_in.kind.as_str(),
+        "account": sign_in.account,
         "status": sign_in.status.code(),
         "expiresAt": sign_in.expires_at,
     })
@@ -229,6 +237,9 @@ pub fn companion_json(view: &CompanionView, command: &str) -> Value {
         "moniker": companion.moniker.as_str(),
         "displayName": companion.display_name.as_str(),
         "revision": view.record.revision,
+        "portrait": view.record.portrait.map(|_| {
+            format!("/api/companions/{}/portrait?v={}", companion.id, view.record.revision)
+        }),
         "attachments": view.attachments,
         "hostConfig": host_config(companion, command),
     })
@@ -248,8 +259,9 @@ pub fn host_config(companion: &Companion, command: &str) -> String {
     serde_json::to_string_pretty(&json!({ "mcpServers": servers })).unwrap_or_default()
 }
 
-/// What the live feed says about one event.
-pub fn event_json(event: &Event, store_id: &str, command: &str) -> Value {
+/// What the live feed says about one event, with the names `state` gives
+/// companions and connections.
+pub fn event_json(event: &Event, state: &State, command: &str) -> Value {
     match event {
         Event::CompanionChanged(view) => {
             json!({ "kind": "companion", "companion": companion_json(view, command) })
@@ -265,10 +277,182 @@ pub fn event_json(event: &Event, store_id: &str, command: &str) -> Value {
             json!({ "kind": "connection", "connection": connection_json(connection) })
         }
         Event::Journaled(entry) => {
-            json!({ "kind": "journal", "entry": journal::encode(store_id, entry) })
+            let mut entry = journal::encode(&state.store_id, entry);
+            told(&mut entry, &Names::of(state));
+            json!({ "kind": "journal", "entry": entry })
         }
         Event::JournalHealth(healthy) => json!({ "kind": "journal_health", "healthy": healthy }),
     }
+}
+
+/// The names the sponsor gave what journal entries name by id.
+#[derive(Debug, Default)]
+pub struct Names {
+    companions: Vec<(String, String)>,
+    connections: Vec<(String, String)>,
+}
+
+impl Names {
+    /// The display name of every companion and the label of every
+    /// connection in `state`.
+    pub fn of(state: &State) -> Self {
+        Self {
+            companions: state
+                .companions
+                .iter()
+                .map(|record| {
+                    (
+                        record.companion.id.to_string(),
+                        record.companion.display_name.as_str().to_owned(),
+                    )
+                })
+                .collect(),
+            connections: state
+                .connections
+                .iter()
+                .map(|connection| {
+                    (
+                        connection.id.to_string(),
+                        connection.label.as_str().to_owned(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn find<'a>(list: &'a [(String, String)], id: &str) -> Option<&'a str> {
+        list.iter()
+            .find(|(known, _)| known == id)
+            .map(|(_, name)| name.as_str())
+    }
+}
+
+/// Adds the entry's sentence to an encoded journal entry.
+pub fn told(entry: &mut Value, names: &Names) {
+    let said = sentence(entry, names);
+    if let Some(object) = entry.as_object_mut() {
+        object.insert("sentence".to_owned(), Value::String(said));
+    }
+}
+
+/// One encoded journal entry as a sentence: who, as which companion, did
+/// what, through which connection, and how it ended.
+pub fn sentence(entry: &Value, names: &Names) -> String {
+    let text = |field: &str| entry[field].as_str().unwrap_or_default();
+    let companion = match entry["companion"].as_str() {
+        None => "a companion".to_owned(),
+        Some(id) => Names::find(&names.companions, id)
+            .map_or_else(|| "a companion since removed".to_owned(), str::to_owned),
+    };
+    let service = capitalized(text("service"));
+    let at = entry["connection"]
+        .as_str()
+        .and_then(|id| Names::find(&names.connections, id))
+        .map_or_else(String::new, |label| format!(" at {label}"));
+    let command = text("command");
+    let mind = entry["initiator"] == "mind";
+    let who = match text("initiator") {
+        "sponsor" => "You".to_owned(),
+        "lobby" => "The lobby".to_owned(),
+        _ if matches!(command, "attach" | "detach") => "A mind".to_owned(),
+        _ => format!("A mind as {companion}"),
+    };
+    // What happened, said once as done and once as attempted.
+    let (done, attempt) = match (text("kind"), command) {
+        ("invoked" | "settled", _) => {
+            let tool = text("tool");
+            (
+                format!("called {tool} on {service}{at}"),
+                format!("call {tool} on {service}{at}"),
+            )
+        }
+        (_, "create_companion") => (
+            format!("created {companion}"),
+            format!("create {companion}"),
+        ),
+        (_, "rename_companion") => (
+            format!("renamed {companion}"),
+            format!("rename {companion}"),
+        ),
+        (_, "remove_companion") => (
+            format!("removed {companion}"),
+            format!("remove {companion}"),
+        ),
+        (_, "set_portrait") => (
+            format!("changed the portrait of {companion}"),
+            format!("change the portrait of {companion}"),
+        ),
+        (_, "attach") if mind => (
+            format!("attached as {companion}"),
+            format!("attach as {companion}"),
+        ),
+        (_, "attach") => (
+            format!("let a mind attach as {companion}"),
+            format!("let a mind attach as {companion}"),
+        ),
+        (_, "detach") if mind => (
+            format!("detached from {companion}"),
+            format!("detach from {companion}"),
+        ),
+        (_, "detach") => (
+            format!("ended an attachment as {companion}"),
+            format!("end an attachment as {companion}"),
+        ),
+        (_, "renew_attach_secret") => (
+            "replaced the attach secret".to_owned(),
+            "replace the attach secret".to_owned(),
+        ),
+        (_, "begin_sign_in") => (
+            format!("started signing {companion} in"),
+            format!("start signing {companion} in"),
+        ),
+        (_, "complete_sign_in") => (
+            format!("signed {companion} in"),
+            format!("sign {companion} in"),
+        ),
+        (_, "cancel_sign_in") => (
+            format!("cancelled a sign-in for {companion}"),
+            format!("cancel a sign-in for {companion}"),
+        ),
+        (_, "revoke_credential") => (
+            format!("revoked the account {companion} held"),
+            format!("revoke the account {companion} held"),
+        ),
+        (_, "grant_connection") => (
+            format!("opened a connection for {companion} to {service}{at}"),
+            format!("open a connection for {companion} to {service}{at}"),
+        ),
+        (_, "revoke_connection") => (
+            format!("revoked the connection of {companion} to {service}{at}"),
+            format!("revoke the connection of {companion} to {service}{at}"),
+        ),
+        (_, "sweep_keyring") => (
+            "cleared away kept files no record names".to_owned(),
+            "clear away kept files no record names".to_owned(),
+        ),
+        _ => (
+            "changed the lobby".to_owned(),
+            "change the lobby".to_owned(),
+        ),
+    };
+    let ended = match text("outcome") {
+        "done" => return format!("{who} {done}."),
+        "accepted" => return format!("{who} {done}; the service finishes it later."),
+        "pending" => return format!("{who} set out to {attempt}."),
+        "refused" => "it was refused",
+        "not_found" => "what it named was not found",
+        "conflict" => "it clashed with a change made first",
+        "invalid_input" => "what was asked for was refused",
+        "needs_sign_in" => "the account needs signing in again",
+        "needs_permission" => "the account lacks the permission",
+        "revoked" => "it had been revoked",
+        "temporarily_unavailable" => "it could not be reached",
+        "rate_limited" => "it was asked to slow down",
+        "outcome_unknown" => "whether it landed is unknown",
+        "unsupported" => "it is not offered",
+        _ => "the lobby failed; its trace log says why",
+    };
+    format!("{who} tried to {attempt}, but {ended}.")
 }
 
 /// How many items the feed keeps for a client that reconnects.
@@ -501,5 +685,67 @@ mod tests {
                 .rendered()
                 .contains("board at front (http://127.0.0.1:5300) and back")
         );
+    }
+
+    fn names() -> (Names, String, String) {
+        let ada = CompanionId::from_u128(1).to_string();
+        let front = lobby_contracts::ConnectionId::from_u128(2).to_string();
+        let names = Names {
+            companions: vec![(ada.clone(), "Ada".to_owned())],
+            connections: vec![(front.clone(), "front".to_owned())],
+        };
+        (names, ada, front)
+    }
+
+    #[test]
+    fn a_journal_entry_reads_as_a_sentence_with_names_never_ids_or_codes() {
+        let (names, ada, front) = names();
+        let gone = CompanionId::from_u128(9).to_string();
+        let mind = lobby_contracts::AttachmentId::from_u128(3).to_string();
+        let cases = [
+            (
+                json!({ "initiator": "sponsor", "companion": ada, "kind": "command", "command": "create_companion", "outcome": "done" }),
+                "You created Ada.",
+            ),
+            (
+                json!({ "initiator": "mind", "attachment": mind, "companion": ada, "kind": "command", "command": "attach", "outcome": "done" }),
+                "A mind attached as Ada.",
+            ),
+            (
+                json!({ "initiator": "mind", "attachment": mind, "companion": ada, "connection": front, "service": "board", "tool": "post", "kind": "settled", "outcome": "outcome_unknown" }),
+                "A mind as Ada tried to call post on Board at front, but whether it landed is unknown.",
+            ),
+            (
+                json!({ "initiator": "mind", "attachment": mind, "companion": ada, "connection": front, "service": "board", "tool": "read", "kind": "settled", "outcome": "done" }),
+                "A mind as Ada called read on Board at front.",
+            ),
+            (
+                json!({ "initiator": "sponsor", "companion": ada, "connection": front, "service": "board", "kind": "command", "command": "revoke_connection", "outcome": "done" }),
+                "You revoked the connection of Ada to Board at front.",
+            ),
+            (
+                json!({ "initiator": "sponsor", "companion": ada, "kind": "command", "command": "begin_sign_in", "outcome": "conflict" }),
+                "You tried to start signing Ada in, but it clashed with a change made first.",
+            ),
+            (
+                json!({ "initiator": "lobby", "companion": gone, "kind": "command", "command": "detach", "outcome": "done" }),
+                "The lobby ended an attachment as a companion since removed.",
+            ),
+            (
+                json!({ "initiator": "sponsor", "kind": "command", "command": "create_companion", "outcome": "pending" }),
+                "You set out to create a companion.",
+            ),
+        ];
+        for (entry, said) in cases {
+            let sentence = sentence(&entry, &names);
+            assert_eq!(sentence, said);
+            for id in [&ada, &front, &gone, &mind] {
+                assert!(!sentence.contains(id.as_str()), "{sentence}");
+            }
+            assert!(!sentence.contains('_'), "no wire name: {sentence}");
+        }
+        let mut entry = json!({ "initiator": "sponsor", "companion": ada, "kind": "command", "command": "remove_companion", "outcome": "done" });
+        told(&mut entry, &names);
+        assert_eq!(entry["sentence"], "You removed Ada.");
     }
 }

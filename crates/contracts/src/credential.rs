@@ -1,8 +1,9 @@
 //! The Credential noun and the credential adapter contract.
 //!
 //! A credential record names its companion, the provider kind that signed it
-//! in, the account the provider authenticated, the permissions the provider
-//! granted, and its state. It never holds
+//! in, the account the provider authenticated with the label the sponsor
+//! knows it by, the permissions the provider granted, and its state. It
+//! never holds
 //! the material itself: material is a blob only the adapter of its provider
 //! kind can decode, which the daemon keeps sealed beside the record and hands
 //! back only through a [`MaterialSlot`].
@@ -89,6 +90,38 @@ impl fmt::Display for AccountKey {
     }
 }
 
+/// What the sponsor knows an account by, as its provider adapter reported
+/// it: a handle or an account name, never the provider's stable key unless
+/// the provider has nothing else. It is 1 to [`Self::MAX_BYTES`] bytes of
+/// text with no control characters and no space at either end.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct AccountLabel(String);
+
+impl AccountLabel {
+    /// The longest account label, in bytes.
+    pub const MAX_BYTES: usize = 256;
+
+    /// Checks `text` against the account label rule.
+    pub fn new(text: &str) -> Option<Self> {
+        let valid = !text.is_empty()
+            && text.len() <= Self::MAX_BYTES
+            && text == text.trim()
+            && !text.chars().any(char::is_control);
+        valid.then(|| Self(text.to_owned()))
+    }
+
+    /// The label as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for AccountLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Whether a credential can still be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CredentialState {
@@ -110,6 +143,8 @@ pub struct Credential {
     pub kind: ProviderKind,
     /// The account the provider authenticated.
     pub account: AccountKey,
+    /// What the sponsor knows that account by.
+    pub label: AccountLabel,
     /// What the provider granted at sign-in, in the provider's own words, as
     /// its adapter reported them. Nothing but a new sign-in widens them: a
     /// service that needs more asks the sponsor to sign in again.
@@ -182,6 +217,9 @@ impl SignInReturn {
 pub struct SignedIn {
     /// The account the provider authenticated, whatever the hint said.
     pub account: AccountKey,
+    /// What the sponsor knows that account by: the provider's handle or
+    /// account name for it.
+    pub label: AccountLabel,
     /// What the provider granted, in its own words; see
     /// [`Credential::permissions`].
     pub permissions: Vec<String>,
@@ -245,6 +283,16 @@ mod tests {
         assert!(AccountKey::new("member:0001/aaaa").is_some());
         for bad in ["", "a b", "a\nb", "á", &"a".repeat(257)] {
             assert!(AccountKey::new(bad).is_none(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn account_labels_are_trimmed_text_without_control_characters() {
+        for good in ["ada.example.test", "Ada Lovelace", "ada"] {
+            assert_eq!(AccountLabel::new(good).expect(good).as_str(), good);
+        }
+        for bad in ["", " ada", "ada ", "a\nb", "a\u{7}b", &"a".repeat(257)] {
+            assert!(AccountLabel::new(bad).is_none(), "{bad:?}");
         }
     }
 

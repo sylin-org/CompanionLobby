@@ -81,6 +81,7 @@ use crate::broker::Broker;
 use crate::calls::{self, Ticket};
 use crate::journal::{Journal, Note, Page, PageProblem};
 use crate::keyring::{self, AttachmentToken};
+use crate::portrait::{self, Portrait};
 use crate::projections::{self, Feed, Reached, Subscription};
 use crate::registry::Registry;
 use crate::store::{CompanionRecord, State, Store};
@@ -131,6 +132,9 @@ pub struct SignInView {
     pub companion: CompanionId,
     /// The provider kind.
     pub kind: ProviderKind,
+    /// The account the sponsor meant, as typed, or empty when the sponsor
+    /// left the choice to the provider's own page.
+    pub account: String,
     /// Where it stands.
     pub status: SignInStatus,
     /// When it expires, in milliseconds since the Unix epoch.
@@ -241,7 +245,8 @@ pub struct Snapshot {
     pub credentials: Vec<Credential>,
     /// Every connection, oldest first.
     pub connections: Vec<Connection>,
-    /// Every sign-in the lobby waits on, oldest first.
+    /// Every sign-in the lobby waits on, oldest first, then the sign-ins it
+    /// remembers ending, oldest first.
     pub sign_ins: Vec<SignInView>,
     /// The store id that names the journal.
     pub store_id: String,
@@ -279,6 +284,7 @@ impl Awaited {
             id: self.id.clone(),
             companion: self.companion,
             kind: self.kind.clone(),
+            account: self.request.hint.trim().to_owned(),
             status,
             expires_at: self.expires_at,
         }
@@ -311,6 +317,7 @@ pub struct Lobby {
 /// The fixed names commands carry in the journal.
 const CREATE_COMPANION: &str = "create_companion";
 const RENAME_COMPANION: &str = "rename_companion";
+const SET_PORTRAIT: &str = "set_portrait";
 const REMOVE_COMPANION: &str = "remove_companion";
 const ATTACH: &str = "attach";
 const DETACH: &str = "detach";
@@ -529,6 +536,7 @@ impl Lobby {
                     sponsor: Sponsor::LOCAL,
                 },
                 revision: 1,
+                portrait: None,
             };
             let id = record.companion.id;
             let mut next = core.store.state().clone();
@@ -585,6 +593,89 @@ impl Lobby {
         })
     }
 
+    /// Gives the companion `id`, which must still be at `expected`
+    /// revision, the portrait `image`, or takes its portrait away when
+    /// `image` is `None`, so it shows its initials. Only a PNG, JPEG, WebP
+    /// or GIF image of at most [`portrait::MAX_BYTES`] is kept.
+    pub fn set_portrait(
+        &self,
+        id: CompanionId,
+        expected: u64,
+        image: Option<&[u8]>,
+    ) -> Result<CompanionView, Refusal> {
+        self.run(|core| {
+            let sponsor = Initiator::Sponsor;
+            let kind = match image {
+                None => Ok(None),
+                Some(bytes) if bytes.len() > portrait::MAX_BYTES => Err(Refusal::new(
+                    Outcome::InvalidInput,
+                    "That image is too large; a portrait is at most 512 KiB.",
+                )),
+                Some(bytes) => Portrait::sniff(bytes).map(Some).ok_or_else(|| {
+                    Refusal::new(
+                        Outcome::InvalidInput,
+                        "That file is not a PNG, JPEG, WebP or GIF image.",
+                    )
+                }),
+            };
+            let (mut record, kind) = core
+                .current(id, expected)
+                .and_then(|record| kind.map(|kind| (record, kind)))
+                .map_err(|refusal| core.refused(sponsor, Some(id), SET_PORTRAIT, refusal))?;
+            let had = record.portrait;
+            record.portrait = kind;
+            record.revision += 1;
+            let subject = Subject::new(sponsor, Some(id), SET_PORTRAIT);
+            core.begin_as(&subject)?;
+            if let Some(bytes) = image
+                && let Err(error) = portrait::write(&self.dir, id, bytes)
+            {
+                trace::line(&format!("a portrait could not be kept: {error}"));
+                core.settle_as(&subject, Outcome::TemporarilyUnavailable);
+                return Err(Refusal::new(
+                    Outcome::TemporarilyUnavailable,
+                    "The lobby could not keep that portrait; try again.",
+                ));
+            }
+            let mut next = core.store.state().clone();
+            for slot in &mut next.companions {
+                if slot.companion.id == id {
+                    *slot = record.clone();
+                }
+            }
+            if let Err(refusal) = core.land_as(&subject, next) {
+                if had.is_none() && image.is_some() {
+                    self.discard_portrait(id);
+                }
+                return Err(refusal);
+            }
+            if image.is_none() {
+                self.discard_portrait(id);
+            }
+            let view = core.view(&record);
+            core.events.push_back(Event::CompanionChanged(view.clone()));
+            Ok(view)
+        })
+    }
+
+    /// The portrait of the companion `id`, when it has one.
+    pub fn portrait(&self, id: CompanionId) -> Option<Vec<u8>> {
+        let held = self
+            .core()
+            .store
+            .state()
+            .companion(id)
+            .is_some_and(|record| record.portrait.is_some());
+        if !held {
+            return None;
+        }
+        portrait::read(&self.dir, id)
+            .inspect_err(|error| {
+                trace::line(&format!("the portrait of {id} could not be read: {error}"));
+            })
+            .ok()
+    }
+
     /// Removes the companion `id`, which must still be at `expected`
     /// revision, with its credentials and connections. While minds are
     /// attached as it the removal is refused unless `cascade` confirms that
@@ -636,6 +727,7 @@ impl Lobby {
             for file in kept {
                 self.discard(&file);
             }
+            self.discard_portrait(id);
             let waiting: Vec<String> = core
                 .awaited
                 .iter()
@@ -948,6 +1040,7 @@ impl Lobby {
             companion: awaited.companion,
             kind: awaited.kind.clone(),
             account: signed.account,
+            label: signed.label,
             permissions: signed.permissions,
             state: CredentialState::Ready,
         };
@@ -1326,15 +1419,25 @@ impl Lobby {
         self.registry.credential_kinds()
     }
 
+    /// The adapters the lobby runs with.
+    pub fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
     /// Every companion with its live attachments, oldest first.
     pub fn companions(&self) -> Vec<CompanionView> {
         let core = self.core();
         core.views()
     }
 
-    /// The lobby as one consistent picture.
+    /// The lobby as one consistent picture. Sign-ins that waited past their
+    /// time end as expired first, so the picture never shows one still
+    /// waiting that cannot come back.
     pub fn snapshot(&self) -> Snapshot {
-        let core = self.core();
+        let limit = self.sign_in_limit;
+        let mut core = self.core();
+        core.prune_awaited(limit);
+        core.settle_events(&self.feed, &self.command);
         let state = core.store.state();
         Snapshot {
             companions: core.views(),
@@ -1346,6 +1449,7 @@ impl Lobby {
                 waiting
                     .into_iter()
                     .map(|awaited| awaited.view(SignInStatus::Pending))
+                    .chain(core.ended.iter().map(|(_, view)| view.clone()))
                     .collect()
             },
             store_id: state.store_id.clone(),
@@ -1358,12 +1462,39 @@ impl Lobby {
         }
     }
 
-    /// A page of the journal; see [`crate::journal::Reader::page`]. The
-    /// lobby is held only while the reader is taken, never while the files
-    /// are read.
-    pub fn journal_page(&self, before: Option<&str>, limit: usize) -> Result<Page, PageProblem> {
-        let reader = self.core().journal.reader();
-        reader.page(before, limit)
+    /// A page of the journal; see [`crate::journal::Reader::page`]. With
+    /// `companion`, only the entries about that companion; with `finished`,
+    /// only the entries that say how something ended, leaving out the
+    /// pending entry written before it. Each entry carries its sentence,
+    /// told with the names the lobby holds when the page is read. The lobby
+    /// is held only while the reader and the names are taken, never while
+    /// the files are read.
+    pub fn journal_page(
+        &self,
+        before: Option<&str>,
+        limit: usize,
+        companion: Option<CompanionId>,
+        finished: bool,
+    ) -> Result<Page, PageProblem> {
+        let (reader, names) = {
+            let core = self.core();
+            (
+                core.journal.reader(),
+                projections::Names::of(core.store.state()),
+            )
+        };
+        let companion = companion.map(|id| id.to_string());
+        let keep = |entry: &Value| {
+            companion
+                .as_ref()
+                .is_none_or(|id| entry["companion"].as_str() == Some(id.as_str()))
+                && !(finished && entry["outcome"] == "pending")
+        };
+        let mut page = reader.page_where(before, limit, &keep)?;
+        for entry in &mut page.entries {
+            projections::told(entry, &names);
+        }
+        Ok(page)
     }
 
     /// Subscribes to the live feed after the position `last`.
@@ -1440,10 +1571,7 @@ impl Lobby {
         if !description.accepts.contains(&credential.kind) {
             return Err(Refusal::new(
                 Outcome::InvalidInput,
-                format!(
-                    "{service} does not accept a {} credential.",
-                    credential.kind
-                ),
+                format!("{service} does not accept that kind of account."),
             ));
         }
         let (credential_adapter, _) = self.credential_adapter(credential.kind.as_str())?;
@@ -1465,6 +1593,15 @@ impl Lobby {
             address,
             label,
         })
+    }
+
+    /// Deletes the portrait of `id`, after the commit that let go of it.
+    fn discard_portrait(&self, id: CompanionId) {
+        if let Err(error) = portrait::remove(&self.dir, id) {
+            trace::line(&format!(
+                "the portrait of {id} could not be deleted: {error}"
+            ));
+        }
     }
 
     /// Deletes a file the keyring kept, after the commit that let go of it.
@@ -1641,9 +1778,7 @@ impl Core {
         if held {
             return Err(Refusal::new(
                 Outcome::Conflict,
-                format!(
-                    "This companion is already signed in with {kind}; revoke that credential first."
-                ),
+                "This companion is already signed in with an account of this kind; revoke it first.",
             ));
         }
         Ok(())
@@ -1884,7 +2019,7 @@ impl Core {
             // The feed handler: every event becomes one item of the live feed.
             feed.publish(&projections::event_json(
                 &event,
-                &self.store.state().store_id,
+                self.store.state(),
                 command,
             ));
             match event {
@@ -2209,7 +2344,16 @@ mod tests {
 
         let cancelled = lobby.cancel_sign_in(&first.id).expect("cancelled");
         assert_eq!(cancelled.status, SignInStatus::Cancelled);
-        assert!(lobby.snapshot().sign_ins.is_empty());
+        assert_eq!(
+            lobby.snapshot().sign_ins,
+            std::slice::from_ref(&cancelled),
+            "the picture remembers how it ended"
+        );
+        assert_eq!(
+            cancelled.account,
+            authority.origin(),
+            "the account the sponsor meant"
+        );
         assert_eq!(
             lobby.cancel_sign_in(&first.id).map(|view| view.status),
             Err(Refusal::new(
@@ -2224,7 +2368,12 @@ mod tests {
 
         // The browser comes back for a cancelled sign-in: nothing signs in.
         let pairs = passbook_return(&lobby, ada, &authority, "holder-ada");
-        let waiting = lobby.snapshot().sign_ins;
+        let waiting: Vec<SignInView> = lobby
+            .snapshot()
+            .sign_ins
+            .into_iter()
+            .filter(|sign_in| sign_in.status == SignInStatus::Pending)
+            .collect();
         assert_eq!(waiting.len(), 1, "a new sign-in may start once none waits");
         lobby.cancel_sign_in(&waiting[0].id).expect("cancelled");
         let refused = lobby
@@ -2263,7 +2412,13 @@ mod tests {
             refused.message
         );
         assert!(lobby.snapshot().credentials.is_empty());
-        assert!(lobby.snapshot().sign_ins.is_empty());
+        let statuses: Vec<SignInStatus> = lobby
+            .snapshot()
+            .sign_ins
+            .iter()
+            .map(|sign_in| sign_in.status)
+            .collect();
+        assert_eq!(statuses, [SignInStatus::Expired]);
         assert_eq!(authority.listener().count("/exchange"), 0);
     }
 

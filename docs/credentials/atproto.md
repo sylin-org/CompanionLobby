@@ -66,14 +66,18 @@ tab.
    account: another account the provider signs in never becomes the
    credential. Only then is `sub` resolved: its document's PDS must be the
    one the typed account named, if one was typed, and that PDS must name the
-   same authorization server.
+   same authorization server. The document's handles are then resolved in
+   turn, and the first that names the DID back is the account's label.
 
 The access token is never parsed: an opaque token signs in as well as a JWT.
 
 ## What the lobby keeps
 
 The credential record holds the companion, the kind `atproto`, the account
-(the DID the token's `sub` named), the permissions (the granted scope's
+(the DID the token's `sub` named), the label the sponsor reads for it (the
+first handle the DID's document claims that resolves back to that DID, or
+the DID itself when none does; the manager page shows the DID only inside
+the account's details), the permissions (the granted scope's
 words, `atproto`), and its state. The material, sealed beside it as
 `<credential id>.material` (DPAPI in the user's scope on Windows, mode 0600
 elsewhere), is one JSON object tagged `atproto-oauth-1`: `subject`, `access`,

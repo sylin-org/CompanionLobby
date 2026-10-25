@@ -42,6 +42,7 @@ pub mod lock;
 pub mod loopback;
 pub mod manager;
 pub mod mcp;
+pub mod portrait;
 pub mod projections;
 pub mod registry;
 pub mod stop;
