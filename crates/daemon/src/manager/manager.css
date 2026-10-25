@@ -163,7 +163,7 @@ input[type="file"]::file-selector-button {
   .preview { padding-top: 0; }
   .journal li { flex-direction: column; gap: 2px; }
   .word { min-width: 0; }
-  .row > button, .row > .button, .row > .confirm-inline { margin-left: auto; }
+  .row > button, .row > .button, .row > .confirm-inline, .row > .actions { margin-left: auto; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }

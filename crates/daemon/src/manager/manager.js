@@ -525,23 +525,25 @@ function card(companion) {
   return item;
 }
 
-// One account on a companion's card, with its one action: Revoke while it
-// is signed in, Sign in again while it waits for that.
+// One account on a companion's card: Revoke while it is signed in; while it
+// waits for a sign-in, Sign in again and Revoke beside it.
 function cardAccount(companion, credential) {
   const line = element("li", "card-account");
   const ready = credential.state === "ready";
   const said = element("span", ready ? "" : "warn", credential.label + " · " + kindTitle(credential.kind) + (ready ? "" : " · Sign in needed"));
-  let action;
+  const revoke = button("Revoke", ready ? "danger" : "quiet");
+  revoke.dataset.key = "card-revoke-" + credential.id;
+  confirmInPlace(revoke, revokeQuestion(companion, credential), "Revoke", () => revokeCredential(companion, credential, "card-" + companion.id));
   if (ready) {
-    action = button("Revoke", "danger");
-    action.dataset.key = "card-revoke-" + credential.id;
-    confirmInPlace(action, revokeQuestion(companion, credential), "Revoke", () => revokeCredential(companion, credential, "card-" + companion.id));
-  } else {
-    action = button("Sign in again");
-    action.dataset.key = "card-again-" + credential.id;
-    action.addEventListener("click", () => signInAgain(companion, credential, action));
+    line.append(said, revoke);
+    return line;
   }
-  line.append(said, action);
+  const back = button("Sign in again");
+  back.dataset.key = "card-again-" + credential.id;
+  back.addEventListener("click", () => signInAgain(companion, credential, back));
+  const actions = element("span", "actions");
+  actions.append(back, revoke);
+  line.append(said, actions);
   return line;
 }
 
@@ -820,20 +822,19 @@ function accountRow(companion, entry, primary, again) {
     return row;
   }
   if (stale && !waiting) {
-    // The one action is signing the same account in again; revoking it
-    // instead waits in its details.
-    const { words, details } = accountWords(stale, entry);
-    const instead = button("Revoke instead", "quiet");
+    // The way back is signing the same account in again; revoking it
+    // instead sits beside it, quieter.
+    const { words } = accountWords(stale, entry);
+    const instead = button("Revoke", "quiet");
     instead.dataset.key = "revoke-" + stale.id;
     confirmInPlace(instead, revokeQuestion(companion, stale), "Revoke", () => revokeCredential(companion, stale));
-    const insteadBox = element("div", "actions");
-    insteadBox.append(instead);
-    details.append(insteadBox);
     const signIn = button("Sign in again", again ? "primary" : "");
     signIn.dataset.key = "again-" + stale.id;
     signIn.dataset.signIn = "";
     signIn.addEventListener("click", () => signInAgain(companion, stale, signIn));
-    row.append(words, element("span", "word warn", "Sign in needed"), signIn);
+    const actions = element("span", "actions");
+    actions.append(signIn, instead);
+    row.append(words, element("span", "word warn", "Sign in needed"), actions);
     return row;
   }
   if (waiting) {
@@ -1064,8 +1065,16 @@ function connectionRow(companion, connection) {
     confirmInPlace(action, "Revoke " + connection.label + "? Its tools go away for " + companion.displayName + " at the mind's next call.", "Revoke", () => revokeConnection(companion, connection));
   } else if (word === "sign_in_needed") {
     const credential = lobby.credentials.get(connection.credential);
-    action = button("Sign in again");
-    action.addEventListener("click", () => focusSignIn(credential ? credential.kind : ""));
+    const again = button("Sign in again");
+    again.dataset.key = "connection-" + connection.id;
+    again.addEventListener("click", () => focusSignIn(credential ? credential.kind : ""));
+    const revoke = button("Revoke", "quiet");
+    revoke.dataset.key = "connection-revoke-" + connection.id;
+    confirmInPlace(revoke, "Revoke " + connection.label + "? It does not come back when the account is signed in again.", "Revoke", () => revokeConnection(companion, connection));
+    const actions = element("span", "actions");
+    actions.append(again, revoke);
+    row.append(words, shownWord, actions);
+    return row;
   } else {
     const service = lobby.services.find(entry => entry.name === connection.service);
     const usable = service && service.accepts.map(kind => readyCredential(companion, kind)).find(Boolean);

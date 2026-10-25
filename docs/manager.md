@@ -11,7 +11,7 @@ pulling the key.
 
 | Route | What the sponsor sees |
 | --- | --- |
-| `/` | With no companion, the first run: a form that names the first companion. Otherwise the companion cards, each with its portrait or initials, how many minds are attached, how many connections are ready or need a sign-in, and each account it holds by its label and kind, with that account's one action: *Revoke*, confirmed in place, or *Sign in again* when it needs it. One primary action, *Add a companion*. |
+| `/` | With no companion, the first run: a form that names the first companion. Otherwise the companion cards, each with its portrait or initials, how many minds are attached, how many connections are ready or need a sign-in, and each account it holds by its label and kind, with *Revoke*, confirmed in place; an account that needs a sign-in also offers *Sign in again*. One primary action, *Add a companion*. |
 | `/companion/<id>/attach` | What just happened and what comes next: the companion's `mcpServers` block, keyed by the companion's moniker and naming it by its immutable id, with *Copy block*. The page says whether a mind is attached yet, and once one is, offers lending the companion an account. |
 | `/companion/<id>` | The companion's page: its name, portrait and attachments, then three sections in this order: Accounts, Connections, Journal. *Host configuration* leads back to the block; *Name and portrait* opens the rename form, the portrait and the removal, each confirmed in place. |
 | `/companion/<id>/sign-in/<sign-in id>` | The handoff between the lobby and the provider's sign-in page. One the lobby does not remember says so, says it cannot tell how it ended, and leads back to the companion, whose accounts show what is signed in. |
@@ -35,9 +35,9 @@ lobby can sign in, by the title the kind's adapter gives it. A row is one of:
   word *Signed in*, and *Revoke*. The provider's stable key for the account
   shows only inside the row's *Details*;
 - needing a sign-in: the account by its label, the words *Sign in needed*,
-  and *Sign in again*, the page's primary action, which starts a sign-in
-  for that same account without anything typed and leads to the handoff;
-  *Revoke instead* waits in the row's *Details*;
+  *Sign in again*, the page's primary action, which starts a sign-in for
+  that same account without anything typed and leads to the handoff, and a
+  quieter *Revoke* beside it;
 - signing in: the account the sponsor meant, the word *Signing in*, and
   *Continue*, which leads to the handoff;
 - otherwise a field for the account, with the hint the kind's adapter gives
@@ -65,7 +65,7 @@ word and one action:
 | Word | When | Action |
 | --- | --- | --- |
 | Ready | The connection and its account are ready. | *Revoke*, confirmed in place. |
-| Sign in needed | The connection stands but its account needs signing in again. | *Sign in again*, which leads to the account's own *Sign in again*. |
+| Sign in needed | The connection stands but its account needs signing in again. | *Sign in again*, which leads to the account's own *Sign in again*, and a quieter *Revoke*, confirmed in place. |
 | Revoked | The sponsor revoked it, or its account. | *Open again* with a ready account the service takes, or *Sign in* when there is none. |
 
 A revoked connection is shown only while nothing ready or newer holds its
