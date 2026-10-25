@@ -20,7 +20,11 @@
 //!    the exchange, asking for a participant credential named
 //!    [`CREDENTIAL_NAME`], living [`LIFETIME_DAYS`] days, with the grants
 //!    [`GRANTS`];
-//! 4. the connection keeps exactly what the Space issued (see [`issued`]).
+//! 4. the participant's own card is read with the new token, within
+//!    [`tools::NAMES_WITHIN`], for the name the Space shows for the
+//!    companion; a card that cannot be read leaves the name out and fails
+//!    nothing;
+//! 5. the connection keeps exactly what the Space issued (see [`issued`]).
 //!
 //! A call presents the token as `Bearer`. A token within
 //! [`RENEW_BEFORE_SECS`] of its expiry is replaced first, by establishing
@@ -39,7 +43,7 @@ pub mod tools;
 pub mod wire;
 
 use lobby_contracts::{
-    Address, AddressPolicy, Authority, AuthorizationAsk, Explained, IssuedSlot, Outcome,
+    Address, AddressPolicy, Authority, AuthorizationAsk, Explained, IssuedSlot, KnownAs, Outcome,
     ProviderKind, SealedIssued, ServiceAdapter, ServiceDescription, ServiceName, ToolArguments,
     ToolDescriptor, ToolName, ToolResult,
 };
@@ -157,10 +161,11 @@ impl Tangent {
         }
         let answer: serde_json::Value = serde_json::from_slice(&response.body)
             .map_err(|_| Explained::new(Outcome::TemporarilyUnavailable, EXCHANGE_BROKE))?;
-        let issued = Issued::from_exchange(&answer).ok_or(Explained::new(
+        let mut issued = Issued::from_exchange(&answer).ok_or(Explained::new(
             Outcome::TemporarilyUnavailable,
             EXCHANGE_BROKE,
         ))?;
+        issued.name = tools::own_name(&self.outbound, address, &issued);
         Ok(issued.encode())
     }
 
@@ -235,6 +240,21 @@ impl ServiceAdapter for Tangent {
 
     fn catalog(&self) -> Vec<ToolDescriptor> {
         tools::TOOLS.iter().map(tools::Tool::descriptor).collect()
+    }
+
+    fn known_as(&self, issued: &SealedIssued) -> Option<KnownAs> {
+        let issued = Issued::decode(issued)?;
+        Some(KnownAs {
+            name: issued.name.clone(),
+            reference: Some(issued.participant.clone()),
+            reference_is: "participant",
+            allows: match (issued.grants("read"), issued.grants("post")) {
+                (true, true) => "read and post",
+                (true, false) => "read, but not post",
+                (false, true) => "post, but not read",
+                (false, false) => "neither read nor post",
+            },
+        })
     }
 
     fn available(&self, issued: &SealedIssued) -> Vec<ToolName> {

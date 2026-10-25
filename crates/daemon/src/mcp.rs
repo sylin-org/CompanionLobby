@@ -26,7 +26,7 @@ use lobby_contracts::{Companion, Label, Outcome, ServiceName, ToolDescriptor, To
 use serde_json::{Map, Value, json};
 
 use crate::domain::CallRefusal;
-use crate::projections::{self, Reached};
+use crate::projections::{self, HeldAccount, Reached};
 
 /// The notification that tells a host its tool list changed.
 pub const LIST_CHANGED: &str = "notifications/tools/list_changed";
@@ -41,6 +41,9 @@ pub trait Toolbox {
     /// sponsor to sign their account in again, by service, the service's
     /// title and label.
     fn waiting(&self) -> Vec<(ServiceName, String, Label)>;
+
+    /// The accounts the attachment's companion holds.
+    fn accounts(&self) -> Vec<HeldAccount>;
 
     /// Calls the service tool `name`.
     fn call(&self, name: &str, arguments: Map<String, Value>) -> Result<ToolResult, CallRefusal>;
@@ -210,7 +213,12 @@ fn tools_call(
         let message = "reach takes no arguments; call it with an empty object.";
         return success(id, refusal_json(Outcome::InvalidInput, message));
     }
-    let answer = projections::reach(companion, &tools.reached(), &tools.waiting());
+    let answer = projections::reach(
+        companion,
+        &tools.reached(),
+        &tools.waiting(),
+        &tools.accounts(),
+    );
     success(id, result_json(&answer, false))
 }
 
@@ -325,6 +333,10 @@ mod tests {
         }
 
         fn waiting(&self) -> Vec<(ServiceName, String, Label)> {
+            Vec::new()
+        }
+
+        fn accounts(&self) -> Vec<HeldAccount> {
             Vec::new()
         }
 

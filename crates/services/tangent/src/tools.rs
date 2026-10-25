@@ -824,8 +824,32 @@ fn scope_argument<'a>(
     ))
 }
 
+/// The name the Space's card shows for the participant `issued` names,
+/// read with its token within [`NAMES_WITHIN`]; none when the card cannot
+/// be read, names someone else, or gives no name the adapter keeps.
+pub fn own_name(outbound: &Outbound, address: &Address, issued: &Issued) -> Option<String> {
+    let through = Through {
+        outbound,
+        address,
+        issued,
+    };
+    let body = through
+        .get_within(
+            &format!("{ROOT}/participants/{}", encode(&issued.participant)),
+            NAMES_WITHIN,
+        )
+        .ok()?;
+    let profile = &body["profile"];
+    if string(profile, "participantRef") != Some(issued.participant.as_str()) {
+        return None;
+    }
+    string(profile, "displayName")
+        .filter(|name| crate::issued::name_shaped(name))
+        .map(str::to_owned)
+}
+
 /// How long the participant cards that name what is new may take in all.
-const NAMES_WITHIN: Duration = Duration::from_secs(3);
+pub const NAMES_WITHIN: Duration = Duration::from_secs(3);
 
 /// The names the Space shows for `actors`, each read once from its
 /// participant card, for at most [`PAGE_MOST`] of them and within
@@ -1032,9 +1056,11 @@ fn arrive(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolR
     }
     let authority = &body["authority"];
     // What the companion may do here through this connection's tools;
-    // managing is not among them, whatever the Space allows.
+    // managing is not among them, whatever the Space allows, and posting
+    // only when the connection was granted it too.
     let mut may = vec!["read"];
-    if authority["canPost"] == true {
+    let posts = authority["canPost"] == true && through.issued.grants(Needs::Post.grant());
+    if posts {
         may.push("post");
     }
     let (name, handle) = (string(identity, "displayName"), string(identity, "handle"));
@@ -1074,7 +1100,11 @@ fn arrive(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolR
     if more_tangents {
         text.say("\nThere are more Tangents; tangent_tangents lists them.");
     }
-    text.say("\n\nRead a Topic with tangent_read_topic, list a Tangent's Topics with tangent_topics, and post with tangent_post.");
+    text.say(if posts {
+        "\n\nRead a Topic with tangent_read_topic, list a Tangent's Topics with tangent_topics, and post with tangent_post."
+    } else {
+        "\n\nRead a Topic with tangent_read_topic and list a Tangent's Topics with tangent_topics; this connection cannot post here."
+    });
     let mut facts = json!({
         "you": with_quoted(
             json!({}),

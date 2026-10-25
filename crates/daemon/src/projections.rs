@@ -26,8 +26,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lobby_contracts::{
-    Address, Companion, Connection, ConnectionState, Credential, CredentialState, Effect, Label,
-    Passage, ServiceName, ToolDescriptor, ToolName, ToolResult,
+    AccountLabel, Address, Companion, Connection, ConnectionState, Credential, CredentialState,
+    Effect, KnownAs, Label, Passage, ProviderKind, ServiceName, ToolDescriptor, ToolName,
+    ToolResult,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::broadcast;
@@ -65,6 +66,11 @@ pub struct ReachedAt {
     pub address: Address,
     /// The tools that what the service issued for it allows.
     pub allows: Vec<ToolName>,
+    /// The label of the account it was established with.
+    pub account: Option<AccountLabel>,
+    /// How the service knows the companion through it, and what its grants
+    /// allow there, as its adapter reads what the service issued.
+    pub known: Option<KnownAs>,
 }
 
 impl ReachedAt {
@@ -75,19 +81,21 @@ impl ReachedAt {
             .iter()
             .filter(|tool| self.allows.contains(&tool.name))
     }
+}
 
-    /// What the companion can do through this connection: `read`, `write`,
-    /// both, or neither.
-    fn can(&self, place: &Reached) -> Vec<&'static str> {
-        let mut can = Vec::new();
-        if self.tools(place).any(ToolDescriptor::read_only_hint) {
-            can.push("read");
-        }
-        if self.tools(place).any(|tool| !tool.read_only_hint()) {
-            can.push("write");
-        }
-        can
-    }
+/// An account a companion holds, as `reach` names it: by the label the
+/// sponsor knows it by and its kind's title, and whether it waits for the
+/// sponsor to sign it in again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldAccount {
+    /// What the sponsor knows the account by.
+    pub label: AccountLabel,
+    /// Its provider kind.
+    pub kind: ProviderKind,
+    /// The title the sponsor reads for that kind.
+    pub title: String,
+    /// Whether it waits for the sponsor to sign it in again.
+    pub waits: bool,
 }
 
 /// The descriptor of `reach`.
@@ -190,94 +198,127 @@ pub fn unknown_argument(
     ))
 }
 
-/// The answer to `reach` for `companion`, which reaches `reached` and whose
-/// connections `waiting` wait for the sponsor to sign their account in
-/// again: who the companion is, then for each service where it is, by the
-/// sponsor's names, whether it can read or write through each connection
-/// and the tool to start with, in a few sentences. The structured answer
-/// holds the same facts: each connection with its service's title, what it
-/// can do there and its tool to start with, each waiting connection with
-/// its service's title, and the whole tool list, which the catalog has too.
+/// The answer to `reach` for `companion`, which holds `accounts`, reaches
+/// `reached` and whose connections `waiting` wait for the sponsor to sign
+/// their account in again: who the companion is and which accounts it
+/// holds, then for each connection where it is, by the sponsor's names,
+/// with which account, how the service knows it there, what the
+/// connection's grants allow in the service's words, and the tool to start
+/// with, in a few sentences. What a service or a provider wrote, the name
+/// and reference it gave the companion and an account's label, is quoted.
+/// The structured answer holds the same facts, with the whole tool list,
+/// which the catalog has too.
 pub fn reach(
     companion: &Companion,
     reached: &[Reached],
     waiting: &[(ServiceName, String, Label)],
+    accounts: &[HeldAccount],
 ) -> ToolResult {
     let tools: Vec<String> = catalog(reached).into_iter().map(|(name, _)| name).collect();
-    let display = &companion.display_name;
-    let mut sentences = vec![format!(
-        "You are {}, attached through Companion Lobby.",
-        named(companion)
-    )];
+    let display = companion.display_name.as_str();
+    let mut text: Vec<Passage> = Vec::new();
+    let say = |text: &mut Vec<Passage>, said: &str| text.push(Passage::Authored(said.to_owned()));
+    say(
+        &mut text,
+        &format!(
+            "You are {}, attached through Companion Lobby.",
+            named(companion)
+        ),
+    );
+    if !accounts.is_empty() {
+        say(&mut text, &format!(" {display} holds "));
+        for (index, account) in accounts.iter().enumerate() {
+            if index > 0 {
+                say(
+                    &mut text,
+                    if index + 1 == accounts.len() {
+                        " and "
+                    } else {
+                        ", "
+                    },
+                );
+            }
+            say(&mut text, &format!("the {} account ", account.title));
+            text.push(Passage::Quoted(account.label.as_str().to_owned()));
+            if account.waits {
+                say(
+                    &mut text,
+                    ", which waits for the sponsor to sign it in again",
+                );
+            }
+        }
+        say(&mut text, ".");
+    }
     if reached.is_empty() && waiting.is_empty() {
-        sentences.push(format!(
-            "{display} reaches nothing yet: the sponsor has not connected a service for this companion."
-        ));
+        say(
+            &mut text,
+            &format!(
+                " {display} reaches nothing yet: the sponsor has not connected a service for this companion."
+            ),
+        );
     }
     for place in reached {
-        let cans: Vec<Vec<&str>> = place
-            .connections
-            .iter()
-            .map(|connection| connection.can(place))
-            .collect();
-        let alike = cans.windows(2).all(|pair| pair[0] == pair[1]);
-        let places: Vec<String> = place
-            .connections
-            .iter()
-            .zip(&cans)
-            .map(|(connection, can)| {
-                let at = format!("{} ({})", connection.label, connection.address);
-                match can.as_slice() {
-                    _ if alike => at,
-                    [] => format!("{at}, where nothing is open to it now"),
-                    can => format!("{at}, where it can {}", can.join(" and ")),
-                }
-            })
-            .collect();
         let title = &place.title;
-        // Each place that says what it can do ends in a clause, so the
-        // last one is set apart with a comma.
-        let places = match places.as_slice() {
-            [init @ .., last] if !alike && !init.is_empty() => {
-                format!("{}, and {last}", init.join(", "))
+        for connection in &place.connections {
+            say(
+                &mut text,
+                &format!(
+                    " {display} reaches {title} at {} ({})",
+                    connection.label, connection.address
+                ),
+            );
+            if let Some(account) = &connection.account {
+                say(&mut text, " with the account ");
+                text.push(Passage::Quoted(account.as_str().to_owned()));
             }
-            _ => listed(&places),
-        };
-        // The tool to start with is one the first connection allows, as
-        // the structured answer names it.
-        let first = place
-            .connections
-            .first()
-            .and_then(|connection| connection.tools(place).next())
-            .map(|first| first.name.projected(&place.service));
-        let can = cans
-            .first()
-            .map(|can| can.join(" and "))
-            .unwrap_or_default();
-        sentences.push(match first {
-            Some(first) if alike && !can.is_empty() => format!(
-                "{display} reaches {title} at {places}, where it can {can}: start with {first}."
-            ),
-            _ if alike => {
-                format!("{display} reaches {title} at {places}, where nothing is open to it now.")
+            if let Some(known) = &connection.known {
+                let (name, reference) = (known.name.as_deref(), known.reference.as_deref());
+                if name.is_some() || reference.is_some() {
+                    say(&mut text, &format!("; {title} knows it there as "));
+                }
+                if let Some(name) = name {
+                    text.push(Passage::Quoted(name.to_owned()));
+                }
+                if let Some(reference) = reference {
+                    let opening = if name.is_some() { " (" } else { "" };
+                    say(&mut text, &format!("{opening}{} ", known.reference_is));
+                    text.push(Passage::Quoted(reference.to_owned()));
+                    if name.is_some() {
+                        say(&mut text, ")");
+                    }
+                }
+                if name.is_some() || reference.is_some() {
+                    say(&mut text, &format!(" and lets it {}", known.allows));
+                } else {
+                    say(&mut text, &format!("; {title} lets it {}", known.allows));
+                }
             }
-            Some(first) => format!("{display} reaches {title} at {places}: start with {first}."),
-            None => format!("{display} reaches {title} at {places}."),
-        });
+            match connection.tools(place).next() {
+                Some(first) => say(
+                    &mut text,
+                    &format!(": start with {}.", first.name.projected(&place.service)),
+                ),
+                None => say(&mut text, ", where nothing is open to it now."),
+            }
+        }
         if place.connections.len() > 1 {
-            sentences.push(format!(
-                "Every {title} tool takes {AT}, the name of the one it acts at."
-            ));
+            say(
+                &mut text,
+                &format!(" Every {title} tool takes {AT}, the name of the one it acts at."),
+            );
         }
     }
     for (_, title, label) in waiting {
-        sentences.push(format!(
-            "{display} cannot reach {title} at {label} until the sponsor signs its account in again; its tools come back then."
-        ));
+        say(
+            &mut text,
+            &format!(
+                " {display} cannot reach {title} at {label} until the sponsor signs its account in again; its tools come back then."
+            ),
+        );
     }
     // A host may show a mind the structured answer and not the text, so it
-    // names each service by its title, what each connection can do there
-    // and the tool to start with too.
+    // gives every fact the text does, what a service or provider wrote
+    // quoted as in the text.
     let connections: Vec<Value> = reached
         .iter()
         .flat_map(|place| {
@@ -287,7 +328,12 @@ pub fn reach(
                     "title": place.title,
                     "at": connection.label.as_str(),
                     "address": connection.address.as_str(),
-                    "can": connection.can(place),
+                    "account": connection.account.as_ref().map(AccountLabel::as_str),
+                    "knownAs": connection.known.as_ref().map(|known| json!({
+                        "referenceIs": known.reference_is,
+                        "quoted": { "name": known.name, "reference": known.reference },
+                    })),
+                    "allows": connection.known.as_ref().map(|known| known.allows),
                     "startWith": connection
                         .tools(place)
                         .next()
@@ -297,13 +343,22 @@ pub fn reach(
         })
         .collect();
     ToolResult {
-        text: vec![Passage::Authored(sentences.join(" "))],
+        text,
         structured: Some(json!({
             "companion": {
                 "id": companion.id.to_string(),
                 "moniker": companion.moniker.as_str(),
                 "displayName": companion.display_name.as_str(),
             },
+            "accounts": accounts
+                .iter()
+                .map(|account| json!({
+                    "label": account.label.as_str(),
+                    "kind": account.kind.as_str(),
+                    "title": account.title,
+                    "waitsForSignIn": account.waits,
+                }))
+                .collect::<Vec<_>>(),
             "connections": connections,
             "waiting": waiting
                 .iter()
@@ -888,7 +943,7 @@ mod tests {
         plain.display_name = DisplayName::new("ada").expect("name");
         assert_eq!(named(&plain), "ada");
         assert!(
-            reach(&plain, &[], &[])
+            reach(&plain, &[], &[], &[])
                 .rendered()
                 .starts_with("You are ada, attached through Companion Lobby.")
         );
@@ -946,8 +1001,24 @@ mod tests {
                     )
                     .expect("address"),
                     allows: vec![ToolName::new("read").expect("tool")],
+                    account: Some(AccountLabel::new("ada").expect("label")),
+                    known: Some(KnownAs {
+                        name: Some("ada".to_owned()),
+                        reference: Some((port + 1).to_string()),
+                        reference_is: "member number",
+                        allows: "read the board, but not post on it",
+                    }),
                 })
                 .collect(),
+        }
+    }
+
+    fn passbook() -> HeldAccount {
+        HeldAccount {
+            label: AccountLabel::new("ada").expect("label"),
+            kind: ProviderKind::new("passbook").expect("kind"),
+            title: "Passbook".to_owned(),
+            waits: false,
         }
     }
 
@@ -961,7 +1032,7 @@ mod tests {
 
     #[test]
     fn reach_reports_the_companion_and_the_live_tool_set() {
-        let answer = reach(&ada(), &[], &[]);
+        let answer = reach(&ada(), &[], &[], &[]);
         let text = answer.rendered();
         assert!(text.contains("Ada") && text.contains("reach"));
         let structured = answer.structured.expect("structured");
@@ -990,7 +1061,7 @@ mod tests {
         let schema = &two[1].1.input_schema;
         assert_eq!(schema["properties"]["at"]["enum"], json!(["front", "back"]));
         assert_eq!(schema["required"], json!(["at"]));
-        let answer = reach(&ada(), &[board(&["front", "back"])], &[]);
+        let answer = reach(&ada(), &[board(&["front", "back"])], &[], &[passbook()]);
         let waiting = reach(
             &ada(),
             &[],
@@ -999,6 +1070,7 @@ mod tests {
                 "Board".to_owned(),
                 Label::new("front").expect("label"),
             )],
+            &[],
         );
         assert!(
             waiting.rendered().contains(
@@ -1019,11 +1091,14 @@ mod tests {
             "the structured answer names where to start, as the text does"
         );
         assert_eq!(structured["connections"][1]["title"], "Board");
-        assert_eq!(structured["connections"][1]["can"], json!(["read"]));
+        assert_eq!(
+            structured["connections"][1]["allows"],
+            "read the board, but not post on it"
+        );
         let said = answer.rendered();
         assert!(
             said.contains(
-                "Ada reaches Board at front (http://127.0.0.1:5300) and back (http://127.0.0.1:5301), where it can read: start with board_read."
+                "Ada reaches Board at front (http://127.0.0.1:5300) with the account \"ada\"; Board knows it there as \"ada\" (member number \"1\") and lets it read the board, but not post on it: start with board_read. Ada reaches Board at back (http://127.0.0.1:5301)"
             ),
             "{said}"
         );
@@ -1046,7 +1121,7 @@ mod tests {
     }
 
     #[test]
-    fn reach_says_what_the_companion_can_do_and_the_tool_to_start_with() {
+    fn reach_names_the_accounts_how_the_service_knows_the_companion_and_what_it_allows() {
         let mut place = board(&["front"]);
         let write = ToolDescriptor {
             name: ToolName::new("post").expect("tool"),
@@ -1057,32 +1132,53 @@ mod tests {
                 retry: lobby_contracts::Retry::Safe,
             },
         };
-        let mut second = place.tools[0].clone();
-        second.name = ToolName::new("list").expect("tool");
-        place.tools.extend([second, write]);
+        place.tools.push(write);
         place.connections[0].allows = place.tools.iter().map(|tool| tool.name.clone()).collect();
-        let said = reach(&ada(), std::slice::from_ref(&place), &[]).rendered();
-        assert_eq!(
-            said,
-            "You are Ada (moniker ada), attached through Companion Lobby. Ada reaches Board at front (http://127.0.0.1:5300), where it can read and write: start with board_read."
+        place.connections[0].known = Some(KnownAs {
+            name: Some("Ada \"the bold\"".to_owned()),
+            reference: Some("7".to_owned()),
+            reference_is: "member number",
+            allows: "read the board and post on it",
+        });
+        let mut waiting = passbook();
+        waiting.label = AccountLabel::new("ada.example.test").expect("label");
+        waiting.title = "Atmosphere".to_owned();
+        waiting.waits = true;
+        let answer = reach(
+            &ada(),
+            std::slice::from_ref(&place),
+            &[],
+            &[passbook(), waiting],
         );
-
-        // Two connections whose services issued them different leave each
-        // say what they can do, in the text and in the structured answer.
-        let mut two = board(&["front", "back"]);
-        two.tools = place.tools.clone();
-        two.connections[0].allows = place.connections[0].allows.clone();
-        let answer = reach(&ada(), &[two], &[]);
         assert_eq!(
             answer.rendered(),
-            "You are Ada (moniker ada), attached through Companion Lobby. Ada reaches Board at front (http://127.0.0.1:5300), where it can read and write, and back (http://127.0.0.1:5301), where it can read: start with board_read. Every Board tool takes at, the name of the one it acts at."
+            "You are Ada (moniker ada), attached through Companion Lobby. Ada holds the Passbook account \"ada\" and the Atmosphere account \"ada.example.test\", which waits for the sponsor to sign it in again. Ada reaches Board at front (http://127.0.0.1:5300) with the account \"ada\"; Board knows it there as \"Ada \\\"the bold\\\"\" (member number \"7\") and lets it read the board and post on it: start with board_read."
         );
         let structured = answer.structured.expect("structured");
         assert_eq!(
-            structured["connections"][0]["can"],
-            json!(["read", "write"])
+            structured["accounts"],
+            json!([
+                { "label": "ada", "kind": "passbook", "title": "Passbook", "waitsForSignIn": false },
+                { "label": "ada.example.test", "kind": "passbook", "title": "Atmosphere", "waitsForSignIn": true },
+            ])
         );
-        assert_eq!(structured["connections"][1]["can"], json!(["read"]));
+        let connection = &structured["connections"][0];
+        assert_eq!(connection["account"], "ada");
+        assert_eq!(
+            connection["knownAs"],
+            json!({ "referenceIs": "member number", "quoted": { "name": "Ada \"the bold\"", "reference": "7" } })
+        );
+        assert_eq!(connection["allows"], "read the board and post on it");
+        assert!(connection.get("can").is_none());
+
+        // A connection whose adapter could not read what was issued says
+        // only where it is and where to start.
+        place.connections[0].known = None;
+        place.connections[0].account = None;
+        assert_eq!(
+            reach(&ada(), std::slice::from_ref(&place), &[], &[]).rendered(),
+            "You are Ada (moniker ada), attached through Companion Lobby. Ada reaches Board at front (http://127.0.0.1:5300): start with board_read."
+        );
         assert_eq!(
             listed(&["a".to_owned(), "b".to_owned(), "c".to_owned()]),
             "a, b and c"

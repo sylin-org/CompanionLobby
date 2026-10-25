@@ -92,12 +92,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use lobby_contracts::{
-    Address, Attachment, AttachmentId, Authority, Companion, CompanionId, Connection, ConnectionId,
-    ConnectionState, Credential, CredentialAdapter, CredentialId, CredentialState, DisplayName,
-    Explained, Freshness, Initiator, IssuedSlot, JournalEntry, JournalKind, JournalNames, Label,
-    MaterialSlot, MaterialUpdate, Moniker, NameProblem, Outcome, ProviderKind, Revocation,
-    SealedIssued, SealedMaterial, ServiceAdapter, ServiceName, SignInRequest, SignInReturn,
-    SignInStart, SignedIn, Sponsor, ToolArguments, ToolName, ToolResult,
+    AccountLabel, Address, Attachment, AttachmentId, Authority, Companion, CompanionId, Connection,
+    ConnectionId, ConnectionState, Credential, CredentialAdapter, CredentialId, CredentialState,
+    DisplayName, Explained, Freshness, Initiator, IssuedSlot, JournalEntry, JournalKind,
+    JournalNames, Label, MaterialSlot, MaterialUpdate, Moniker, NameProblem, Outcome, ProviderKind,
+    Revocation, SealedIssued, SealedMaterial, ServiceAdapter, ServiceName, SignInRequest,
+    SignInReturn, SignInStart, SignedIn, Sponsor, ToolArguments, ToolName, ToolResult,
 };
 use serde_json::{Map, Value};
 use tokio::sync::watch;
@@ -1993,11 +1993,33 @@ impl Lobby {
             .collect()
     }
 
+    /// The accounts `companion` holds, oldest first, by label and kind,
+    /// and whether each waits for the sponsor to sign it in again.
+    pub fn accounts(&self, companion: CompanionId) -> Vec<(AccountLabel, ProviderKind, bool)> {
+        self.core()
+            .store
+            .state()
+            .credentials
+            .iter()
+            .filter(|credential| {
+                credential.companion == companion && credential.state != CredentialState::Revoked
+            })
+            .map(|credential| {
+                (
+                    credential.label.clone(),
+                    credential.kind.clone(),
+                    credential.state == CredentialState::NeedsSignIn,
+                )
+            })
+            .collect()
+    }
+
     /// What `companion` reaches right now: each installed service it holds a
     /// ready connection to, its tools, and the labels and addresses of those
-    /// connections.
+    /// connections, with the account each was established with and how
+    /// the service knows the companion through it.
     pub fn reached(&self, companion: CompanionId) -> Vec<Reached> {
-        type Reaching = (Label, Address, ConnectionId);
+        type Reaching = (Label, Address, ConnectionId, Option<AccountLabel>);
         let mut by_service: Vec<(ServiceName, Vec<Reaching>)> = Vec::new();
         {
             let core = self.core();
@@ -2009,6 +2031,10 @@ impl Lobby {
                     connection.label.clone(),
                     connection.address.clone(),
                     connection.id,
+                    core.store
+                        .state()
+                        .credential(connection.credential)
+                        .map(|credential| credential.label.clone()),
                 );
                 match by_service
                     .iter_mut()
@@ -2020,8 +2046,9 @@ impl Lobby {
             }
         }
         // Catalogs are the adapters' fixed declarations, and what each
-        // connection's issued data allows is read from the keyring, both
-        // with nothing held. A service's tools are those any of its ready
+        // connection's issued data allows, and how the service knows the
+        // companion through it, is read from the keyring, both with
+        // nothing held. A service's tools are those any of its ready
         // connections allows, in catalog order; each connection says which
         // of them it allows.
         by_service
@@ -2030,12 +2057,18 @@ impl Lobby {
                 let adapter = self.registry.service(&service)?;
                 let connections: Vec<ReachedAt> = connections
                     .into_iter()
-                    .map(|(label, address, id)| ReachedAt {
-                        label,
-                        address,
-                        allows: keyring::read_issued(&self.dir, id)
-                            .map(|issued| adapter.available(&issued))
-                            .unwrap_or_default(),
+                    .map(|(label, address, id, account)| {
+                        let issued = keyring::read_issued(&self.dir, id).ok();
+                        ReachedAt {
+                            label,
+                            address,
+                            allows: issued
+                                .as_ref()
+                                .map(|issued| adapter.available(issued))
+                                .unwrap_or_default(),
+                            account,
+                            known: issued.as_ref().and_then(|issued| adapter.known_as(issued)),
+                        }
                     })
                     .collect();
                 let tools = adapter

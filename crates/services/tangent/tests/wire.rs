@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 fn issued() -> Issued {
     Issued {
         participant: "prt_1".to_owned(),
+        name: Some("Ada".to_owned()),
         credential: "cred-1".to_owned(),
         token: Secret::new("ts_secret"),
         expires_at: i64::MAX,

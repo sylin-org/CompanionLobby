@@ -49,7 +49,7 @@ pub use journal::{Initiator, JournalEntry, JournalKind, JournalNames};
 pub use material::{IssuedSlot, MaterialSlot, MaterialUpdate, SealedIssued, SealedMaterial};
 pub use mind::{Attachment, AttachmentId};
 pub use outcome::{Explained, Outcome, Retry};
-pub use service::{Authority, ServiceAdapter, ServiceDescription, ServiceName};
+pub use service::{Authority, KnownAs, ServiceAdapter, ServiceDescription, ServiceName};
 pub use sponsor::Sponsor;
 pub use tool::{Effect, Passage, ToolArguments, ToolDescriptor, ToolName, ToolResult};
 

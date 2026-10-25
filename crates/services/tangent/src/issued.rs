@@ -3,7 +3,9 @@
 //! The identity exchange answers a participant credential and its token.
 //! The connection keeps exactly what the Space issued and nothing the
 //! account minted: the participant the Space made of the account, the
-//! credential's id, its token, when it expires and the grants it holds.
+//! name its card shows for that participant when the card could be read
+//! as the connection was established, the credential's id, its token, when
+//! it expires and the grants it holds.
 //! The token is presented as `Bearer` on every call and never printed.
 
 use lobby_contracts::{SealedIssued, Secret};
@@ -15,11 +17,16 @@ pub const FORMAT: &str = "tangent-1";
 pub const TOKEN_LIMIT: usize = 4096;
 /// The longest participant or credential id kept.
 pub const ID_LIMIT: usize = 512;
+/// The most characters of the participant's name kept.
+pub const NAME_LIMIT: usize = 200;
 
 /// What a Space issued for one connection.
 pub struct Issued {
     /// The participant the Space made of the account.
     pub participant: String,
+    /// The name the Space's card shows for that participant, as it read
+    /// when the connection was established, if it could be read.
+    pub name: Option<String>,
     /// The participant credential's id.
     pub credential: String,
     /// The token presented on every call.
@@ -34,6 +41,7 @@ impl std::fmt::Debug for Issued {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Issued")
             .field("participant", &self.participant)
+            .field("name", &self.name)
             .field("expires_at", &self.expires_at)
             .field("grants", &self.grants)
             .finish_non_exhaustive()
@@ -42,6 +50,14 @@ impl std::fmt::Debug for Issued {
 
 fn id_shaped(text: &str) -> bool {
     !text.is_empty() && text.len() <= ID_LIMIT && text.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// Whether `text` is a name kept: not blank, at most [`NAME_LIMIT`]
+/// characters, with no control characters.
+pub fn name_shaped(text: &str) -> bool {
+    !text.trim().is_empty()
+        && text.chars().count() <= NAME_LIMIT
+        && !text.chars().any(char::is_control)
 }
 
 impl Issued {
@@ -56,6 +72,7 @@ impl Issued {
             json!({
                 "format": FORMAT,
                 "participant": self.participant,
+                "name": self.name,
                 "credential": self.credential,
                 "token": self.token.expose(),
                 "expiresAt": self.expires_at,
@@ -69,9 +86,14 @@ impl Issued {
     /// What this adapter kept, with every field in its own shape.
     pub fn decode(sealed: &SealedIssued) -> Option<Self> {
         let body: Value = serde_json::from_slice(sealed.as_bytes()).ok()?;
-        if body["format"] != FORMAT || body.as_object()?.len() != 6 {
+        if body["format"] != FORMAT || body.as_object()?.len() != 7 {
             return None;
         }
+        let name = match &body["name"] {
+            Value::Null => None,
+            Value::String(name) if name_shaped(name) => Some(name.clone()),
+            _ => return None,
+        };
         let text = |field: &str| body[field].as_str().filter(|text| id_shaped(text));
         let token = body["token"]
             .as_str()
@@ -88,6 +110,7 @@ impl Issued {
             .collect::<Option<Vec<_>>>()?;
         Some(Self {
             participant: text("participant")?.to_owned(),
+            name,
             credential: text("credential")?.to_owned(),
             token: Secret::new(token),
             expires_at: body["expiresAt"].as_i64()?,
@@ -97,7 +120,8 @@ impl Issued {
 
     /// What the exchange answered, when it keeps the profile: a
     /// `tangent_participant` credential naming a participant, an id, an
-    /// expiry and grants, with a token.
+    /// expiry and grants, with a token. The participant's name is not in
+    /// it; the adapter reads it from the participant's card.
     pub fn from_exchange(answer: &Value) -> Option<Self> {
         if answer["profile"] != "tangent_participant" {
             return None;
@@ -124,6 +148,7 @@ impl Issued {
             .collect::<Option<Vec<_>>>()?;
         Some(Self {
             participant: text(&credential["participantId"])?,
+            name: None,
             credential: text(&credential["id"])?,
             token: Secret::new(token),
             expires_at: credential["expiresAt"].as_str().and_then(parse_rfc3339)?,
@@ -250,6 +275,11 @@ mod tests {
         assert!(!format!("{issued:?}").contains("ts_0123456789"));
         let again = Issued::decode(&issued.encode()).expect("decodes");
         assert_eq!(again.participant, "prt_1");
+        assert_eq!(again.name, None);
+        let mut named = Issued::decode(&issued.encode()).expect("decodes");
+        named.name = Some("Ada".to_owned());
+        let named = Issued::decode(&named.encode()).expect("decodes");
+        assert_eq!(named.name.as_deref(), Some("Ada"));
         assert_eq!(again.token.expose(), "ts_0123456789");
         assert_eq!(again.expires_at, 1_790_000_000 + 7 * 86_400);
         let mut broken = answer.clone();

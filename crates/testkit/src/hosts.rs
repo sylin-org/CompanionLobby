@@ -96,9 +96,10 @@ pub fn claude_code() -> Recording {
 /// you can go, read what is new, and reply to the newest conversation in
 /// one friendly sentence.
 ///
-/// The mind calls `reach`, asks the Space what is new and learns who wrote
-/// each Post by name, reads the Topic of the newest Post and replies to
-/// Bea's Post there with a request id of its own choosing, with no refused
+/// The mind calls `reach`, which names its account and how the Space knows
+/// it, asks the Space what is new and learns who wrote each Post by name,
+/// reads the Topic of the newest Post, replies to Bea's Post there with a
+/// request id of its own choosing and marks the Topic read, with no refused
 /// call and every reference copied from an earlier answer. Its host showed it each result's structured
 /// content, which held the answer's text as `message`. The Space's origin
 /// in the frames is the one that walk ran against; a replay puts its own
@@ -156,7 +157,8 @@ mod tests {
                 "reach",
                 "tangent_updates",
                 "tangent_read_topic",
-                "tangent_post"
+                "tangent_post",
+                "tangent_mark_read"
             ]
         );
         for frame in recording
@@ -200,6 +202,17 @@ mod tests {
                 Direction::Host => {}
             }
         }
+        let reach = recording
+            .sent()
+            .find(|frame| frame["params"]["name"] == "reach")
+            .and_then(|frame| recording.answer_to(&frame["id"]))
+            .expect("reach");
+        let connection = &reach["result"]["structuredContent"]["connections"][0];
+        assert_eq!(
+            connection["knownAs"]["quoted"]["name"], "Ada",
+            "reach told the mind the name the Space knows it by"
+        );
+        assert_eq!(connection["allows"], "read and post");
         let updates = recording
             .sent()
             .find(|frame| frame["params"]["name"] == "tangent_updates")

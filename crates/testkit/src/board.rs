@@ -3,15 +3,16 @@
 //! A board is a list of posts. It admits a member who presents a stamp from
 //! a passbook authority and gives back a badge, saying what the badge lets
 //! its holder do: read the newest posts, and post one unless the board
-//! admits members to read only. Each board names on its about page the
+//! admits members to read only, and naming the member by their holder's
+//! name and a member number. Each board names on its about page the
 //! audience a stamp it takes must be for.
 //!
 //! The adapter speaks the board in the board's own words: it declares that
 //! a passbook account must be granted stamps for [`ADMIT_METHOD`], which the
 //! lobby asks for whenever it signs one in, establishes a connection by
 //! asking the lobby's authority for the stamp the board wants and trading
-//! it for a badge, which with what the badge allows is all the connection
-//! keeps, and it offers two tools, `read` and `post`, of which a connection
+//! it for a badge, which with what the badge allows and the member it names
+//! is all the connection keeps, and it offers two tools, `read` and `post`, of which a connection
 //! whose badge only reads has `read` alone. Posts are written by other members,
 //! so their text and authors reach a mind only as quoted passages. A board
 //! that stops taking a badge is asked to admit the member again, once, with
@@ -23,9 +24,9 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lobby_contracts::{
-    Address, AddressPolicy, Authority, AuthorizationAsk, Effect, Explained, IssuedSlot, Outcome,
-    Passage, ProviderKind, Retry, SealedIssued, ServiceAdapter, ServiceDescription, ServiceName,
-    ToolArguments, ToolDescriptor, ToolName, ToolResult,
+    Address, AddressPolicy, Authority, AuthorizationAsk, Effect, Explained, IssuedSlot, KnownAs,
+    Outcome, Passage, ProviderKind, Retry, SealedIssued, ServiceAdapter, ServiceDescription,
+    ServiceName, ToolArguments, ToolDescriptor, ToolName, ToolResult,
 };
 use lobby_outbound::{Failure, Outbound, Request};
 use serde_json::{Value, json};
@@ -209,7 +210,12 @@ fn answer(floor: &Mutex<Floor>, stamps: &crate::passbook::Verifier, request: &Re
                     } else {
                         vec!["read"]
                     };
-                    Reply::json(200, &json!({ "badge": badge, "may": may }))
+                    let number = floor.badges.len();
+                    let member = floor.badges[number - 1].holder.clone();
+                    Reply::json(
+                        200,
+                        &json!({ "badge": badge, "may": may, "member": member, "number": number }),
+                    )
                 }
                 None => Reply::json(401, &json!({ "error": "not admitted" })),
             }
@@ -260,19 +266,27 @@ impl Default for Board {
     }
 }
 
-/// What a board issued for one connection: the badge, and whether it lets
-/// the member post.
+/// What a board issued for one connection: the badge, whether it lets the
+/// member post, and the member it names, by name and number.
 struct Issued {
     badge: String,
     posts: bool,
+    member: String,
+    number: u64,
 }
 
 impl Issued {
     fn encode(&self) -> SealedIssued {
         SealedIssued::new(
-            json!({ "format": ISSUED_FORMAT, "badge": self.badge, "posts": self.posts })
-                .to_string()
-                .into_bytes(),
+            json!({
+                "format": ISSUED_FORMAT,
+                "badge": self.badge,
+                "posts": self.posts,
+                "member": self.member,
+                "number": self.number,
+            })
+            .to_string()
+            .into_bytes(),
         )
     }
 
@@ -285,6 +299,8 @@ impl Issued {
         Some(Self {
             badge: badge.to_owned(),
             posts: body["posts"].as_bool()?,
+            member: body["member"].as_str()?.to_owned(),
+            number: body["number"].as_u64()?,
         })
     }
 }
@@ -507,7 +523,21 @@ impl ServiceAdapter for Board {
             .as_array()
             .ok_or(Outcome::TemporarilyUnavailable)?;
         let posts = may.iter().any(|may| may == "post");
-        Ok(Issued { badge, posts }.encode())
+        let member = body["member"]
+            .as_str()
+            .filter(|member| !member.is_empty())
+            .ok_or(Outcome::TemporarilyUnavailable)?
+            .to_owned();
+        let number = body["number"]
+            .as_u64()
+            .ok_or(Outcome::TemporarilyUnavailable)?;
+        Ok(Issued {
+            badge,
+            posts,
+            member,
+            number,
+        }
+        .encode())
     }
 
     fn catalog(&self) -> Vec<ToolDescriptor> {
@@ -556,6 +586,20 @@ impl ServiceAdapter for Board {
                 },
             },
         ]
+    }
+
+    fn known_as(&self, issued: &SealedIssued) -> Option<KnownAs> {
+        let issued = Issued::decode(issued)?;
+        Some(KnownAs {
+            name: Some(issued.member),
+            reference: Some(issued.number.to_string()),
+            reference_is: "member number",
+            allows: if issued.posts {
+                "read the board and post on it"
+            } else {
+                "read the board, but not post on it"
+            },
+        })
     }
 
     fn available(&self, issued: &SealedIssued) -> Vec<ToolName> {

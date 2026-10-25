@@ -275,6 +275,61 @@ fn a_companion_connects_through_the_proof_exchange_reads_what_is_new_and_replies
 }
 
 #[test]
+fn reach_names_the_account_and_how_the_space_knows_the_companion_and_never_lets_a_reader_write() {
+    let world = world();
+    world.space.grant_only(&["welcome", "read"]);
+    let (install, _, mut peer) = connected(&world, "space-reach");
+    let participant = world.space.participant_of(ADA).expect("a participant");
+    let origin = world.space.origin();
+    let reach = call(&mut peer, 110, "reach", json!({}));
+    let told = said(&reach);
+    assert_eq!(
+        told,
+        format!(
+            "You are ada, attached through Companion Lobby. ada holds the Atmosphere account \"{HANDLE}\". ada reaches Tangent Space at main ({origin}) with the account \"{HANDLE}\"; Tangent Space knows it there as \"Ada\" (participant \"{participant}\") and lets it read, but not post: start with tangent_arrive."
+        )
+    );
+    let structured = &reach["result"]["structuredContent"];
+    assert_eq!(structured["message"], told.as_str());
+    assert_eq!(
+        structured["accounts"],
+        json!([{ "label": HANDLE, "kind": "atproto", "title": "Atmosphere", "waitsForSignIn": false }])
+    );
+    let connection = &structured["connections"][0];
+    assert_eq!(connection["account"], HANDLE);
+    assert_eq!(connection["allows"], "read, but not post");
+    assert_eq!(connection["knownAs"]["referenceIs"], "participant");
+    assert!(
+        !told.contains("write") && !told.contains("can post"),
+        "a connection that only reads is never told it can write: {told}"
+    );
+
+    // The Space names the companion as reach said it would.
+    let arrived = call(&mut peer, 111, "tangent_arrive", json!({}));
+    let you = &arrived["result"]["structuredContent"]["you"]["quoted"];
+    assert_eq!(you["displayName"], connection["knownAs"]["quoted"]["name"]);
+    assert_eq!(
+        you["participant"],
+        connection["knownAs"]["quoted"]["reference"]
+    );
+    let welcomed = said(&arrived);
+    assert!(
+        welcomed.contains("this connection cannot post here")
+            && !welcomed.contains("post with tangent_post"),
+        "{welcomed}"
+    );
+    assert_eq!(
+        arrived["result"]["structuredContent"]["may"],
+        json!(["read"])
+    );
+    assert!(
+        !names(&tools(&mut peer, 112)).contains(&"tangent_post".to_owned()),
+        "and it is offered no post"
+    );
+    install.stop();
+}
+
+#[test]
 fn a_connection_revoked_while_a_reply_is_on_its_way_turns_it_into_an_unknown_outcome() {
     let world = world();
     let (install, connection, mut peer) = connected(&world, "space-late");
@@ -959,7 +1014,7 @@ fn the_recorded_claude_code_mind_in_a_space_replays_through_the_shim() {
             );
             if name == "reach" {
                 // The companion's id is this install's own.
-                for field in ["tools", "connections", "waiting", "message"] {
+                for field in ["tools", "accounts", "connections", "waiting", "message"] {
                     assert_eq!(got[field], want[field], "reach's {field}");
                 }
                 for field in ["displayName", "moniker"] {

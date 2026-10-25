@@ -131,6 +131,22 @@ pub fn run(adapter: &dyn ServiceAdapter, fixture: &dyn ServiceFixture) {
             "the connection keeps only what the service issued"
         );
     }
+    // What the service issued says how it knows the companion there, and
+    // what the connection's grants allow in the service's words.
+    let known = adapter
+        .known_as(&issued)
+        .expect("the adapter reads how the service knows the companion");
+    assert!(
+        known.name.is_some() || known.reference.is_some(),
+        "the service names the companion somehow: {known:?}"
+    );
+    assert!(!known.reference_is.is_empty() && !known.allows.is_empty());
+    assert!(
+        adapter
+            .known_as(&SealedIssued::new(b"not what it issued".to_vec()))
+            .is_none(),
+        "nothing is read from what the service did not issue"
+    );
     let (tool, arguments) = fixture.read();
     let available = adapter.available(&issued);
     assert!(
@@ -217,6 +233,13 @@ pub fn run(adapter: &dyn ServiceAdapter, fixture: &dyn ServiceFixture) {
         .establish(&address, fixture.authority())
         .expect("a connection that may only read is established");
     let available = adapter.available(&reading);
+    let reads = adapter
+        .known_as(&reading)
+        .expect("the adapter reads how the service knows the companion");
+    assert_ne!(
+        reads.allows, known.allows,
+        "a connection that may only read is never said to allow what one that writes does"
+    );
     let (write, written) = fixture.write();
     assert!(
         catalog.iter().any(|descriptor| descriptor.name == write),

@@ -65,6 +65,26 @@ pub struct ServiceDescription {
     pub permissions: Vec<String>,
 }
 
+/// How a service knows the companion through one connection, as what the
+/// service issued for it says, so a mind meets there the name it was told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownAs {
+    /// The name the service shows for the companion there, as the service
+    /// wrote it; a mind reads it only quoted.
+    pub name: Option<String>,
+    /// The reference the service gave the companion there, which its own
+    /// answers name the companion by, as the service wrote it; a mind
+    /// reads it only quoted.
+    pub reference: Option<String>,
+    /// What the service calls such a reference, in its own words, such as
+    /// `member`.
+    pub reference_is: &'static str,
+    /// What the connection's grants allow there, in the service's words,
+    /// as a clause that follows "lets it", such as `read and post`. A
+    /// connection that cannot write what others read never says it can.
+    pub allows: &'static str,
+}
+
 /// The daemon's broker for one connection being established: it mints
 /// authorizations from the connection's credential, through that
 /// credential's own adapter.
@@ -107,6 +127,11 @@ pub trait ServiceAdapter: Send + Sync {
         let _ = issued;
         self.catalog().into_iter().map(|tool| tool.name).collect()
     }
+
+    /// How the service knows the companion through the connection whose
+    /// issued data is `issued`, and what that connection's grants allow
+    /// there; none when the adapter cannot read what was issued.
+    fn known_as(&self, issued: &SealedIssued) -> Option<KnownAs>;
 
     /// Performs one tool call through the connection at `address`, whose
     /// issued data `slot` guards.

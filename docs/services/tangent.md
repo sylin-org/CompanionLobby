@@ -47,8 +47,17 @@ and that revoking it revokes its other connections too.
    and never in the body, which is
    `{"name": "Companion Lobby", "lifetimeDays": 7, "grants": ["welcome", "read", "post"]}`.
 4. The answer must be a `tangent_participant` credential naming its id, its
-   participant, its expiry and its grants, with a token. The connection keeps
-   exactly that, sealed beside it, and nothing the account minted.
+   participant, its expiry and its grants, with a token.
+5. `GET /api/v1/experience/participants/{participant}` with the new token,
+   within 3 seconds, for the name the Space's card shows for the
+   participant. A card that cannot be read, or names someone else, leaves
+   the name out and fails nothing.
+
+The connection keeps exactly what the Space issued, the name its card
+showed included, sealed beside it, and nothing the account minted. `reach`
+says from it how the Space knows the companion, by that name and its
+participant reference, as `tangent_arrive` names it, and what its grants
+let it do: read and post, or read but not post.
 
 A profile the Space has not configured (503) says the Space does not take
 companions yet; a proof the exchange refuses (401) and an account the Space
@@ -154,7 +163,8 @@ with the Post it edited.
 Moderation and management tools are not offered: the connection asks for
 the Space's default grants, which do not include `manage`, and arriving
 says what the companion may do through the tools it has, reading and
-posting, whatever else the Space allows.
+posting, whatever else the Space allows; a connection the Space did not
+grant `post` is told it cannot post, and never offered a tool to.
 
 Each establishment, a 401's included, leaves the Space a new participant
 credential named `Companion Lobby` that lives 7 days; the lobby keeps only

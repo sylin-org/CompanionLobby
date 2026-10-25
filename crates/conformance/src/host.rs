@@ -500,10 +500,18 @@ pub fn two_boards_are_reached_through_one_set_of_tools(exe: &Path) {
         assert!(!listing.contains(word), "{word} in {listing}");
     }
 
-    // Each board says what the companion can do there: the back board
-    // admitted it to read only.
+    // Each board says how it knows the companion, by the member it named
+    // when it admitted it, and what the companion can do there in the
+    // board's words: the back board admitted it to read only, and is never
+    // said to let it write.
     let reach = call(&mut peer, 2, "reach", json!({}));
-    let reached: Vec<Value> = reach["result"]["structuredContent"]["connections"]
+    let structured = &reach["result"]["structuredContent"];
+    assert_eq!(
+        structured["accounts"],
+        json!([{ "label": "holder-ada", "kind": "passbook", "title": "Passbook", "waitsForSignIn": false }]),
+        "{structured}"
+    );
+    let reached: Vec<Value> = structured["connections"]
         .as_array()
         .expect("connections")
         .clone();
@@ -512,20 +520,36 @@ pub fn two_boards_are_reached_through_one_set_of_tools(exe: &Path) {
             .iter()
             .map(|connection| (
                 connection["at"].as_str().expect("at"),
-                connection["can"].clone()
+                connection["account"].clone(),
+                connection["knownAs"]["quoted"]["name"].clone(),
+                connection["allows"].clone(),
             ))
             .collect::<Vec<_>>(),
         [
-            ("front", json!(["read", "write"])),
-            ("back", json!(["read"]))
+            (
+                "front",
+                json!("holder-ada"),
+                json!("holder-ada"),
+                json!("read the board and post on it")
+            ),
+            (
+                "back",
+                json!("holder-ada"),
+                json!("holder-ada"),
+                json!("read the board, but not post on it")
+            )
         ]
     );
     let woke = reach["result"]["content"][0]["text"]
         .as_str()
         .expect("text");
     assert!(
-        woke.contains(", where it can read and write, and back (")
-            && woke.contains("), where it can read: start with board_read."),
+        woke.contains("ada holds the Passbook account \"holder-ada\"."),
+        "{woke}"
+    );
+    assert!(
+        woke.contains("knows it there as \"holder-ada\" (member number \"1\") and lets it read the board and post on it: start with board_read.")
+            && woke.contains("and lets it read the board, but not post on it: start with board_read."),
         "{woke}"
     );
     let refused = call(

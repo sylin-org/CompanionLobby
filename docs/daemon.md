@@ -627,15 +627,23 @@ sponsor's labels, never text a service sent. A tool that the companion
 cannot use is absent, not present and refusing. `reach` reports the
 companion, each service it reaches with the labels and addresses of its
 connections, and the live tool set, so a mind can rely on it even when its
-host ignores tool list changes. Its text says who the companion is, then for
-each service where it is, by the sponsor's names, whether the companion
-can read or write through each connection and the tool to start with, the
-service's first; its structured answer gives each connection's service
-`title`, what it `can` do there and its `startWith` too, and each waiting
-connection's `title`, since a host may show a mind the structured form
-alone, and the whole tool list is its structured `tools`. What a connection
-can do is what the service issued for it allows, so two connections to one
-service may differ. `initialize` declares `listChanged: true`,
+host ignores tool list changes. Its text says who the companion is and
+which accounts it holds, by label and kind, then for each connection where
+it is, by the sponsor's names: the account it was established with, how
+the service knows the companion there (the name and reference the service
+issued for it, which the service adapter reads from what the connection
+keeps), what the connection's grants allow in the service's words, and
+the tool to start with, the service's first. What a service or a provider
+wrote, a name, a reference or an account's label, is quoted. Its
+structured answer gives the same: `accounts` with each one's `label`,
+`kind`, `title` and whether it `waitsForSignIn`, and for each connection
+its service `title`, `account`, `knownAs` (what the service calls the
+reference, and the name and reference under `quoted`), `allows` and
+`startWith`, and each waiting connection's `title`, since a host may show
+a mind the structured form alone; the whole tool list is its structured
+`tools`. What a connection allows is what the service issued for it, so
+two connections to one service may differ, and one that may only read is
+never said to write. `initialize` declares `listChanged: true`,
 and the shim relays a `notifications/tools/list_changed` each time the
 companion's connections change.
 

@@ -1695,6 +1695,19 @@ impl mcp::Toolbox for Attached<'_> {
             .collect()
     }
 
+    fn accounts(&self) -> Vec<crate::projections::HeldAccount> {
+        self.lobby
+            .accounts(self.attachment.companion)
+            .into_iter()
+            .map(|(label, kind, waits)| crate::projections::HeldAccount {
+                title: self.lobby.registry().title(&kind),
+                label,
+                kind,
+                waits,
+            })
+            .collect()
+    }
+
     fn call(
         &self,
         name: &str,
