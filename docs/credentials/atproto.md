@@ -143,9 +143,13 @@ credential waits for it and reads the new material.
 When the sponsor revokes the credential, the adapter presents the grant's
 refresh token (`token_type_hint=refresh_token`, with the client id and a
 proof) to the revocation endpoint the authorization server's metadata names
-on its own origin. A 200 is the provider confirming it. A server that names
-no revocation endpoint cannot be asked: the grant ends there when it
-expires, and the sponsor reads so.
+on its own origin. A 200 is the provider confirming it, except for a
+credential that waited for a sign-in: its refresh token may already have
+been rotated by a renewal whose answer never arrived, and a revocation
+endpoint answers 200 for a token it does not know, so the lobby still
+sends it but tells the sponsor it cannot tell whether the grant ended. A
+server that names no revocation endpoint cannot be asked: the grant ends
+there when it expires, and the sponsor reads so.
 
 ## Permissions
 

@@ -413,7 +413,12 @@ pub enum AtProvider {
     NotOffered,
     /// The provider could not be reached, or did not confirm it.
     NotConfirmed,
-    /// The lobby held no material to name it to the provider with.
+    /// The credential waited for a sign-in, so the provider was sent the
+    /// last secret the lobby held, which a renewal may already have spent;
+    /// its answer cannot confirm that what it granted ended.
+    SentLastKnown,
+    /// The lobby held no material to name it to the provider with, so the
+    /// provider was not asked.
     NotAsked,
 }
 
@@ -424,6 +429,7 @@ impl AtProvider {
             Self::Confirmed => "confirmed",
             Self::NotOffered => "not_offered",
             Self::NotConfirmed => "not_confirmed",
+            Self::SentLastKnown => "sent_last_known",
             Self::NotAsked => "not_asked",
         }
     }
@@ -1423,7 +1429,7 @@ impl Lobby {
     /// adapter revokes it at the provider, a step journaled on its own, and
     /// the answer says what the provider said.
     pub fn revoke_credential(&self, id: CredentialId) -> Result<Revoked, Refusal> {
-        let (credential, material, subject) = self.run(|core| {
+        let (credential, material, subject, waited) = self.run(|core| {
             let found = core.store.state().credential(id).cloned();
             let mut subject = core.named(Subject::new(
                 Initiator::Sponsor,
@@ -1450,8 +1456,12 @@ impl Lobby {
             };
             core.begin_as(&subject)?;
             // The material names the account to the provider once the
-            // lobby's own revocation landed; it is held only in memory.
+            // lobby's own revocation landed; it is held only in memory. A
+            // credential that waited for a sign-in holds a secret a renewal
+            // may already have spent, so the provider's answer for it can
+            // confirm nothing.
             let material = keyring::read_material(&self.dir, id).ok();
+            let waited = credential.state == CredentialState::NeedsSignIn;
             credential.state = CredentialState::Revoked;
             let mut next = core.store.state().clone();
             let mut revoked = Vec::new();
@@ -1486,7 +1496,7 @@ impl Lobby {
                 Some(material) if core.begin_as(&at_provider).is_ok() => Some(material),
                 _ => None,
             };
-            Ok((credential, material, at_provider))
+            Ok((credential, material, at_provider, waited))
         })?;
         let Some(material) = material else {
             return Ok(Revoked {
@@ -1499,6 +1509,7 @@ impl Lobby {
             None => Err(Outcome::Unsupported),
         };
         let (provider, outcome) = match answered {
+            Ok(Revocation::Confirmed) if waited => (AtProvider::SentLastKnown, Outcome::Unknown),
             Ok(Revocation::Confirmed) => (AtProvider::Confirmed, Outcome::Done),
             Ok(Revocation::NotOffered) => (AtProvider::NotOffered, Outcome::Unsupported),
             Err(outcome) => (AtProvider::NotConfirmed, outcome),

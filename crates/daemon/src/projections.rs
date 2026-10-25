@@ -522,6 +522,9 @@ pub fn sentence(entry: &Value, names: &Names) -> String {
         ("renew_credential", "temporarily_unavailable") => {
             format!("{provider} could not be reached; it tries again later")
         }
+        ("revoke_at_provider", "outcome_unknown") => format!(
+            "it waited for a sign-in, so {provider} was sent the last key the lobby held, which a renewal may already have replaced; the lobby cannot tell whether it is revoked there"
+        ),
         ("revoke_at_provider", "unsupported") => {
             format!("{provider} offers no way to revoke it there, so it ends there when it expires")
         }

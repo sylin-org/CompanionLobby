@@ -869,7 +869,8 @@ const AT_PROVIDER = {
   confirmed: title => " " + title + " confirmed it is revoked there too.",
   not_offered: title => " " + title + " offers no way to revoke it there, so it ends there when it expires.",
   not_confirmed: title => " " + title + " did not confirm it, so it ends there when it expires.",
-  not_asked: () => "",
+  sent_last_known: title => " It waited for a sign-in, so " + title + " was sent the last key the lobby held, which may already have been replaced: the lobby cannot tell whether it is revoked there. The apps your " + title + " account allows are listed in its own settings.",
+  not_asked: title => " The lobby held no key for it, so " + title + " was not asked to revoke it; it ends there when it expires.",
 };
 
 async function revokeCredential(companion, credential, focusKey) {

@@ -95,7 +95,9 @@ connection is shown, the companion's card included, and is confirmed in
 place, never in a dialog. Revoking an account revokes every connection made
 with it, and the page says so before it happens; afterwards it says whether
 the provider confirmed the revocation, offers none, or could not be
-reached.
+reached, that it cannot tell for an account that waited for a sign-in,
+whose last key a renewal may already have replaced, and that the provider
+was not asked when the lobby held no key for the account.
 
 ## The rules the page keeps
 

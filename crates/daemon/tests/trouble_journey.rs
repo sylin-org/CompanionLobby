@@ -437,3 +437,42 @@ fn revoking_an_account_reaches_its_provider_and_says_whether_it_confirmed() {
     )));
     install.stop();
 }
+
+#[test]
+fn revoking_an_account_that_waits_sends_its_last_key_and_never_claims_a_confirmation() {
+    let world = world();
+    let install = install(&world, "waits-revoked");
+    install.open();
+    let ada = install.create("ada");
+    world.access_lifetime(1);
+    atproto_sign_in(&install, &world, &ada);
+    let credential = credential_of(&install, &ada, "atproto");
+    let last = world.live_refresh_token(ADA).expect("a live token");
+    world.refuse_refreshes();
+    wait_until("the account needs signing in again", || {
+        credential_of(&install, &ada, "atproto")["state"] == "needs_sign_in"
+    });
+    let revoked = install.operator(
+        "POST",
+        &format!(
+            "/api/credentials/{}/revoke",
+            credential["id"].as_str().expect("id")
+        ),
+        &json!({}),
+    );
+    assert_eq!(revoked.status, 200, "{}", text(&revoked));
+    assert_eq!(
+        body(&revoked)["provider"],
+        "sent_last_known",
+        "a provider that answers for a secret a renewal may have spent confirms nothing"
+    );
+    assert_eq!(
+        world.revocations(),
+        [last],
+        "the provider was still sent the last key the lobby held"
+    );
+    assert!(sentences(&install).contains(&format!(
+        "You tried to revoke {HANDLE} at Atmosphere too, but it waited for a sign-in, so Atmosphere was sent the last key the lobby held, which a renewal may already have replaced; the lobby cannot tell whether it is revoked there."
+    )), "{:#?}", sentences(&install));
+    install.stop();
+}

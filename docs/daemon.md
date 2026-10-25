@@ -347,7 +347,11 @@ beside it with every test feature on, carries no passbook material tag.
   revokes it at the provider from the material the lobby held in memory, a
   step journaled `revoke_at_provider`: `done` when the provider confirmed
   it, `unsupported` when the provider offers no revocation, and the outcome
-  otherwise; the answer says which.
+  otherwise; the answer says which. A credential that waited for a sign-in
+  is still revoked at the provider with the last secret the lobby held, but
+  a renewal may already have spent that secret, so the provider's answer
+  confirms nothing: the step settles `outcome_unknown` and the answer says
+  the lobby cannot tell.
 - **Calls.** A service tool call resolves the connection the mind named with
   `at` among its companion's ready connections to that service, journals the
   call as invoked, and pins the connection's revision. The call runs with no
@@ -459,7 +463,7 @@ state file and the journal before it answers.
 | `POST /api/sign-ins/<id>/cancel` | operator write | Cancels a sign-in while it waits: 200 with `{"signIn"}`, or 404 when none with that id waits. |
 | `GET /signin/<kind>/return` | Host | Where a provider sends the browser back. Completes a sign-in the lobby waits for, once, and answers 303 to `/signin/done?outcome=<outcome>&companion=<id>` with no body, the companion named only when the lobby knew the sign-in, so the code and the `state` leave the address bar at once and nothing the provider sent rides on. |
 | `GET /signin/done` | Host | The page that says how a sign-in ended, from the outcome alone: 200 when the account is signed in, 404 when the lobby does not remember a sign-in waiting for this answer (cancelled, expired, finished or never started), 409 for an account another companion holds, a kind the companion already holds or another account than the one that waits to be signed in again, 403 for a return that did not prove the sign-in, 503 when the provider could not be reached. It loads only the manager page's stylesheet, echoes nothing, and offers one link: back to the companion's page, by its display name, when the lobby knows the companion, and back to the lobby otherwise. |
-| `POST /api/credentials/<id>/revoke` | operator write | Revokes the credential and every connection made from it, then at the provider: 200 with `{"credential", "provider"}`, `provider` being `confirmed`, `not_offered`, `not_confirmed` or `not_asked` (no material to name the account with); or 404, or 409 when it is already revoked. |
+| `POST /api/credentials/<id>/revoke` | operator write | Revokes the credential and every connection made from it, then at the provider: 200 with `{"credential", "provider"}`, `provider` being `confirmed`, `not_offered`, `not_confirmed`, `sent_last_known` (the credential waited for a sign-in, so the provider was sent the last secret the lobby held and its answer confirms nothing) or `not_asked` (no material to name the account with); or 404, or 409 when it is already revoked. |
 | `POST /api/connections` | operator write | Establishes a connection from `{"companion", "credential", "service", "address", "label"}`: 201 with `{"connection"}`; or 400 for an address or label the rules refuse, 404, 409 for a label in use, 403 for a credential that was revoked (`revoked`) or needs signing in again (`needs_sign_in`), or the outcome the adapters answered (`unsupported` is 403). |
 | `POST /api/connections/<id>/revoke` | operator write | Revokes the connection: 200 with `{"connection"}`, or 404, or 409 when it is already revoked. |
 | `POST /api/stop` | operator write | 202, then the daemon stops accepting connections, ends every live feed, lets accepted requests finish (at most 10 seconds), closes its listener, releases the lock and exits. |
