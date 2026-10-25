@@ -510,7 +510,7 @@ impl MaterialSlot for Untouched {
 }
 
 #[test]
-fn every_ask_is_refused_as_unsupported_before_the_material_is_read() {
+fn an_ask_for_a_bare_did_is_refused_as_unsupported_before_the_material_is_read() {
     let world = world();
     let adapter = adapter(&world);
     let ask = AuthorizationAsk::ServiceProof {

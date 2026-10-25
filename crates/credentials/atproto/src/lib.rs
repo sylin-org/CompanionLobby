@@ -60,9 +60,11 @@
 //! revokes the credential and the server offers revocation; see
 //! [`renewal`] for the order a refresh follows and what each answer means.
 //!
-//! Minting authorizations for services through the PDS joins with the first
-//! service adapter that asks for one; until then every ask is refused as
-//! unsupported before the material is read or anything is reached.
+//! A service that asks for a proof of the account gets one minted at the
+//! account's PDS, for exactly the audience and method it declared, when
+//! the account was granted that method; see [`proofs`]. Every sign-in asks
+//! for `atproto` and for what the lobby's services need an account of this
+//! kind granted.
 //!
 //! The word session here means the OAuth session the authorization server
 //! grants, and nothing else.
@@ -73,6 +75,7 @@ pub mod dpop;
 pub mod flight;
 pub mod identity;
 pub mod material;
+pub mod proofs;
 pub mod renewal;
 pub mod server;
 pub mod tokens;
@@ -115,6 +118,18 @@ pub const SCOPE: &str = "atproto";
 
 /// How many of the handles a document claims are tried as its label.
 const LABEL_HANDLES: usize = 3;
+
+/// The scope a sign-in asks for: `atproto`, then each permission the
+/// lobby's services need that is one word of the scope's shape, once.
+pub fn scope_for(permissions: &[String]) -> String {
+    let mut words = vec![SCOPE.to_owned()];
+    for permission in permissions {
+        if is_token(permission, 256) && !words.contains(permission) {
+            words.push(permission.clone());
+        }
+    }
+    words.join(" ")
+}
 
 /// The atproto credential adapter.
 pub struct Atproto {
@@ -262,12 +277,13 @@ impl CredentialAdapter for Atproto {
         let verifier = Secret::new(random_token()?);
         let challenge = base64url(&sha256(verifier.expose().as_bytes()));
         let key = DpopKey::generate()?;
-        let client_id = client::client_id(redirect_uri, SCOPE);
+        let scope = scope_for(&request.permissions);
+        let client_id = client::client_id(redirect_uri, &scope);
         let fields = [
             ("client_id", client_id.as_str()),
             ("redirect_uri", redirect_uri),
             ("response_type", "code"),
-            ("scope", SCOPE),
+            ("scope", scope.as_str()),
             ("state", request.state.as_str()),
             ("code_challenge", challenge.as_str()),
             ("code_challenge_method", "S256"),
@@ -293,7 +309,7 @@ impl CredentialAdapter for Atproto {
                 token: endpoints.token,
                 client_id: client_id.clone(),
                 redirect_uri: redirect_uri.to_owned(),
-                scope: SCOPE.to_owned(),
+                scope: scope.clone(),
                 expected,
                 nonce: pushed.nonce,
             },
@@ -377,12 +393,10 @@ impl CredentialAdapter for Atproto {
 
     fn authorize(
         &self,
-        _slot: &dyn MaterialSlot,
-        _ask: &AuthorizationAsk,
+        slot: &dyn MaterialSlot,
+        ask: &AuthorizationAsk,
     ) -> Result<Authorization, Explained> {
-        // No ask is answered yet; each is refused before the material is
-        // read or anything is reached.
-        Err(Outcome::Unsupported.into())
+        proofs::mint(&self.renewer(), &self.outbound, &self.nonces, slot, ask)
     }
 
     fn renew(&self, slot: &dyn MaterialSlot) -> Result<Freshness, Outcome> {

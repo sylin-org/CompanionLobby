@@ -153,15 +153,44 @@ there when it expires, and the sponsor reads so.
 
 ## Permissions
 
-A sign-in asks for `atproto`, the account's identity, and nothing else. The
-credential declares what was granted, so a service that needs more asks the
-sponsor to sign the companion in again with the wider scope; nothing but a
-new sign-in widens a credential's permissions, and a refresh of the OAuth
-grant keeps them as they are.
+A sign-in asks for `atproto`, the account's identity, and for what the
+lobby's services need an account of this kind granted, each as one word of
+the scope (a service that proves the account to itself declares
+`rpc:<method>?aud=*`, the granular permission the PDS checks before it
+mints a proof). The loopback client id declares exactly that scope. The
+credential declares what was granted, so a service that needs more asks
+the sponsor to sign the companion in again with the wider scope; nothing
+but a new sign-in widens a credential's permissions, and a refresh of the
+OAuth grant keeps them as they are.
 
-The adapter answers no authorization ask yet: a service that asks for a
-proof for an audience is refused as unsupported before the material is read.
-Minting proofs for services comes with the service adapter that needs one.
+## Minting a service's proof
+
+A service adapter that needs the account proven to it asks for a proof for
+the audience it declared and an XRPC method. The adapter answers only:
+
+- an audience that is an exact service reference, `<did>#<service>`, never
+  a bare DID, whose DID is a did:plc or a did:web (a port only on
+  `localhost`, written `%3A<port>`), at most 512 bytes; and a method that
+  is an NSID. Anything else is refused as unsupported before the material
+  is read;
+- a method the credential was granted, as `rpc:<method>?aud=*` or for that
+  very audience. Without it the answer is that the account was signed in
+  without leave to prove itself to the service and needs signing in again,
+  before the PDS hears anything.
+
+Holding the credential's lock, it renews the grant first when it is due,
+then asks the account's PDS:
+`GET /xrpc/com.atproto.server.getServiceAuth?aud=<audience>&lxm=<method>&exp=<now + at most 120>`,
+with the access token under `DPoP` and a proof made with the grant's key
+whose `htu` is the URL without its query and whose `ath` binds the access
+token, carrying the PDS's own nonce for that key once it issued one. A 401
+with a fresh `DPoP-Nonce` that says `use_dpop_nonce`, in the body's
+`error` or in the `WWW-Authenticate` header, is answered once with the
+nonce; the nonce is kept per PDS origin and key for later proofs. The
+token of a 200 is the proof, which the service is presented under
+`Bearer`. A 403 is the PDS refusing the method (sign in again to grant
+it); any other 401 is a sign-in the PDS does not take, and the credential
+needs signing in again.
 
 ## Reaching the network
 

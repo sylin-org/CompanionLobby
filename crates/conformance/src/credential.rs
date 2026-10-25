@@ -68,6 +68,11 @@ pub trait CredentialFixture {
     fn supported_asks(&self) -> Vec<AuthorizationAsk>;
     /// The asks the adapter does not support.
     fn unsupported_asks(&self) -> Vec<AuthorizationAsk>;
+    /// What the lobby's services would need an account of this kind
+    /// granted, which every sign-in of the suite asks for.
+    fn permissions(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// What the renewal suite needs from a provider's fake, beyond signing in.
@@ -213,7 +218,7 @@ fn signed_in(
         state: state.to_owned(),
         return_to: format!("http://127.0.0.1:1/signin/{kind}/return"),
         again: None,
-        permissions: Vec::new(),
+        permissions: fixture.permissions(),
     };
     fixture.approve_as(&fixture.account());
     let start = adapter.begin_sign_in(&request).expect("a sign-in starts");
@@ -233,7 +238,7 @@ pub fn run(adapter: &dyn CredentialAdapter, fixture: &dyn CredentialFixture) {
         state: "conformance-state-1".to_owned(),
         return_to: format!("http://127.0.0.1:1/signin/{kind}/return"),
         again: None,
-        permissions: Vec::new(),
+        permissions: fixture.permissions(),
     };
 
     // A sign-in records the account the provider authenticated.

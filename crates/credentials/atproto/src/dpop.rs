@@ -78,6 +78,29 @@ impl DpopKey {
     /// A proof for one request: `method` to `url`, carrying `nonce` when the
     /// server issued one.
     pub fn proof(&self, method: &str, url: &str, nonce: Option<&str>) -> Result<String, Outcome> {
+        self.proof_with(method, url, nonce, None)
+    }
+
+    /// A proof for one request to a resource server that presents
+    /// `access`: the proof also carries `ath`, the access token's SHA-256
+    /// in base64url, tying it to that token.
+    pub fn resource_proof(
+        &self,
+        method: &str,
+        url: &str,
+        nonce: Option<&str>,
+        access: &str,
+    ) -> Result<String, Outcome> {
+        self.proof_with(method, url, nonce, Some(access))
+    }
+
+    fn proof_with(
+        &self,
+        method: &str,
+        url: &str,
+        nonce: Option<&str>,
+        access: Option<&str>,
+    ) -> Result<String, Outcome> {
         let header = json!({ "alg": "ES256", "typ": "dpop+jwt", "jwk": self.jwk() });
         let now = now_secs();
         let mut claims = json!({
@@ -89,6 +112,9 @@ impl DpopKey {
         });
         if let Some(nonce) = nonce {
             claims["nonce"] = Value::String(nonce.to_owned());
+        }
+        if let Some(access) = access {
+            claims["ath"] = Value::String(base64url(&crate::codec::sha256(access.as_bytes())));
         }
         let input = format!(
             "{}.{}",
@@ -164,6 +190,27 @@ mod tests {
             "a fresh jti every time"
         );
         assert!(second_claims.get("nonce").is_none());
+    }
+
+    #[test]
+    fn a_resource_proof_binds_the_access_token_by_its_hash() {
+        let key = DpopKey::generate().expect("a key");
+        let proof = key
+            .resource_proof(
+                "GET",
+                "https://pds.test/xrpc/a.b.c?aud=x",
+                Some("n-2"),
+                "access-1",
+            )
+            .expect("a proof");
+        let claims = segment(proof.split('.').nth(1).expect("claims"));
+        assert_eq!(claims["htm"], "GET");
+        assert_eq!(claims["htu"], "https://pds.test/xrpc/a.b.c");
+        assert_eq!(claims["nonce"], "n-2");
+        assert_eq!(
+            claims["ath"],
+            base64url(&crate::codec::sha256(b"access-1")).as_str()
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ use lobby_testkit::listener::Listener;
 use lobby_testkit::percent_decode;
 
 const HOLDER: &str = "did:plc:conformanceconformanceco";
+const METHOD: &str = "org.example.conformance.prove";
 
 struct AtprotoFixture {
     world: AtprotoWorld,
@@ -45,15 +46,23 @@ impl CredentialFixture for AtprotoFixture {
     }
 
     fn supported_asks(&self) -> Vec<AuthorizationAsk> {
-        Vec::new()
+        vec![AuthorizationAsk::ServiceProof {
+            audience: "did:web:localhost%3A5300#conformance".to_owned(),
+            method: METHOD.to_owned(),
+            lifetime_secs: 60,
+        }]
     }
 
     fn unsupported_asks(&self) -> Vec<AuthorizationAsk> {
         vec![AuthorizationAsk::ServiceProof {
             audience: "did:web:service.example.test".to_owned(),
-            method: "com.example.method".to_owned(),
+            method: METHOD.to_owned(),
             lifetime_secs: 60,
         }]
+    }
+
+    fn permissions(&self) -> Vec<String> {
+        vec![format!("rpc:{METHOD}?aud=*")]
     }
 }
 

@@ -137,7 +137,9 @@ impl Renewer<'_> {
         self.renew_held(slot)
     }
 
-    fn renew_held(&self, slot: &dyn MaterialSlot) -> Result<Freshness, Outcome> {
+    /// Renews the session in `slot` when it is due, with the credential's
+    /// lock already held by whoever asks.
+    pub(crate) fn renew_held(&self, slot: &dyn MaterialSlot) -> Result<Freshness, Outcome> {
         let read = slot.read()?;
         let material = Material::decode(&read, self.policy).ok_or(Outcome::Refused)?;
         let left = material.access_expires_at - now_secs();
