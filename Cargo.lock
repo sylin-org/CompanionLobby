@@ -639,6 +639,7 @@ dependencies = [
  "lobby-credential-atproto",
  "lobby-daemon",
  "lobby-outbound",
+ "lobby-service-tangent",
  "lobby-testkit",
  "serde_json",
 ]
@@ -705,6 +706,9 @@ dependencies = [
  "lobby-contracts",
  "lobby-outbound",
  "lobby-testkit",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
