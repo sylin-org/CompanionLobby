@@ -116,6 +116,7 @@ form { margin: 0; }
 .fields { display: grid; gap: 12px; max-width: 520px; }
 .inline-form { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: end; }
 .inline-form .field { flex: 1 1 260px; }
+.form-said, .waiting { flex-basis: 100%; margin: 0; }
 .create-row { display: flex; gap: 20px; align-items: start; }
 .create-row .fields { flex: 1; }
 .preview { padding-top: 20px; }

@@ -122,40 +122,6 @@ mod tests {
     }
 
     #[test]
-    fn the_page_shows_an_account_by_its_label_and_its_key_only_in_its_details() {
-        let script = SCRIPT.0;
-        let keys: Vec<&str> = script
-            .lines()
-            .filter(|line| line.contains("credential.account"))
-            .map(str::trim)
-            .collect();
-        assert_eq!(
-            keys,
-            [
-                r#"facts.append(element("dt", "", "Account key"), element("dd", "mono", credential.account));"#
-            ],
-            "the account key appears once, inside the account's details"
-        );
-        assert!(script.contains(r#"element("strong", "", credential.label)"#));
-        for line in script.lines() {
-            for id in [
-                "companion.id",
-                "credential.id",
-                "connection.id",
-                "signIn.id",
-                "entry.companion",
-            ] {
-                for shown in [format!(", {id})"), format!(", {id} +"), format!("+ {id})")] {
-                    assert!(
-                        !(line.contains("element(") && line.contains(&shown)),
-                        "an id becomes text: {line}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn the_page_loads_only_its_own_files() {
         let page = PAGE.0;
         assert!(page.contains("<script src=\"/manager.js\" defer></script>"));

@@ -5,7 +5,10 @@
 // asked for was refused because the lobby changed first. Text reaches the
 // page only through textContent; nothing becomes markup. What the sponsor
 // types is kept as a draft in this tab's own storage, so a reload loses
-// nothing; everything else the page shows comes from the lobby.
+// nothing; everything else the page shows comes from the lobby. While the
+// sponsor types in a form or answers a question asked in place, what the
+// lobby changes waits, says so, and shows once the sponsor leaves; after
+// every action the focus lands where the result is.
 
 // ---------- small helpers ----------
 
@@ -75,16 +78,49 @@ function sentence(result) {
   return (result.body && result.body.message) || "The lobby could not finish that. Try again.";
 }
 
+// A sentence that ends a name with its own stop is not stopped twice.
+function tidy(text) {
+  return String(text).replace(/([.!?])\.(?=\s|$)/g, "$1");
+}
+
 function note(message, isError) {
   const line = document.getElementById("notice");
-  line.textContent = message;
+  line.textContent = tidy(message);
   line.className = isError ? "error" : "ok";
   clearTimeout(note.timer);
   note.timer = setTimeout(() => { line.textContent = ""; }, 6000);
 }
 
+// A refusal of what a form asked says so inside that form, beside its
+// button, until the sponsor types again; the focus goes back to its first
+// field.
+function formSays(form, message) {
+  let line = form.querySelector(".form-said");
+  if (!line) {
+    line = element("p", "form-said error");
+    line.setAttribute("role", "alert");
+    form.append(line);
+  }
+  line.textContent = tidy(message);
+  form.addEventListener("input", () => line.remove(), { once: true });
+  const first = form.querySelector("input, select");
+  if (first) first.focus();
+}
+
+// Runs a form's submission, marking the form busy meanwhile so what the
+// lobby changes keeps waiting even though the disabled button lost focus.
+async function submitting(form, control, work) {
+  form.dataset.busy = "1";
+  control.disabled = true;
+  try { await work(); } finally {
+    control.disabled = false;
+    delete form.dataset.busy;
+    setTimeout(settle, 0);
+  }
+}
+
 // A destructive action asks in place, where the thing lives; the page never
-// opens a dialog.
+// opens a dialog. The trigger keeps the focus whichever way it is answered.
 function confirmInPlace(trigger, question, confirmLabel, action, cancelLabel = "Keep") {
   const group = element("span", "confirm-inline");
   group.setAttribute("role", "group");
@@ -92,12 +128,12 @@ function confirmInPlace(trigger, question, confirmLabel, action, cancelLabel = "
   const yes = button(confirmLabel, "danger");
   const keep = button(cancelLabel, "quiet");
   group.append(element("span", "confirm-question", question), yes, keep);
-  const restore = () => { if (group.isConnected) group.replaceWith(trigger); };
+  const restore = () => { if (group.isConnected) group.replaceWith(trigger); trigger.focus(); };
   trigger.addEventListener("click", () => { trigger.replaceWith(group); yes.focus(); });
-  yes.addEventListener("click", () => { restore(); action(); });
-  keep.addEventListener("click", () => { restore(); trigger.focus(); });
+  yes.addEventListener("click", () => { restore(); Promise.resolve(action()).finally(() => setTimeout(settle, 0)); });
+  keep.addEventListener("click", () => { restore(); settle(); });
   group.addEventListener("keydown", event => {
-    if (event.key === "Escape") { event.stopPropagation(); restore(); trigger.focus(); }
+    if (event.key === "Escape") { event.stopPropagation(); restore(); settle(); }
   });
 }
 
@@ -330,8 +366,15 @@ let editing = false;
 let refreshPending = false;
 let journalView = null;
 let expiryTimer = null;
+// Which disclosures the sponsor opened, so a refresh keeps them open.
+const opened = new Set();
 
 view.addEventListener("input", () => { editing = true; });
+view.addEventListener("focusout", event => {
+  const form = event.target.closest && event.target.closest("form");
+  if (!form || (event.relatedTarget && form.contains(event.relatedTarget))) return;
+  setTimeout(settle, 0);
+});
 
 document.addEventListener("click", event => {
   const anchor = event.target.closest && event.target.closest("a[data-link]");
@@ -355,17 +398,49 @@ function route() {
   window.scrollTo(0, 0);
 }
 
-// A feed update waits while the sponsor edits a form, unless it must not.
-function refresh(force) {
-  if (editing && !force) { refreshPending = true; return; }
+// Whether the sponsor is in the middle of something a refresh would undo:
+// typing in a form, a form's submission, or a question asked in place.
+function busyHere() {
+  if (view.querySelector("form[data-busy], .confirm-inline")) return true;
+  const at = document.activeElement;
+  return editing && !!(at && view.contains(at) && at.closest("form"));
+}
+
+// A feed update waits while the sponsor is busy, unless it must not, and
+// says so where the sponsor is. `focusKey` names where the focus lands
+// after it; without one, the focus stays on the control it was on.
+function refresh(force, focusKey) {
+  if (!force && busyHere()) { refreshPending = true; sayWaiting(); return; }
   editing = false;
   refreshPending = false;
-  const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.key : null;
+  const at = document.activeElement;
+  const focused = focusKey || (at && at.dataset ? at.dataset.key : null);
   render();
   if (focused) {
     const again = view.querySelector('[data-key="' + focused + '"]');
     if (again) again.focus({ preventScroll: true });
   }
+}
+
+// The sponsor left what kept the lobby's changes waiting: they show now.
+function settle() {
+  if (busyHere()) return;
+  editing = false;
+  if (refreshPending) refresh(true);
+}
+
+// Says, where the sponsor is, that the lobby changed meanwhile.
+function sayWaiting() {
+  const at = document.activeElement;
+  const here = at && view.contains(at) ? at.closest("form") || at.closest(".confirm-inline") : null;
+  const place = here || view.querySelector("form[data-busy], .confirm-inline");
+  if (!place || place.querySelector(".waiting")) return;
+  const inForm = place.tagName === "FORM";
+  const line = element(inForm ? "p" : "span", "hint waiting", inForm
+    ? "The lobby changed; it shows when you leave this form."
+    : "The lobby changed; it shows once you answer.");
+  line.setAttribute("role", "status");
+  place.append(line);
 }
 
 function render() {
@@ -494,19 +569,20 @@ function createForm(first) {
     event.preventDefault();
     const displayName = name.input.value.trim();
     const wanted = moniker.input.value.trim() || monikerFrom(displayName);
-    if (!displayName) { note("Give the companion a display name first.", true); name.input.focus(); return; }
-    create.disabled = true;
-    const result = await call("/api/companions", "POST", { moniker: wanted, displayName });
-    if (!result.ok) { create.disabled = false; note(sentence(result), true); return; }
-    let companion = result.body.companion;
-    keepNewer(companion);
-    drafts.clear("create");
-    editing = false;
-    if (chosen) {
-      const uploaded = await uploadPortrait(companion, chosen);
-      if (uploaded) companion = uploaded;
-    }
-    navigate(companionPath(companion, "/attach"));
+    if (!displayName) { formSays(form, "Give the companion a display name first."); return; }
+    await submitting(form, create, async () => {
+      const result = await call("/api/companions", "POST", { moniker: wanted, displayName });
+      if (!result.ok) { formSays(form, sentence(result)); return; }
+      let companion = result.body.companion;
+      keepNewer(companion);
+      drafts.clear("create");
+      editing = false;
+      if (chosen) {
+        const uploaded = await uploadPortrait(companion, chosen);
+        if (uploaded) companion = uploaded;
+      }
+      navigate(companionPath(companion, "/attach"));
+    });
   });
   return form;
 }
@@ -537,7 +613,7 @@ function renderAttach(id) {
   if (!companion) { notHere("No companion has that id; it may have been removed."); return; }
   const parts = [link(companionPath(companion), "back", companion.displayName)];
   const heading = element("div", "identity");
-  heading.append(avatar(companion, "large"), element("h1", "", companion.displayName + " is ready to attach"));
+  heading.append(avatar(companion, "large"), element("h1", "", companion.displayName + (companion.attachments > 0 ? " is attached" : " is ready to attach")));
   parts.push(heading);
   parts.push(element("p", "lede", "Copy this block into your MCP host's configuration, under mcpServers. The host starts the lobby itself whenever it needs it."));
   const block = element("div", "config");
@@ -556,12 +632,12 @@ function renderAttach(id) {
   const status = element("p", "status" + (attached ? " ok" : ""));
   status.setAttribute("role", "status");
   if (attached) {
-    status.textContent = "A mind is attached as " + companion.displayName + ". Next, lend " + companion.displayName + " an account.";
+    status.textContent = tidy("A mind is attached as " + companion.displayName + ". Next, lend " + companion.displayName + " an account.");
     const next = link(companionPath(companion), "button primary", "Lend " + companion.displayName + " an account");
     next.dataset.key = "lend";
     parts.push(status, next);
   } else {
-    status.textContent = "No mind is attached as " + companion.displayName + " yet. This page changes when one attaches.";
+    status.textContent = tidy("No mind is attached as " + companion.displayName + " yet. This page changes when one attaches.");
     parts.push(status);
   }
   view.replaceChildren(...parts);
@@ -625,11 +701,9 @@ function accountRow(companion, entry, primary) {
   if (credential) {
     const words = element("div", "row-words");
     words.append(element("strong", "", credential.label), element("span", "kind", entry.title + " account"));
-    const details = element("details", "details");
-    details.append(element("summary", "", "Details"));
+    const details = disclosure("details", "Details", "details-" + credential.id);
     const facts = element("dl");
     facts.append(element("dt", "", "Account key"), element("dd", "mono", credential.account));
-    facts.append(element("dt", "", "Granted"), element("dd", "", credential.permissions.length ? credential.permissions.join(", ") : "Nothing beyond the sign-in"));
     details.append(facts);
     words.append(details);
     const revoke = button("Revoke", "danger");
@@ -655,6 +729,17 @@ function accountRow(companion, entry, primary) {
   return row;
 }
 
+// A disclosure that stays open across refreshes once the sponsor opens it.
+function disclosure(className, summary, key) {
+  const details = element("details", className);
+  const handle = element("summary", "", summary);
+  handle.dataset.key = key;
+  details.append(handle);
+  details.open = opened.has(key);
+  details.addEventListener("toggle", () => { if (details.open) opened.add(key); else opened.delete(key); });
+  return details;
+}
+
 async function revokeCredential(companion, credential) {
   const result = await call("/api/credentials/" + encodeURIComponent(credential.id) + "/revoke", "POST", {});
   if (!result.ok) {
@@ -667,14 +752,14 @@ async function revokeCredential(companion, credential) {
     if (connection.credential === credential.id) lobby.connections.set(connection.id, Object.assign({}, connection, { state: "revoked" }));
   }
   note(credential.label + " is revoked for " + companion.displayName + ".");
-  refresh(true);
+  refresh(true, "sign-in:" + companion.id + ":" + credential.kind);
 }
 
 function signInForm(companion, entry, primary) {
   const form = element("form", "inline-form");
   form.setAttribute("aria-label", "Sign " + companion.displayName + " in with " + entry.title);
   const key = "sign-in:" + companion.id + ":" + entry.kind;
-  const account = field(entry.title + " account (optional)", drafts.read(key) || "", "The account's handle or name. Leave it empty to choose it on the sign-in page.");
+  const account = field(entry.title + " account", drafts.read(key) || "", entry.hint || "The account to sign in with.");
   account.input.dataset.key = key;
   account.input.addEventListener("input", () => drafts.write(key, account.input.value));
   const go = element("button", primary ? "primary" : "", "Sign in with " + entry.title);
@@ -683,23 +768,31 @@ function signInForm(companion, entry, primary) {
   form.append(account.wrapper, go);
   form.addEventListener("submit", async event => {
     event.preventDefault();
-    go.disabled = true;
-    const hint = account.input.value.trim();
-    const result = await call("/api/sign-ins", "POST", { companion: companion.id, kind: entry.kind, hint });
-    go.disabled = false;
-    if (!result.ok) {
-      note(sentence(result), true);
-      if (result.status === 409) resynchronize();
-      return;
-    }
-    const signIn = result.body.signIn;
-    lobby.signIns.set(signIn.id, signIn);
-    handoffs.write(signIn.id, result.body.url);
-    drafts.clear(key);
-    editing = false;
-    navigate(companionPath(companion, "/sign-in/" + encodeURIComponent(signIn.id)));
+    await submitting(form, go, async () => {
+      const handoff = await startSignIn(companion, entry.kind, account.input.value.trim(), form);
+      if (!handoff) return;
+      drafts.clear(key);
+      editing = false;
+      navigate(handoff);
+    });
   });
   return form;
+}
+
+// Starts a sign-in and answers the path of its handoff, or says why not,
+// inside `form` when one asked, and answers null.
+async function startSignIn(companion, kind, hint, form) {
+  const result = await call("/api/sign-ins", "POST", { companion: companion.id, kind, hint });
+  if (!result.ok) {
+    if (result.status === 409) { note(sentence(result), true); resynchronize(); }
+    else if (form) formSays(form, sentence(result));
+    else note(sentence(result), true);
+    return null;
+  }
+  const signIn = result.body.signIn;
+  lobby.signIns.set(signIn.id, signIn);
+  handoffs.write(signIn.id, result.body.url);
+  return companionPath(companion, "/sign-in/" + encodeURIComponent(signIn.id));
 }
 
 // Where the sign-in page is, kept in this tab only: the lobby never shows it.
@@ -719,7 +812,7 @@ function renderSignIn(companionId, signInId) {
   const back = link(companionPath(companion), "back", companion.displayName);
   if (!signIn || signIn.companion !== companionId) {
     view.replaceChildren(back, element("h1", "", "This sign-in has ended"),
-      element("p", "", "The lobby does not know this sign-in; it ended before the lobby last started. Nothing was signed in by it."),
+      element("p", "", "The lobby does not remember this sign-in. Nothing was signed in by it."),
       link(companionPath(companion), "button primary", "Back to " + companion.displayName));
     return;
   }
@@ -730,6 +823,8 @@ function renderSignIn(companionId, signInId) {
   parts.push(meant, element("p", "", companion.displayName + " receives this account's identity and nothing more. No connection opens until you grant one."));
   const status = element("p", "status");
   status.setAttribute("role", "status");
+  status.tabIndex = -1;
+  status.dataset.key = "status";
   parts.push(status);
   const actions = element("div", "actions");
   let after = null;
@@ -747,17 +842,25 @@ function renderSignIn(companionId, signInId) {
       try { host = new URL(url).hostname; } catch { host = ""; }
       if (host) after = element("p", "hint", "Opens " + host + " in a new tab. Come back here when it is done.");
     } else {
-      parts.push(element("p", "hint", "The sign-in page opens from the tab that started this sign-in. Finish there, or cancel this one and start again here."));
+      parts.push(element("p", "hint", "The sign-in page opens from the tab that started this sign-in. Finish there, or start it again here."));
+      const again = button("Start this sign-in again here", "primary");
+      again.dataset.key = "again";
+      again.addEventListener("click", async () => {
+        again.disabled = true;
+        const ended = await endSignIn(signIn);
+        const handoff = ended && await startSignIn(companion, signIn.kind, signIn.account || "");
+        again.disabled = false;
+        if (handoff) navigate(handoff);
+        else refresh(true, "status");
+      });
+      actions.append(again);
     }
-    const cancel = button("Cancel sign-in", "danger");
+    const cancel = button("Cancel sign-in", url ? "danger" : "quiet");
     cancel.dataset.key = "cancel";
     confirmInPlace(cancel, "Cancel this sign-in? Nothing is signed in.", "Cancel sign-in", async () => {
-      const result = await call("/api/sign-ins/" + encodeURIComponent(signIn.id) + "/cancel", "POST", {});
-      if (!result.ok) { note(sentence(result), true); resynchronize(); return; }
-      lobby.signIns.set(signIn.id, result.body.signIn);
-      handoffs.clear(signIn.id);
+      if (!await endSignIn(signIn)) return;
       note("The sign-in was cancelled.");
-      refresh(true);
+      refresh(true, "status");
     }, "Keep waiting");
     actions.append(cancel);
     expiryTimer = setTimeout(() => refresh(false), Math.max(0, signIn.expiresAt - Date.now()) + 500);
@@ -770,7 +873,7 @@ function renderSignIn(companionId, signInId) {
       cancelled: "This sign-in was cancelled. Nothing was signed in.",
       refused: "The sign-in page's answer did not complete this sign-in. Nothing was signed in.",
     }[signIn.status] || "This sign-in expired before it came back. Nothing was signed in.";
-    status.textContent = said;
+    status.textContent = tidy(said);
     status.className = "status" + (signIn.status === "signed_in" ? " ok" : "");
     handoffs.clear(signIn.id);
     const onward = link(companionPath(companion), "button primary", signIn.status === "signed_in" ? "Back to " + companion.displayName : "Start again from " + companion.displayName + "'s page");
@@ -780,6 +883,15 @@ function renderSignIn(companionId, signInId) {
   parts.push(actions);
   if (after) parts.push(after);
   view.replaceChildren(...parts);
+}
+
+// Cancels a waiting sign-in; answers whether it ended.
+async function endSignIn(signIn) {
+  const result = await call("/api/sign-ins/" + encodeURIComponent(signIn.id) + "/cancel", "POST", {});
+  if (!result.ok) { note(sentence(result), true); resynchronize(); return false; }
+  lobby.signIns.set(signIn.id, result.body.signIn);
+  handoffs.clear(signIn.id);
+  return true;
 }
 
 // ---------- connections ----------
@@ -827,9 +939,10 @@ function connectionRow(companion, connection) {
       action = button("Open again");
       action.addEventListener("click", async () => {
         action.disabled = true;
-        const opened = await grant(companion, usable, connection.service, connection.address, connection.label);
+        const granted = await grant(companion, usable, connection.service, connection.address, connection.label);
         action.disabled = false;
-        if (opened) refresh(true);
+        if (granted) refresh(true, "connection-" + granted.id);
+        else action.focus();
       });
     } else {
       const kind = service ? service.accepts[0] : "";
@@ -857,19 +970,23 @@ async function revokeConnection(companion, connection) {
   }
   lobby.connections.set(connection.id, result.body.connection);
   note(connection.label + " is revoked for " + companion.displayName + ".");
-  refresh(true);
+  refresh(true, "connection-" + connection.id);
 }
 
-async function grant(companion, credential, service, address, label) {
+// Opens a connection; a refusal is said inside `form` when one asked.
+async function grant(companion, credential, service, address, label, form) {
   const result = await call("/api/connections", "POST", { companion: companion.id, credential: credential.id, service, address, label });
   if (!result.ok) {
-    note(sentence(result), true);
-    if (result.status === 409) resynchronize();
+    if (result.status === 409) { note(sentence(result), true); resynchronize(); }
+    else if (form) formSays(form, sentence(result));
+    else note(sentence(result), true);
     return null;
   }
-  lobby.connections.set(result.body.connection.id, result.body.connection);
-  note(companion.displayName + " reaches " + serviceTitle(service) + " at " + label + ". Its tools appear at the mind's next call.");
-  return result.body.connection;
+  const connection = result.body.connection;
+  lobby.connections.set(connection.id, connection);
+  const name = (lobby.companions.get(companion.id) || companion).displayName;
+  note(name + " can use " + serviceTitle(service) + " at " + connection.label + ". Its tools appear at the mind's next call.");
+  return connection;
 }
 
 // A name suggested for a connection: the first word of the address's host,
@@ -899,7 +1016,7 @@ function grantPanel(companion, service, primary) {
   const key = "grant:" + companion.id + ":" + service.name;
   const draft = drafts.read(key) || {};
   const address = field("Address", draft.address, "Where this " + service.title + " is, such as " + service.name + ".example.");
-  const label = field("Name", draft.label, "What " + companion.displayName + " says to mean this one.");
+  const label = field("Name", draft.label, "What " + companion.displayName + " calls this " + service.title + " when it has more than one.");
   address.input.dataset.key = key + ":address";
   label.input.dataset.key = key + ":label";
   let labelEdited = !!draft.labelEdited;
@@ -936,14 +1053,14 @@ function grantPanel(companion, service, primary) {
     const typed = address.input.value.trim();
     const where = typed && !typed.includes("://") ? "https://" + typed : typed;
     const name = label.input.value.trim() || (where ? labelFrom(companion, service.name, where) : "");
-    if (!where) { note("Type where this " + service.title + " is first.", true); address.input.focus(); return; }
+    if (!where) { formSays(form, "Type where this " + service.title + " is first."); return; }
     const same = connectionsOf(companion).find(connection => connection.service === service.name && connection.state === "ready" && placeText(connection.address).replace(/\/$/, "") === placeText(where.toLowerCase()).replace(/\/$/, ""));
-    if (same) { note(companion.displayName + " already reaches this " + service.title + " as " + same.label + ".", true); return; }
+    if (same) { formSays(form, companion.displayName + " already reaches this " + service.title + " as " + same.label + "."); return; }
     const credential = account ? usable.find(entry => entry.id === account.value) : usable[0];
-    open.disabled = true;
-    const opened = await grant(companion, credential, service.name, where, name);
-    open.disabled = false;
-    if (opened) { drafts.clear(key); editing = false; refresh(true); }
+    await submitting(form, open, async () => {
+      const granted = await grant(companion, credential, service.name, where, name, form);
+      if (granted) { drafts.clear(key); editing = false; refresh(true, "connection-" + granted.id); }
+    });
   });
   panel.append(form);
   return panel;
@@ -952,10 +1069,9 @@ function grantPanel(companion, service, primary) {
 // ---------- names, portrait and removal ----------
 
 function settings(companion) {
-  const details = element("details", "settings");
+  const details = disclosure("settings", "Name and portrait", "settings-" + companion.id);
   const draft = drafts.read("rename:" + companion.id);
   if (draft) details.open = true;
-  details.append(element("summary", "", "Name and portrait"));
   details.append(renameForm(companion, draft), portraitControls(companion), removal(companion));
   return details;
 }
@@ -979,8 +1095,9 @@ function renameForm(companion, draft) {
   moniker.input.addEventListener("input", update);
   const save = element("button", "", "Save names");
   save.type = "submit";
+  save.dataset.key = key + ":save";
   const discard = button("Discard changes", "quiet");
-  discard.addEventListener("click", () => { drafts.clear(key); editing = false; refresh(true); });
+  discard.addEventListener("click", () => { drafts.clear(key); editing = false; refresh(true, key + ":name"); });
   const actions = element("div", "actions");
   actions.append(save, discard);
   form.append(name.wrapper, moniker.wrapper, warning, actions);
@@ -990,19 +1107,19 @@ function renameForm(companion, draft) {
     if (name.input.value.trim() !== companion.displayName) change.displayName = name.input.value.trim();
     if (moniker.input.value.trim() !== companion.moniker) change.moniker = moniker.input.value.trim();
     if (!("displayName" in change) && !("moniker" in change)) { note("Nothing changed."); drafts.clear(key); return; }
-    save.disabled = true;
-    const result = await call("/api/companions/" + encodeURIComponent(companion.id), "PATCH", change);
-    save.disabled = false;
-    if (!result.ok) {
-      note(sentence(result), true);
-      if (result.status === 409) resynchronize();
-      return;
-    }
-    drafts.clear(key);
-    keepNewer(result.body.companion);
-    note("Saved.");
-    editing = false;
-    refresh(true);
+    await submitting(form, save, async () => {
+      const result = await call("/api/companions/" + encodeURIComponent(companion.id), "PATCH", change);
+      if (!result.ok) {
+        if (result.status === 409) { note(sentence(result), true); resynchronize(); }
+        else formSays(form, sentence(result));
+        return;
+      }
+      drafts.clear(key);
+      keepNewer(result.body.companion);
+      note("Saved.");
+      editing = false;
+      refresh(true, key + ":save");
+    });
   });
   return form;
 }
@@ -1011,11 +1128,12 @@ function portraitControls(companion) {
   const box = element("div", "fields");
   const choose = field("Portrait", "", "A PNG, JPEG, WebP or GIF image of at most 512 KiB.", { type: "file" });
   choose.input.accept = "image/png,image/jpeg,image/webp,image/gif";
+  choose.input.dataset.key = "portrait-" + companion.id;
   choose.input.addEventListener("change", async () => {
     const file = choose.input.files && choose.input.files[0];
     if (!file) return;
     const updated = await uploadPortrait(companion, file);
-    if (updated) { note("The portrait is changed."); editing = false; refresh(true); }
+    if (updated) { note("The portrait is changed."); editing = false; refresh(true, choose.input.dataset.key); }
   });
   box.append(choose.wrapper);
   if (companion.portrait) {
@@ -1025,7 +1143,7 @@ function portraitControls(companion) {
       if (!result.ok) { note(sentence(result), true); if (result.status === 409) resynchronize(); return; }
       keepNewer(result.body.companion);
       note(companion.displayName + " shows its initials.");
-      refresh(true);
+      refresh(true, choose.input.dataset.key);
     });
     const actions = element("div", "actions");
     actions.append(clear);
@@ -1037,6 +1155,7 @@ function portraitControls(companion) {
 function removal(companion) {
   const box = element("div", "actions removal");
   const trigger = button("Remove " + companion.displayName, "danger");
+  trigger.dataset.key = "remove-" + companion.id;
   const count = companion.attachments;
   const question = count
     ? "Remove " + companion.displayName + " and end its " + (count === 1 ? "attachment" : count + " attachments") + "? Its accounts are removed here too."

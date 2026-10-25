@@ -29,18 +29,22 @@ lobby can sign in, by the title the kind's adapter gives it. A row is one of:
 
 - signed in: the account by its label (a handle, or an account name), the
   word *Signed in*, and *Revoke*. The provider's stable key for the account
-  shows only inside the row's *Details*, with what the provider granted;
+  shows only inside the row's *Details*;
 - signing in: the account the sponsor meant, the word *Signing in*, and
   *Continue*, which leads to the handoff;
-- otherwise a field for the account, optional, and *Sign in with <kind>*.
-  A revoked account says it was revoked above the form.
+- otherwise a field for the account, with the hint the kind's adapter gives
+  (whether it may be left empty for the provider's page to choose), and
+  *Sign in with <kind>*. A revoked account says it was revoked above the
+  form.
 
 The handoff names the companion and the account the sponsor meant, says that
 the companion receives the account's identity and nothing more, and offers
 *Continue to sign in*, which opens the provider's page in a new tab, and
 *Cancel sign-in*. The account meant is read from the lobby, so a reload or a
 second tab shows it too; the provider's page itself is linked only from the
-tab that started the sign-in. The handoff follows the sign-in to its end and
+tab that started the sign-in, and any other tab offers *Start this sign-in
+again here* instead, which ends the waiting one and starts the same sign-in
+anew. The handoff follows the sign-in to its end and
 says it plainly: signed in, with the account's label; cancelled; expired; or
 not completed by the provider's answer. Nothing on it ever says connected.
 
@@ -78,6 +82,13 @@ happens.
 - No modal, alert, confirm or prompt. A destructive action is confirmed in
   place: the confirm button takes the focus, and Escape or *Keep* puts the
   action back.
+- After every action the focus lands where its result is: the status line
+  of the handoff, the connection's row and its new action, the sign-in field
+  of a revoked account. A refusal of what a form asked is said inside that
+  form until the sponsor types again.
+- While the sponsor types in a form or answers a question asked in place,
+  what the lobby changes waits; a line there says the lobby changed, and the
+  change shows as soon as the sponsor leaves.
 - One primary action per screen, in the warm accent; everything else is
   quiet. A dark canvas, compact type and thin separators.
 - What the sponsor types is kept as a draft in the tab's own storage, so
