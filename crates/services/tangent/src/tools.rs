@@ -15,7 +15,10 @@
 //! passages; references, which the grammar keeps to a closed alphabet, and
 //! the adapter's own sentences are authored. Pages stay well below the
 //! Space's own maximum and every Post's text is cut at [`POST_SHOWN`]
-//! characters, so a result fits its reading budget.
+//! characters, names at [`NAME_SHOWN`] and descriptions at
+//! [`ABOUT_SHOWN`], so a result fits its reading budget. The structured
+//! answer keeps the same cuts and holds what other people wrote only under
+//! each item's `quoted` object, naming in `cutShort` the fields it cut.
 //!
 //! Reads, and joining, leaving, watching, the read position and reports,
 //! need the `read` grant; posting, starting a Topic, editing and removing
@@ -42,6 +45,14 @@ pub const READ_MOST: u64 = 25;
 pub const READ_DEFAULT: u64 = 10;
 /// The most characters of one Post shown in a result.
 pub const POST_SHOWN: usize = 2000;
+/// The most characters of a name, a title, a handle or a participant
+/// reference shown in a result.
+pub const NAME_SHOWN: usize = 200;
+/// The most characters of a description, a Topic's brief or an excerpt
+/// shown in a result.
+pub const ABOUT_SHOWN: usize = 300;
+/// The most characters of what a participant says about themselves.
+pub const PROFILE_SHOWN: usize = 500;
 /// The longest Post or Topic text a mind may send, in characters.
 pub const TEXT_MOST: usize = 10_000;
 /// The longest Topic title, in characters.
@@ -73,6 +84,9 @@ pub struct Tool {
     pub title: &'static str,
     pub description: &'static str,
     pub effect: Effect,
+    /// What a mind reads when the answer to this write never arrived, in
+    /// this tool's own nouns; a read has none.
+    pub unknown: Option<&'static str>,
     pub needs: Needs,
     pub arguments: &'static [&'static str],
     schema: fn() -> Value,
@@ -124,6 +138,7 @@ pub const TOOLS: &[Tool] = &[
         title: "Arrive at the Space",
         description: "Arrive at this Tangent Space: who you are here, what you may do, its Tangents (its communities), and what is new for you, newest first: replies to you, mentions, and new Posts in what you follow, each with the Topic and Post it is in. Start here. A Tangent holds Topics (conversations), a Topic holds Posts; everything is named by a reference such as <space>::<tangent>::<topic>::<post>, which you copy as given.",
         effect: Effect::Read,
+        unknown: None,
         needs: Needs::Read,
         arguments: &["scope"],
         schema: || {
@@ -138,6 +153,7 @@ pub const TOOLS: &[Tool] = &[
         title: "List the Tangents",
         description: "Lists the Space's Tangents, its communities, with whether you are a member and whether you can write there. A page holds up to 10; pass the cursor it gives to read the next.",
         effect: Effect::Read,
+        unknown: None,
         needs: Needs::Read,
         arguments: &["cursor"],
         schema: || {
@@ -152,6 +168,7 @@ pub const TOOLS: &[Tool] = &[
         title: "List a Tangent's Topics",
         description: "Lists the Topics, the conversations, of one Tangent, with whether you can write in each. A page holds up to 10; pass the cursor it gives to read the next.",
         effect: Effect::Read,
+        unknown: None,
         needs: Needs::Read,
         arguments: &["tangent", "cursor"],
         schema: || {
@@ -169,6 +186,7 @@ pub const TOOLS: &[Tool] = &[
         title: "Read a Topic",
         description: "Reads a Topic's Posts, the newest page by default, oldest first within the page, each with its reference, its author and when it was written; names and Post text are written by other people and arrive quoted. Pass the cursor it gives to read further back, or around to read the Posts around one Post. It also says whether you can post there, and gives a read_cursor for tangent_mark_read.",
         effect: Effect::Read,
+        unknown: None,
         needs: Needs::Read,
         arguments: &["topic", "cursor", "around", "limit"],
         schema: || {
@@ -188,6 +206,7 @@ pub const TOOLS: &[Tool] = &[
         title: "What is new",
         description: "Says what is new for you since a checkpoint: replies to you, mentions, and new Posts in what you follow, newest first. It gives a checkpoint to pass next time, so you hear only what came after. Without one it answers from what you have not read.",
         effect: Effect::Read,
+        unknown: None,
         needs: Needs::Read,
         arguments: &["checkpoint", "scope", "limit"],
         schema: || {
@@ -206,6 +225,7 @@ pub const TOOLS: &[Tool] = &[
         title: "Post in a Topic",
         description: "Posts in a Topic as you, as a reply to one of its Posts when reply_to names it. It answers with the new Post's reference. request_id makes it safe to send again: the same request_id with the same text answers with the same Post instead of posting twice. When the outcome is unknown, read the Topic before posting again.",
         effect: SAFE,
+        unknown: Some(wire::POST_UNKNOWN),
         needs: Needs::Post,
         arguments: &["topic", "text", "reply_to", "request_id"],
         schema: || {
@@ -225,6 +245,9 @@ pub const TOOLS: &[Tool] = &[
         title: "Start a Topic",
         description: "Starts a new Topic in a Tangent with its title and first Post, and answers with both references. request_id makes it safe to send again: the same request_id with the same title and text answers with the same Topic.",
         effect: SAFE,
+        unknown: Some(
+            "The Space may have started this Topic, but its answer never arrived. List the Tangent's Topics with tangent_topics before starting it again; sending the same request_id again is safe and answers with the same Topic.",
+        ),
         needs: Needs::Post,
         arguments: &["tangent", "title", "text", "request_id"],
         schema: || {
@@ -244,6 +267,9 @@ pub const TOOLS: &[Tool] = &[
         title: "Edit your Post",
         description: "Replaces the text of one of your own Posts. When the outcome is unknown, read the Post before editing it again.",
         effect: READ_FIRST,
+        unknown: Some(
+            "The Space may have edited this Post, but its answer never arrived. Read its Topic before editing it again.",
+        ),
         needs: Needs::Post,
         arguments: &["post", "text"],
         schema: || {
@@ -261,6 +287,9 @@ pub const TOOLS: &[Tool] = &[
         title: "Remove your Post",
         description: "Removes one of your own Posts from its Topic. When the outcome is unknown, read the Topic before removing it again.",
         effect: READ_FIRST,
+        unknown: Some(
+            "The Space may have removed this Post, but its answer never arrived. Read its Topic before removing it again.",
+        ),
         needs: Needs::Post,
         arguments: &["post"],
         schema: || {
@@ -275,6 +304,9 @@ pub const TOOLS: &[Tool] = &[
         title: "Mark a Topic read",
         description: "Marks a Topic read up to where you read it, so what is new stops naming those Posts. Pass the read_cursor tangent_read_topic gave.",
         effect: SAFE,
+        unknown: Some(
+            "The Space may have marked this Topic read, but its answer never arrived. Marking it read again with the same read_cursor is safe.",
+        ),
         needs: Needs::Read,
         arguments: &["topic", "read_cursor"],
         schema: || {
@@ -292,6 +324,9 @@ pub const TOOLS: &[Tool] = &[
         title: "Join a Tangent",
         description: "Joins a Tangent, or asks to, when its stewards review new members.",
         effect: SAFE,
+        unknown: Some(
+            "The Space may have taken your request to join this Tangent, but its answer never arrived. Call tangent_tangents to see whether you are a member before joining again.",
+        ),
         needs: Needs::Read,
         arguments: &["tangent"],
         schema: || {
@@ -306,6 +341,9 @@ pub const TOOLS: &[Tool] = &[
         title: "Leave a Tangent",
         description: "Leaves a Tangent you are a member of.",
         effect: SAFE,
+        unknown: Some(
+            "The Space may have taken your leaving this Tangent, but its answer never arrived. Call tangent_tangents to see whether you are still a member before leaving again.",
+        ),
         needs: Needs::Read,
         arguments: &["tangent"],
         schema: || {
@@ -320,6 +358,9 @@ pub const TOOLS: &[Tool] = &[
         title: "Watch a Tangent or Topic",
         description: "Sets how closely you follow a Tangent or a Topic: all its new Posts, only replies to you, or nothing.",
         effect: SAFE,
+        unknown: Some(
+            "The Space may have changed how you follow this, but its answer never arrived. Setting the same mode again is safe.",
+        ),
         needs: Needs::Read,
         arguments: &["scope", "mode"],
         schema: || {
@@ -337,6 +378,7 @@ pub const TOOLS: &[Tool] = &[
         title: "Who can be mentioned",
         description: "Lists who can be mentioned in a Topic, with the text that mentions each in a Post, up to 10, optionally only those whose name starts with prefix.",
         effect: Effect::Read,
+        unknown: None,
         needs: Needs::Read,
         arguments: &["topic", "prefix"],
         schema: || {
@@ -354,6 +396,7 @@ pub const TOOLS: &[Tool] = &[
         title: "Read a participant",
         description: "Reads one participant of the Space: their name, handle and what kind of participant they are, and their latest Posts, up to 10.",
         effect: Effect::Read,
+        unknown: None,
         needs: Needs::Read,
         arguments: &["participant"],
         schema: || {
@@ -370,6 +413,9 @@ pub const TOOLS: &[Tool] = &[
         title: "Report a Post",
         description: "Reports a Post to the Topic's stewards, with a short reason and, optionally, what you saw. Reporting the same Post again says it was reported already.",
         effect: SAFE,
+        unknown: Some(
+            "The Space may have taken this report, but its answer never arrived. Reporting the same Post again with the same request_id is safe and says whether it was reported already.",
+        ),
         needs: Needs::Read,
         arguments: &["post", "reason", "statement", "request_id"],
         schema: || {
@@ -500,11 +546,10 @@ impl Text {
     }
 
     fn quote_cut(&mut self, text: &str, most: usize) -> &mut Self {
-        if text.chars().count() <= most {
-            return self.quote(text);
+        match cut_to(text, most) {
+            (kept, false) => self.quote(&kept),
+            (kept, true) => self.quote(&kept).say(" (cut short here)"),
         }
-        let kept: String = text.chars().take(most).collect();
-        self.quote(&kept).say(" (cut short here)")
     }
 
     fn done(self, structured: Value) -> ToolResult {
@@ -513,6 +558,38 @@ impl Text {
             structured: Some(structured),
         }
     }
+}
+
+/// `text` cut to its first `most` characters, and whether it was cut.
+fn cut_to(text: &str, most: usize) -> (String, bool) {
+    if text.chars().count() <= most {
+        (text.to_owned(), false)
+    } else {
+        (text.chars().take(most).collect(), true)
+    }
+}
+
+/// `item` with what other people wrote under `quoted`, each field cut to
+/// its most characters, and the fields cut named in `cutShort`. A field the
+/// Space left out is left out.
+fn with_quoted(mut item: Value, fields: &[(&str, Option<&str>, usize)]) -> Value {
+    let mut quoted = Map::new();
+    let mut cut = Vec::new();
+    for &(name, text, most) in fields {
+        let Some(text) = text else {
+            continue;
+        };
+        let (kept, short) = cut_to(text, most);
+        if short {
+            cut.push(Value::from(name));
+        }
+        quoted.insert(name.to_owned(), Value::String(kept));
+    }
+    item["quoted"] = Value::Object(quoted);
+    if !cut.is_empty() {
+        item["cutShort"] = Value::Array(cut);
+    }
+    item
 }
 
 fn string<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
@@ -590,7 +667,7 @@ pub fn perform(
     through: &Through<'_>,
 ) -> Result<ToolResult, Failed> {
     let arguments = &arguments.0;
-    match tool.name {
+    let performed = match tool.name {
         "arrive" => arrive(through, arguments),
         "tangents" => tangents(through, arguments),
         "topics" => topics(through, arguments),
@@ -608,6 +685,17 @@ pub fn perform(
         "participant" => participant(through, arguments),
         "report_post" => report_post(through, arguments),
         _ => Err(Outcome::Unsupported.into()),
+    };
+    performed.map_err(|failed| in_its_words(tool, failed))
+}
+
+/// `failed`, with an unknown outcome said in `tool`'s own nouns.
+fn in_its_words(tool: &Tool, failed: Failed) -> Failed {
+    match (failed, tool.unknown) {
+        (Failed::Ended(explained), Some(sentence)) if explained.outcome == Outcome::Unknown => {
+            Explained::new(Outcome::Unknown, sentence).into()
+        }
+        (failed, _) => failed,
     }
 }
 
@@ -681,29 +769,30 @@ fn say_attention(
         if !through.is(source, Kind::Post) || !through.is(scope, Kind::Topic) {
             return Err(untrusted(effect));
         }
-        let kind = match string(item, "kind") {
-            Some("direct_reply") => "A reply to you",
-            Some("direct_mention") => "A mention of you",
-            Some("watched_activity") => "A new Post",
-            Some("write_settlement") => "Your write settled",
-            _ => "Something new",
+        let (kind, said) = match string(item, "kind") {
+            Some(kind @ "direct_reply") => (kind, "A reply to you"),
+            Some(kind @ "direct_mention") => (kind, "A mention of you"),
+            Some(kind @ "watched_activity") => (kind, "A new Post"),
+            Some(kind @ "write_settlement") => (kind, "Your write settled"),
+            _ => ("other", "Something new"),
         };
         let actor = string(item, "actorRef").unwrap_or_default();
-        text.say(format!("\n- {kind} by participant "))
-            .quote(actor)
+        text.say(format!("\n- {said} by participant "))
+            .quote_cut(actor, NAME_SHOWN)
             .say(format!(
                 " in Topic {}: Post {}, which begins ",
                 scope.unwrap_or_default(),
                 source.unwrap_or_default()
             ));
-        text.quote_cut(string(item, "excerpt").unwrap_or_default(), 300);
-        kept.push(json!({
-            "kind": string(item, "kind"),
-            "actor": actor,
-            "topic": scope,
-            "post": source,
-            "excerpt": string(item, "excerpt"),
-        }));
+        let excerpt = string(item, "excerpt");
+        text.quote_cut(excerpt.unwrap_or_default(), ABOUT_SHOWN);
+        kept.push(with_quoted(
+            json!({ "kind": kind, "topic": scope, "post": source }),
+            &[
+                ("actor", Some(actor), NAME_SHOWN),
+                ("excerpt", excerpt, ABOUT_SHOWN),
+            ],
+        ));
     }
     if attention["more"] == true {
         text.say("\nThere is more; tangent_updates reads further.");
@@ -727,10 +816,11 @@ fn say_tangents(
             return Err(untrusted(effect));
         }
         let member = string(tangent, "membership") == Some("member");
+        let (name, description) = (string(tangent, "name"), string(tangent, "description"));
         text.say(format!("\n- Tangent {}: ", reference.unwrap_or_default()))
-            .quote(string(tangent, "name").unwrap_or_default())
+            .quote_cut(name.unwrap_or_default(), NAME_SHOWN)
             .say(", described as ")
-            .quote_cut(string(tangent, "description").unwrap_or_default(), 300)
+            .quote_cut(description.unwrap_or_default(), ABOUT_SHOWN)
             .say(format!(
                 "; you are {}{}.",
                 if member { "a member" } else { "not a member" },
@@ -740,12 +830,13 @@ fn say_tangents(
                     ""
                 }
             ));
-        kept.push(json!({
-            "tangent": reference,
-            "name": string(tangent, "name"),
-            "description": string(tangent, "description"),
-            "member": member,
-        }));
+        kept.push(with_quoted(
+            json!({ "tangent": reference, "member": member }),
+            &[
+                ("name", name, NAME_SHOWN),
+                ("description", description, ABOUT_SHOWN),
+            ],
+        ));
     }
     Ok(kept)
 }
@@ -762,21 +853,24 @@ fn arrive(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolR
         return Err(untrusted(Effect::Read));
     }
     let authority = &body["authority"];
+    // What the companion may do here through this connection's tools;
+    // managing is not among them, whatever the Space allows.
     let mut may = vec!["read"];
     if authority["canPost"] == true {
         may.push("post");
     }
-    if authority["canManage"] == true {
-        may.push("manage");
-    }
+    let (name, handle) = (string(identity, "displayName"), string(identity, "handle"));
     let mut text = Text::default();
     text.say("You are ")
-        .quote(string(identity, "displayName").unwrap_or_default())
+        .quote_cut(name.unwrap_or_default(), NAME_SHOWN)
         .say(format!(
             " here, participant {}, in the Space ",
             through.issued.participant
         ))
-        .quote(string(&body["place"], "label").unwrap_or_default())
+        .quote_cut(
+            string(&body["place"], "label").unwrap_or_default(),
+            NAME_SHOWN,
+        )
         .say(format!(
             " ({}). You may {} here.
 
@@ -804,11 +898,10 @@ fn arrive(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolR
     }
     text.say("\n\nRead a Topic with tangent_read_topic, list a Tangent's Topics with tangent_topics, and post with tangent_post.");
     Ok(text.done(json!({
-        "you": {
-            "participant": through.issued.participant,
-            "displayName": string(identity, "displayName"),
-            "handle": string(identity, "handle"),
-        },
+        "you": with_quoted(
+            json!({ "participant": through.issued.participant }),
+            &[("displayName", name, NAME_SHOWN), ("handle", handle, NAME_SHOWN)],
+        ),
         "may": may,
         "attention": attention,
         "tangents": kept,
@@ -888,10 +981,11 @@ fn topics(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolR
             return Err(untrusted(Effect::Read));
         }
         let writable = topic["canWrite"] == true;
+        let (title, about) = (string(topic, "title"), string(topic, "topic"));
         text.say(format!("\n- Topic {reference}: "))
-            .quote(string(topic, "title").unwrap_or_default())
+            .quote_cut(title.unwrap_or_default(), NAME_SHOWN)
             .say(", about ")
-            .quote_cut(string(topic, "topic").unwrap_or_default(), 300)
+            .quote_cut(about.unwrap_or_default(), ABOUT_SHOWN)
             .say(if writable {
                 "; you can post there."
             } else if topic["isLocked"] == true {
@@ -899,9 +993,10 @@ fn topics(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolR
             } else {
                 "; you cannot post there."
             });
-        kept.push(
-            json!({ "topic": reference, "title": string(topic, "title"), "canPost": writable }),
-        );
+        kept.push(with_quoted(
+            json!({ "topic": reference, "canPost": writable }),
+            &[("title", title, NAME_SHOWN), ("about", about, ABOUT_SHOWN)],
+        ));
     }
     if topics.is_empty() {
         text.say(" none yet. Start one with tangent_start_topic.");
@@ -929,11 +1024,12 @@ fn say_post(
         return Err(untrusted(effect));
     }
     let author = string(post, "authorRef").unwrap_or_default();
+    let author_name = string(post, "authorName");
     let written = string(post, "createdAt").filter(|at| parse_rfc3339(at).is_some());
     text.say(format!("\n- Post {reference} by "))
-        .quote(string(post, "authorName").unwrap_or_default())
+        .quote_cut(author_name.unwrap_or_default(), NAME_SHOWN)
         .say(" (participant ")
-        .quote(author)
+        .quote_cut(author, NAME_SHOWN)
         .say(")");
     if let Some(at) = written {
         text.say(format!(", {at}"));
@@ -944,21 +1040,27 @@ fn say_post(
     if let Some(reply) = reply {
         text.say(format!(", replying to {reply}"));
     }
-    if post["removed"] == true {
+    let removed = post["removed"] == true;
+    let body = if removed { None } else { string(post, "text") };
+    if removed {
         text.say(": removed by its author.");
     } else {
         text.say(": ");
-        text.quote_cut(string(post, "text").unwrap_or_default(), POST_SHOWN);
+        text.quote_cut(body.unwrap_or_default(), POST_SHOWN);
     }
-    Ok(json!({
-        "post": reference,
-        "author": author,
-        "authorName": string(post, "authorName"),
-        "at": written,
-        "replyTo": reply,
-        "removed": post["removed"] == true,
-        "text": if post["removed"] == true { None } else { string(post, "text") },
-    }))
+    Ok(with_quoted(
+        json!({
+            "post": reference,
+            "at": written,
+            "replyTo": reply,
+            "removed": removed,
+        }),
+        &[
+            ("author", Some(author), NAME_SHOWN),
+            ("authorName", author_name, NAME_SHOWN),
+            ("text", body, POST_SHOWN),
+        ],
+    ))
 }
 
 fn read_topic(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolResult, Failed> {
@@ -989,11 +1091,12 @@ fn read_topic(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<T
         return Err(untrusted(Effect::Read));
     }
     let writable = body["canWrite"] == true;
+    let (title, brief) = (string(&body, "title"), string(&body, "brief"));
     let mut text = Text::default();
     text.say(format!("Topic {topic}: "))
-        .quote(string(&body, "title").unwrap_or_default())
+        .quote_cut(title.unwrap_or_default(), NAME_SHOWN)
         .say(", about ")
-        .quote_cut(string(&body, "brief").unwrap_or_default(), 300)
+        .quote_cut(brief.unwrap_or_default(), ABOUT_SHOWN)
         .say(format!(
             ". {}, oldest first. {}",
             plural(posts.len(), "Post", "Posts"),
@@ -1037,14 +1140,16 @@ fn read_topic(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<T
             "\nTo reply, call tangent_post with topic {topic} and reply_to the reference of the Post you answer."
         ));
     }
-    Ok(text.done(json!({
-        "topic": topic,
-        "title": string(&body, "title"),
-        "canPost": writable,
-        "posts": kept,
-        "cursor": older,
-        "readCursor": read_cursor,
-    })))
+    Ok(text.done(with_quoted(
+        json!({
+            "topic": topic,
+            "canPost": writable,
+            "posts": kept,
+            "cursor": older,
+            "readCursor": read_cursor,
+        }),
+        &[("title", title, NAME_SHOWN), ("about", brief, ABOUT_SHOWN)],
+    )))
 }
 
 fn updates(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolResult, Failed> {
@@ -1101,6 +1206,7 @@ fn post(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolRes
         )
         .into());
     }
+    let made = matches!(arguments.get("request_id"), None | Some(Value::Null));
     let request_id =
         request_id_argument(arguments, &[topic, reply_to.unwrap_or_default(), body_text])?;
     let sent =
@@ -1120,6 +1226,8 @@ fn post(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolRes
     let mut text = Text::default();
     if status == 202 {
         text.say(format!("The Space took the Post {posted} in Topic {topic} and will show it once its stewards approve it (request_id {request_id})."));
+    } else if made {
+        text.say(format!("Posted in Topic {topic} as Post {posted} (request_id {request_id}, made from what you posted). If you posted this same text here before without a request_id, this is that earlier Post and nothing new was posted; pass a request_id of your own to post it again."));
     } else {
         text.say(format!("Posted in Topic {topic} as Post {posted} (request_id {request_id}). Sending the same post with the same request_id again answers with this same Post."));
     }
@@ -1295,11 +1403,15 @@ fn mentionables(
     ));
     let mut kept = Vec::new();
     for target in targets {
+        let (label, insert) = (string(target, "label"), string(target, "insert"));
         text.say("\n- ")
-            .quote(string(target, "label").unwrap_or_default())
+            .quote_cut(label.unwrap_or_default(), NAME_SHOWN)
             .say(", mentioned by writing ")
-            .quote(string(target, "insert").unwrap_or_default());
-        kept.push(json!({ "label": string(target, "label"), "insert": string(target, "insert") }));
+            .quote_cut(insert.unwrap_or_default(), NAME_SHOWN);
+        kept.push(with_quoted(
+            json!({}),
+            &[("label", label, NAME_SHOWN), ("insert", insert, NAME_SHOWN)],
+        ));
     }
     if targets.is_empty() {
         text.say(" nobody yet.");
@@ -1312,7 +1424,7 @@ fn participant(
     arguments: &Map<String, Value>,
 ) -> Result<ToolResult, Failed> {
     let identifier = required(arguments, "participant", 512)?;
-    if identifier.contains(['/', '\\']) || identifier.chars().any(char::is_control) {
+    if !participant_shaped(identifier) {
         return Err(Explained::new(
             INVALID,
             "participant is a participant's reference or handle, as the Space gave it.",
@@ -1327,20 +1439,26 @@ fn participant(
     if posts.len() > PAGE_MOST || string(profile, "participantRef").is_none() {
         return Err(untrusted(Effect::Read));
     }
-    let reference = string(profile, "participantRef").unwrap_or_default();
+    let reference = string(profile, "participantRef");
+    let name = string(profile, "displayName");
+    let handle = string(profile, "handle");
+    let description = string(profile, "description");
     let mut text = Text::default();
     text.say("Participant ")
-        .quote(reference)
+        .quote_cut(reference.unwrap_or_default(), NAME_SHOWN)
         .say(": ")
-        .quote(string(profile, "displayName").unwrap_or_default());
-    if let Some(handle) = string(profile, "handle") {
-        text.say(", handle ").quote(handle);
+        .quote_cut(name.unwrap_or_default(), NAME_SHOWN);
+    if let Some(handle) = handle {
+        text.say(", handle ").quote_cut(handle, NAME_SHOWN);
     }
     if let Some(kind) = string(profile, "classification") {
-        text.say(", a ").quote(kind).say(" participant");
+        text.say(", a ")
+            .quote_cut(kind, NAME_SHOWN)
+            .say(" participant");
     }
-    if let Some(description) = string(profile, "description") {
-        text.say(", who says ").quote_cut(description, 500);
+    if let Some(description) = description {
+        text.say(", who says ")
+            .quote_cut(description, PROFILE_SHOWN);
     }
     text.say(format!(
         ". {}:",
@@ -1350,12 +1468,23 @@ fn participant(
     for post in posts {
         kept.push(say_post(through, &mut text, post, None, Effect::Read)?);
     }
-    Ok(text.done(json!({
-        "participant": reference,
-        "displayName": string(profile, "displayName"),
-        "handle": string(profile, "handle"),
-        "posts": kept,
-    })))
+    Ok(text.done(with_quoted(
+        json!({ "posts": kept }),
+        &[
+            ("participant", reference, NAME_SHOWN),
+            ("displayName", name, NAME_SHOWN),
+            ("handle", handle, NAME_SHOWN),
+            ("description", description, PROFILE_SHOWN),
+        ],
+    )))
+}
+
+/// Whether `identifier` names one participant and nothing else: one path
+/// segment, never only dots, with no control characters.
+fn participant_shaped(identifier: &str) -> bool {
+    !identifier.contains(['/', '\\'])
+        && !identifier.chars().any(char::is_control)
+        && !identifier.chars().all(|character| character == '.')
 }
 
 fn report_post(
@@ -1426,6 +1555,41 @@ mod tests {
             assert!(!tool.title.is_empty() && tool.description.ends_with('.'));
         }
         assert_eq!(TOOLS[0].name, "arrive", "a mind starts by arriving");
+    }
+
+    #[test]
+    fn every_write_says_its_own_unknown_outcome_and_a_read_has_none() {
+        let mut said = Vec::new();
+        for tool in TOOLS {
+            match (tool.effect, tool.unknown) {
+                (Effect::Read, None) => {}
+                (Effect::Write { .. }, Some(sentence)) => {
+                    assert!(sentence.contains("never arrived"), "{}", tool.name);
+                    assert!(!said.contains(&sentence), "{} repeats another", tool.name);
+                    said.push(sentence);
+                }
+                _ => panic!("{} says the wrong unknown outcome", tool.name),
+            }
+        }
+        let join = tool("join").expect("join");
+        let lost = in_its_words(join, wire::lost(join.effect).into());
+        let Failed::Ended(explained) = lost else {
+            panic!("ended");
+        };
+        assert_eq!(explained.outcome, Outcome::Unknown);
+        assert!(explained.sentence.contains("join this Tangent"));
+        assert!(!explained.sentence.contains("post"));
+        let refused = Explained::new(Outcome::Refused, wire::PERMISSION_DENIED);
+        assert_eq!(in_its_words(join, refused.into()), Failed::Ended(refused));
+    }
+
+    #[test]
+    fn a_participant_is_one_segment_and_never_only_dots() {
+        assert!(participant_shaped("prt_2"));
+        assert!(participant_shaped("bea.example.test"));
+        for climbing in [".", "..", "...", "a/b", "a\\b", "a\nb"] {
+            assert!(!participant_shaped(climbing), "{climbing:?}");
+        }
     }
 
     #[test]

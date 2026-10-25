@@ -78,7 +78,7 @@ pub const UNREACHABLE: &str = "The lobby may not reach this Space's address, so 
 pub const UNAVAILABLE: &str = "The Space cannot answer right now. Try again in a little while.";
 /// A Space that does not take the token even after the connection was
 /// established again.
-pub const NOT_TAKEN: &str = "The Space does not take this companion's credential, even one it just issued. It may have suspended the companion; the sponsor can see the connection on the manager page.";
+pub const NOT_TAKEN: &str = "The Space does not take this companion's credential, even one it just issued, so nothing was done. It may have suspended the companion there; only the Space's stewards can say.";
 
 /// What a lost answer means for a tool of `effect`.
 pub fn lost(effect: Effect) -> Explained {

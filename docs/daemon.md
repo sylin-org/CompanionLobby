@@ -625,13 +625,17 @@ cannot use is absent, not present and refusing. `reach` reports the
 companion, each service it reaches with the labels and addresses of its
 connections, and the live tool set, so a mind can rely on it even when its
 host ignores tool list changes. Its text says who the companion is, then for
-each service where it is, by the sponsor's names, the tool to start with,
-the service's first, and what else it reads and writes there. `initialize` declares `listChanged: true`,
+each service where it is, by the sponsor's names, whether the companion
+can read or write there and the tool to start with, the service's first;
+the whole tool list is its structured `tools`. `initialize` declares `listChanged: true`,
 and the shim relays a `notifications/tools/list_changed` each time the
 companion's connections change.
 
 A tool call answers the tool's result, whose text marks third-party passages
-as quoted strings, or an error result (`isError: true`) whose text is the
+as quoted strings, with its structured content when that serializes within
+the same 32 KiB budget as the text; a result whose structured content is
+larger leaves it out and says so at the end of its text. Or it answers an
+error result (`isError: true`) whose text is the
 adapter's or the lobby's own sentence for the outcome and whose
 `structuredContent` is `{"outcome": "<code>"}`.
 

@@ -379,6 +379,53 @@ fn a_token_the_space_stops_taking_is_exchanged_again_once_and_kept() {
     install.stop();
 }
 
+#[test]
+fn a_post_of_a_mebibyte_reaches_the_mind_cut_short_and_quoted_in_text_and_structure() {
+    let world = world();
+    let mallory = world
+        .space
+        .add_participant("Mallory", "mallory.example.test");
+    let long = "\u{e9}".repeat(512 * 1024);
+    let planted = world.space.add_post("welcome", &mallory, &long, None);
+    let planted = world.space.post_ref(&planted);
+    let (install, _, mut peer) = connected(&world, "space-long");
+    let read = call(
+        &mut peer,
+        40,
+        "tangent_read_topic",
+        json!({ "topic": world.welcome }),
+    );
+    assert_eq!(read["result"]["isError"], false, "{read}");
+    let text = said(&read);
+    assert!(text.len() < 16 * 1024, "{} bytes of text", text.len());
+    assert!(text.contains("(cut short here)"));
+    let structured = &read["result"]["structuredContent"];
+    let size = structured.to_string().len();
+    assert!(size < 16 * 1024, "{size} bytes of structured content");
+    let posts = structured["posts"].as_array().expect("posts");
+    let cut = posts
+        .iter()
+        .find(|post| post["post"] == planted.as_str())
+        .expect("the long Post");
+    assert_eq!(
+        cut["quoted"]["text"]
+            .as_str()
+            .expect("quoted")
+            .chars()
+            .count(),
+        lobby_service_tangent::tools::POST_SHOWN
+    );
+    assert_eq!(cut["cutShort"], json!(["text"]));
+    assert_eq!(cut["quoted"]["authorName"], "Mallory");
+    for post in posts {
+        assert!(
+            post.get("text").is_none() && post.get("authorName").is_none(),
+            "what other people wrote sits only under quoted: {post}"
+        );
+    }
+    install.stop();
+}
+
 /// The recorded frame with the Space's origin of the walk it was recorded
 /// on replaced by `origin`.
 fn moved(frame: &Value, recorded: &str, origin: &str) -> Value {

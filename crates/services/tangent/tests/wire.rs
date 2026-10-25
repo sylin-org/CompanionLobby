@@ -124,7 +124,12 @@ fn a_write_whose_answer_is_lost_is_unknown_and_a_lost_read_is_unavailable() {
     match edited {
         Err(Failed::Ended(explained)) => {
             assert_eq!(explained.outcome, Outcome::Unknown);
-            assert_eq!(explained.sentence, wire::WRITE_UNKNOWN);
+            assert_eq!(
+                Some(explained.sentence),
+                tools::tool("edit_post").and_then(|tool| tool.unknown),
+                "said in the edit's own nouns"
+            );
+            assert!(explained.sentence.contains("edited this Post"));
         }
         other => panic!("a lost edit is unknown, not {other:?}"),
     }

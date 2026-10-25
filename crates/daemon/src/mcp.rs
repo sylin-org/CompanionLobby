@@ -220,14 +220,30 @@ fn tools_call(
     success(id, result_json(&answer, false))
 }
 
+/// The most bytes of structured content one result gives the mind, as
+/// serialized JSON: the same budget as its text.
+pub const STRUCTURED_BUDGET: usize = ToolResult::RENDERED_BUDGET;
+
+/// What ends the text of a result whose structured content was over
+/// [`STRUCTURED_BUDGET`], which is then left out.
+pub const STRUCTURED_LEFT_OUT: &str = " [Companion Lobby left out this result's structured form, which was over its output budget; this text holds the whole answer.]";
+
 /// The MCP result of a tool's answer: its rendered text, and its structured
-/// content when it has one.
+/// content when it has one and it fits within [`STRUCTURED_BUDGET`].
 fn result_json(answer: &ToolResult, is_error: bool) -> Value {
+    let mut text = answer.rendered();
+    let structured = answer.structured.as_ref().filter(|structured| {
+        let fits = structured.to_string().len() <= STRUCTURED_BUDGET;
+        if !fits {
+            text.push_str(STRUCTURED_LEFT_OUT);
+        }
+        fits
+    });
     let mut result = json!({
-        "content": [{ "type": "text", "text": answer.rendered() }],
+        "content": [{ "type": "text", "text": text }],
         "isError": is_error,
     });
-    if let Some(structured) = &answer.structured {
+    if let Some(structured) = structured {
         result["structuredContent"] = structured.clone();
     }
     result
@@ -360,6 +376,27 @@ mod tests {
         let bad = ask(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"reach","arguments":[]}}))
             .expect("bad");
         assert_eq!(bad["error"]["code"], INVALID_PARAMS);
+    }
+
+    #[test]
+    fn structured_content_over_its_budget_is_left_out_and_the_text_says_so() {
+        let small = ToolResult {
+            text: vec![lobby_contracts::Passage::Authored("Read.".to_owned())],
+            structured: Some(json!({ "posts": ["a"] })),
+        };
+        let kept = result_json(&small, false);
+        assert_eq!(kept["structuredContent"]["posts"][0], "a");
+        assert_eq!(kept["content"][0]["text"], "Read.");
+
+        let large = ToolResult {
+            text: vec![lobby_contracts::Passage::Authored("Read.".to_owned())],
+            structured: Some(json!({ "posts": ["x".repeat(STRUCTURED_BUDGET)] })),
+        };
+        let left = result_json(&large, false);
+        assert!(left.get("structuredContent").is_none(), "{left}");
+        let text = left["content"][0]["text"].as_str().expect("text");
+        assert_eq!(text, format!("Read.{STRUCTURED_LEFT_OUT}"));
+        assert!(left.to_string().len() < 2 * 1024);
     }
 
     #[test]

@@ -89,7 +89,11 @@ this connection's Space exactly and have its kind's number of segments of
 `[a-z0-9_-]`; a reference of another Space never becomes a request. Names,
 titles, descriptions, Post text, excerpts and the Space's cursors arrive
 quoted. Pages hold at most 10 items and Topic reads 10 Posts unless the mind
-asks for up to 25; a Post's text is cut at 2,000 characters.
+asks for up to 25; a Post's text is cut at 2,000 characters, a name, title,
+handle or participant reference at 200, and a description, brief or excerpt
+at 300. The structured answer keeps the same cuts: what other people wrote
+sits only under each item's `quoted` object, and `cutShort` names the
+fields that were cut.
 
 | Tool | Route | Effect | Needs |
 | --- | --- | --- | --- |
@@ -113,14 +117,23 @@ asks for up to 25; a Post's text is cut at 2,000 characters.
 A connection offers the tools its grants cover. A post, a new Topic and a
 report carry a `requestId`: the mind's own `request_id`, or one made from
 the content when it names none, so sending the same write again answers
-with what the first one made. Every write but a `DELETE` carries a JSON body
+with what the first one made. A post whose request id was made from its
+content says so: the same text posted in the same Topic before answers as
+that earlier Post, and a request id of the mind's own posts it again. Every write but a `DELETE` carries a JSON body
 and says so. Each answer is checked against its ask: the arriving
 participant is the connection's own, a page stays within its bound and its
 Tangent or Topic, a write answers with the request id it was sent, an edit
 with the Post it edited.
 
 Moderation and management tools are not offered: the connection asks for
-the Space's default grants, which do not include `manage`.
+the Space's default grants, which do not include `manage`, and arriving
+says what the companion may do through the tools it has, reading and
+posting, whatever else the Space allows.
+
+Each establishment, a 401's included, leaves the Space a new participant
+credential named `Companion Lobby` that lives 7 days; the lobby keeps only
+the newest. Revoking the connection ends the lobby's copy; the Space's
+credentials end when they expire.
 
 ## Walking it against the fakes
 
