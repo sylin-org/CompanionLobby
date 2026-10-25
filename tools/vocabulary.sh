@@ -3,8 +3,10 @@
 #
 # Searches crates/, docs/, README.md and .github/ with ripgrep for every rule in
 # tools/vocabulary.rules, skipping each rule's allowed paths and the justified
-# exceptions in tools/vocabulary.allow. Also refuses forbidden file names and
-# any Cargo.toml that reaches outside the workspace.
+# exceptions in tools/vocabulary.allow. A rule whose pattern holds a space is
+# also searched across line breaks, so a phrase wrapped onto the next line, or
+# the next line of a comment, is found too. Also refuses forbidden file names
+# and any Cargo.toml that reaches outside the workspace.
 #
 # Usage: tools/vocabulary.sh [repository-root]
 # Exit status: 0 clean, 1 violations found, 2 the lint itself could not run.
@@ -54,10 +56,36 @@ while IFS="$tab" read -r apath arule ajustify || [ -n "$apath" ]; do
     fi
 done <"$allow"
 
-# Content rules.
-while IFS="$tab" read -r id sensitivity regex allowed <&3 || [ -n "$id" ]; do
-    case "$id" in '' | '#'*) continue ;; esac
-    set -- --no-heading --line-number --with-filename --color never --hidden -g '!target/**'
+# What a space in a rule's pattern also matches: a line break, with the next
+# line's indentation and comment marker.
+wrap='(?:[ ]|[ \t]*\r?\n[ \t]*(?:(?://[/!]?|#+|\*|>)[ \t]*)?)'
+
+# The pattern with every space outside a character class matching a line
+# break too, or nothing when it holds no such space.
+wrapped_pattern() {
+    PATTERN=$1 WRAP=$wrap awk 'BEGIN {
+        regex = ENVIRON["PATTERN"]; wrap = ENVIRON["WRAP"]
+        out = ""; depth = 0; escaped = 0; spaced = 0
+        for (i = 1; i <= length(regex); i++) {
+            c = substr(regex, i, 1)
+            if (escaped) { out = out c; escaped = 0; continue }
+            if (c == "\\") { out = out c; escaped = 1; continue }
+            if (c == "[") depth++
+            else if (c == "]" && depth > 0) depth--
+            if (c == " " && depth == 0) { out = out wrap; spaced = 1 }
+            else out = out c
+        }
+        if (spaced) print out
+    }'
+}
+
+# Searches the scope for the rule being read, with the pattern $1 and the
+# rest of the arguments passed to ripgrep first, skipping the rule's allowed
+# paths and its exceptions.
+search() {
+    pattern=$1
+    shift
+    set -- "$@" --no-heading --line-number --with-filename --color never --hidden -g '!target/**'
     if [ "$sensitivity" = "i" ]; then
         set -- "$@" --ignore-case
     else
@@ -78,9 +106,14 @@ while IFS="$tab" read -r id sensitivity regex allowed <&3 || [ -n "$id" ]; do
         fi
     done <"$allow"
     # shellcheck disable=SC2086 # scope is a space-separated list of fixed paths
-    set -- "$@" -e "$regex" -- $scope
+    rg "$@" -e "$pattern" -- $scope
+}
+
+# Content rules.
+while IFS="$tab" read -r id sensitivity regex allowed <&3 || [ -n "$id" ]; do
+    case "$id" in '' | '#'*) continue ;; esac
     status=0
-    found=$(rg "$@") || status=$?
+    found=$(search "$regex") || status=$?
     if [ "$status" -eq 0 ]; then
         printf '%s\n' "$found" | while IFS= read -r line; do
             printf '%s: %s\n' "$id" "$line"
@@ -89,6 +122,34 @@ while IFS="$tab" read -r id sensitivity regex allowed <&3 || [ -n "$id" ]; do
     elif [ "$status" -ne 1 ]; then
         echo "vocabulary: ripgrep failed on rule $id" >&2
         exit 2
+    fi
+    wrapped=$(wrapped_pattern "$regex")
+    [ -n "$wrapped" ] || continue
+    # The same search across line breaks. Each line of a match that spans
+    # lines is a piece the rule alone does not match; a match on one line
+    # was reported above.
+    if [ "$sensitivity" = "i" ]; then
+        case_flag=--ignore-case
+    else
+        case_flag=--case-sensitive
+    fi
+    status=0
+    pieces=$(search "$wrapped" --multiline --only-matching) || status=$?
+    if [ "$status" -gt 1 ]; then
+        echo "vocabulary: ripgrep failed on rule $id across lines" >&2
+        exit 2
+    fi
+    [ "$status" -eq 0 ] || continue
+    spanned=$(printf '%s\n' "$pieces" | while IFS= read -r piece; do
+        text=${piece#*:}
+        text=${text#*:}
+        if ! printf '%s\n' "$text" | rg --quiet "$case_flag" -e "$regex"; then
+            printf '%s: %s\n' "$id" "$piece"
+        fi
+    done)
+    if [ -n "$spanned" ]; then
+        printf '%s\n' "$spanned"
+        violations=$((violations + $(printf '%s\n' "$spanned" | wc -l)))
     fi
 done 3<"$rules"
 

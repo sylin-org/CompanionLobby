@@ -64,10 +64,11 @@ cannot be done just now (the Space or the account's server is unavailable
 or asks for fewer requests) and the token has not ended, the call goes on
 with the token it has. A call the Space answers 401 establishes it again once, with a fresh proof, and is
 made once more. The lobby keeps the new token only while the connection is
-still the one the call began on. An account the credential adapter can no
-longer prove leaves the credential needing a sign-in, which is the
-sponsor's to fix; a Space that refuses even a token it just issued is said
-to the mind as the Space's refusal.
+still the one the call began on. An account the credential adapter cannot
+prove any more leaves the credential needing a sign-in, which is the
+sponsor's to fix, and the call answers that the account needs the sponsor
+to sign it in again, having done nothing at the Space; a Space that refuses
+even a token it just issued is said to the mind as the Space's refusal.
 
 | Answer | Outcome | What the mind reads |
 | --- | --- | --- |

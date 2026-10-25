@@ -5,8 +5,10 @@ Vocabulary lint for Companion Lobby (PowerShell twin of tools/vocabulary.sh).
 .DESCRIPTION
 Searches crates/, docs/, README.md and .github/ with ripgrep for every rule in
 tools/vocabulary.rules, skipping each rule's allowed paths and the justified
-exceptions in tools/vocabulary.allow. Also refuses forbidden file names and any
-Cargo.toml that reaches outside the workspace.
+exceptions in tools/vocabulary.allow. A rule whose pattern holds a space is
+also searched across line breaks, so a phrase wrapped onto the next line, or
+the next line of a comment, is found too. Also refuses forbidden file names and
+any Cargo.toml that reaches outside the workspace.
 
 Exit status: 0 clean, 1 violations found, 2 the lint itself could not run.
 
@@ -29,6 +31,28 @@ $allowPath = Join-Path $here 'vocabulary.allow'
 function Fail-Lint([string] $message) {
     [Console]::Error.WriteLine("vocabulary: $message")
     exit 2
+}
+
+# What a space in a rule's pattern also matches: a line break, with the next
+# line's indentation and comment marker.
+$wrap = '(?:[ ]|[ \t]*\r?\n[ \t]*(?:(?://[/!]?|#+|\*|>)[ \t]*)?)'
+
+# The pattern with every space outside a character class matching a line
+# break too, or nothing when it holds no such space.
+function Get-WrappedPattern([string] $regex) {
+    $out = New-Object System.Text.StringBuilder
+    $depth = 0
+    $escaped = $false
+    $spaced = $false
+    foreach ($character in $regex.ToCharArray()) {
+        if ($escaped) { [void] $out.Append($character); $escaped = $false; continue }
+        if ($character -eq '\') { [void] $out.Append($character); $escaped = $true; continue }
+        if ($character -eq '[') { $depth++ }
+        elseif ($character -eq ']' -and $depth -gt 0) { $depth-- }
+        if ($character -eq ' ' -and $depth -eq 0) { [void] $out.Append($wrap); $spaced = $true }
+        else { [void] $out.Append($character) }
+    }
+    if ($spaced) { $out.ToString() } else { $null }
 }
 
 function Read-Table([string] $path) {
@@ -75,6 +99,8 @@ try {
         foreach ($entry in $allow) {
             if ($entry.Count -ge 2 -and $entry[1] -eq $id) { $rgArgs += @('-g', "!$($entry[0])") }
         }
+        $wrapped = Get-WrappedPattern $regex
+        $wrapArgs = $rgArgs + @('--multiline', '--only-matching', '-e', $wrapped, '--') + $scope
         $rgArgs += @('-e', $regex, '--') + $scope
         $found = @(& rg @rgArgs)
         if ($LASTEXITCODE -eq 0) {
@@ -82,6 +108,19 @@ try {
         }
         elseif ($LASTEXITCODE -ne 1) {
             Fail-Lint "ripgrep failed on rule $id"
+        }
+        if (-not $wrapped) { continue }
+        # The same search across line breaks. Each line of a match that
+        # spans lines is a piece the rule alone does not match; a match on
+        # one line was reported above.
+        $pieces = @(& rg @wrapArgs)
+        if ($LASTEXITCODE -gt 1) { Fail-Lint "ripgrep failed on rule $id across lines" }
+        $caseArg = if ($sensitivity -eq 'i') { '--ignore-case' } else { '--case-sensitive' }
+        foreach ($piece in $pieces) {
+            $text = ($piece -split ':', 3)[2]
+            $null = $text | & rg --quiet $caseArg -e $regex
+            if ($LASTEXITCODE -eq 1) { $violations.Add("${id}: $piece") }
+            elseif ($LASTEXITCODE -ne 0) { Fail-Lint "ripgrep failed on rule $id across lines" }
         }
     }
 
