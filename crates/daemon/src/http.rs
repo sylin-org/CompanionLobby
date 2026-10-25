@@ -200,6 +200,9 @@ pub fn run(registry: Registry) -> Result<(), String> {
         format!("{problem} (in {shown})")
     })?;
     lobby
+        .end_unfinished_renewals()
+        .map_err(|refusal| format!("{} (in {shown})", refusal.message))?;
+    lobby
         .sweep_keyring()
         .map_err(|refusal| format!("{} (in {shown})", refusal.message))?;
     let secret = attach_secret(&dir, &lobby)
@@ -290,7 +293,11 @@ async fn bind(port: u16) -> Result<TcpListener, String> {
 /// finishes on its own, and a reader that stopped reading leaves frames the
 /// connection can never flush, so once a stop is requested such a connection
 /// is dropped rather than awaited.
+///
+/// Beside the listener a loop keeps the lobby's credentials alive, and a
+/// stop waits for a renewal under way to finish.
 pub async fn serve(listener: TcpListener, app: Arc<App>) {
+    let keeping = tokio::spawn(keep_alive(app.clone()));
     let graceful = GracefulShutdown::new();
     loop {
         tokio::select! {
@@ -334,7 +341,35 @@ pub async fn serve(listener: TcpListener, app: Arc<App>) {
     {
         trace::line("drain limit reached; exiting with requests still open");
     }
+    if tokio::time::timeout(DRAIN_LIMIT, keeping).await.is_err() {
+        trace::line("drain limit reached; exiting while a credential was renewing");
+    }
     drop(listener);
+}
+
+/// Keeps the lobby's credentials alive until a stop is asked for: one pass
+/// at a time on a blocking thread, then a pause as long as the lobby says,
+/// cut short when a credential changes. A pass under way when a stop is
+/// asked for finishes before this returns, so a stop never cuts a renewal
+/// off between its provider's answer and its commit.
+async fn keep_alive(app: Arc<App>) {
+    let mut changes = app.lobby.renewal_changes();
+    let mut stopped = app.stopped.subscribe();
+    loop {
+        let passing = app.clone();
+        let pause = match tokio::task::spawn_blocking(move || passing.lobby.keep_alive()).await {
+            Ok(pause) => pause,
+            Err(_) => {
+                trace::line("a pass keeping the credentials alive failed; the next one runs later");
+                crate::domain::RENEWAL_RETRY
+            }
+        };
+        tokio::select! {
+            () = tokio::time::sleep(pause) => {}
+            changed = changes.changed() => if changed.is_err() { return },
+            () = stop_requested(&mut stopped) => return,
+        }
+    }
 }
 
 type Reply = Response<BoxBody<Bytes, Infallible>>;
@@ -559,7 +594,9 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
                 Err(refused) => refused.reply(),
             }
         }
-        (&Method::GET, SIGN_IN_DONE) => sign_in_done(&query),
+        (&Method::GET, SIGN_IN_DONE) => {
+            blocking(app, move |lobby| sign_in_done(lobby, &query)).await
+        }
         (&Method::GET, returned) if sign_in_return_in(returned).is_some() => {
             let kind = sign_in_return_in(returned)
                 .unwrap_or_else(|| unreachable!("checked above"))
@@ -573,9 +610,12 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
             match operator_body(app, request).await {
                 Ok(_) => {
                     blocking(app, move |lobby| match lobby.revoke_credential(id) {
-                        Ok(credential) => json_reply(
+                        Ok(revoked) => json_reply(
                             StatusCode::OK,
-                            json!({ "credential": credential_json(&credential) }),
+                            json!({
+                                "credential": credential_json(&revoked.credential),
+                                "provider": revoked.provider.code(),
+                            }),
                         ),
                         Err(refusal) => refusal_reply(&refusal),
                     })
@@ -1126,43 +1166,63 @@ fn begin_sign_in(lobby: &Lobby, origin: &str, body: &[u8]) -> Reply {
 /// Completes a sign-in from what the provider sent back, then sends the
 /// browser straight on to the page that says how it ended, so the code and
 /// the `state` leave the address bar and the history at once. The redirect
-/// carries only the outcome's wire name.
+/// carries only the outcome's wire name and, when the lobby knew the
+/// sign-in, the id of its companion, whose page the sponsor goes back to.
 fn complete_sign_in(lobby: &Lobby, kind: &str, pairs: Vec<(String, String)>) -> Reply {
-    let outcome = match lobby.complete_sign_in(kind, pairs) {
+    let completed = lobby.complete_sign_in(kind, pairs);
+    let outcome = match &completed.result {
         Ok(credential) => {
             trace::line(&format!("credential {} signed in", credential.id));
             Outcome::Done
         }
         Err(refusal) => refusal.outcome,
     };
+    let companion = completed
+        .companion
+        .map_or_else(String::new, |id| format!("&companion={id}"));
     let mut reply = empty_reply(StatusCode::SEE_OTHER);
-    if let Ok(value) = HeaderValue::from_str(&format!("{SIGN_IN_DONE}?outcome={}", outcome.code()))
-    {
+    if let Ok(value) = HeaderValue::from_str(&format!(
+        "{SIGN_IN_DONE}?outcome={}{companion}",
+        outcome.code()
+    )) {
         reply.headers_mut().insert(header::LOCATION, value);
     }
     reply
 }
 
 /// The page that says how a sign-in ended, from the outcome's wire name
-/// alone, in the manager page's own stylesheet and with one way back to
-/// the lobby; the companion's page says more. It loads nothing else.
-fn sign_in_done(query: &str) -> Reply {
-    let outcome = query_pairs(query)
-        .into_iter()
-        .find(|(name, _)| name == "outcome")
-        .map(|(_, value)| value);
-    let (status, said) = match outcome.as_deref() {
+/// alone, in the manager page's own stylesheet, with one action: back to
+/// the companion's own page when the lobby knows the companion, or to the
+/// lobby. It loads nothing else.
+fn sign_in_done(lobby: &Lobby, query: &str) -> Reply {
+    let pairs = query_pairs(query);
+    let value = |wanted: &str| {
+        pairs
+            .iter()
+            .find(|(name, _)| name == wanted)
+            .map(|(_, value)| value.clone())
+    };
+    let companion = value("companion")
+        .and_then(|id| CompanionId::parse(&id))
+        .and_then(|id| {
+            lobby
+                .companions()
+                .into_iter()
+                .find(|view| view.record.companion.id == id)
+        })
+        .map(|view| view.record.companion);
+    let (status, said) = match value("outcome").as_deref() {
         Some("done") => (
             StatusCode::OK,
             "The account is signed in. The companion's page in the lobby shows it.",
         ),
         Some("not_found") => (
             StatusCode::NOT_FOUND,
-            "Nothing was signed in: the lobby was not waiting for this sign-in. It may have been cancelled, expired or already finished; the companion's page says which.",
+            "The lobby does not remember a sign-in waiting for this answer, so this answer signed nothing in. It may have been cancelled, expired or finished already; the companion's page shows what is signed in.",
         ),
         Some("conflict") => (
             StatusCode::CONFLICT,
-            "Nothing was signed in: that account is signed in for another companion, or this companion already holds an account of this kind.",
+            "Nothing was signed in: that account is signed in for another companion, this companion already holds an account of this kind, or it waits for another account to sign in again.",
         ),
         Some("temporarily_unavailable" | "rate_limited") => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1177,9 +1237,18 @@ fn sign_in_done(query: &str) -> Reply {
             "Nothing was signed in. Start the sign-in again from the companion's page.",
         ),
     };
+    let (back, back_label) = match &companion {
+        Some(companion) => (
+            format!("/companion/{}", companion.id),
+            format!("Back to {}", companion.display_name),
+        ),
+        None => ("/".to_owned(), "Back to the lobby".to_owned()),
+    };
     let page = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">         <meta name=\"referrer\" content=\"no-referrer\">         <meta name=\"color-scheme\" content=\"dark\">         <title>Companion Lobby</title><link rel=\"stylesheet\" href=\"/manager.css\"></head>         <body><main><h1>Sign-in</h1><p class=\"lede\" role=\"status\">{}</p>         <a class=\"button primary\" href=\"/\">Back to the lobby</a></main></body></html>",
-        html_escape(said)
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><meta name=\"referrer\" content=\"no-referrer\"><meta name=\"color-scheme\" content=\"dark\"><title>Companion Lobby</title><link rel=\"stylesheet\" href=\"/manager.css\"></head><body><main><h1>Sign-in</h1><p class=\"lede\" role=\"status\">{}</p><a class=\"button primary\" href=\"{}\">{}</a></main></body></html>",
+        html_escape(said),
+        html_escape(&back),
+        html_escape(&back_label)
     );
     let mut reply = with_hygiene(Response::new(Full::new(Bytes::from(page)).boxed()), status);
     let headers = reply.headers_mut();
@@ -1558,6 +1627,10 @@ struct Attached<'a> {
 impl mcp::Toolbox for Attached<'_> {
     fn reached(&self) -> Vec<Reached> {
         self.lobby.reached(self.attachment.companion)
+    }
+
+    fn waiting(&self) -> Vec<(lobby_contracts::ServiceName, lobby_contracts::Label)> {
+        self.lobby.waiting(self.attachment.companion)
     }
 
     fn call(

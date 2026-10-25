@@ -51,6 +51,15 @@
 //!    sees is the first handle the document claims that resolves back to
 //!    `sub`; an account with no such handle is labelled by `sub` itself.
 //!
+//! Signing an account in again, when its credential needs it, starts from
+//! the credential's own material: the account is its DID, resolved as if the
+//! sponsor had typed it, so only that account can complete the sign-in.
+//!
+//! A session is kept alive by refreshing it a minute before its access
+//! token expires, and revoked at the authorization server when the sponsor
+//! revokes the credential and the server offers revocation; see
+//! [`renewal`] for the order a refresh follows and what each answer means.
+//!
 //! Minting authorizations for services through the PDS joins with the first
 //! service adapter that asks for one; until then every ask is refused as
 //! unsupported before the material is read or anything is reached.
@@ -64,6 +73,7 @@ pub mod dpop;
 pub mod flight;
 pub mod identity;
 pub mod material;
+pub mod renewal;
 pub mod server;
 pub mod tokens;
 pub mod wire;
@@ -72,17 +82,18 @@ use std::time::{Duration, Instant};
 
 use lobby_contracts::{
     AccountKey, AccountLabel, Address, Authorization, AuthorizationAsk, CredentialAdapter,
-    MaterialSlot, Outcome, ProviderKind, Secret, SignInRequest, SignInReturn, SignInStart,
-    SignedIn,
+    Freshness, MaterialSlot, Outcome, ProviderKind, Revocation, Secret, SignInRequest,
+    SignInReturn, SignInStart, SignedIn,
 };
 use lobby_outbound::Outbound;
 use serde_json::Value;
 
-use crate::codec::{base64url, is_token, percent_encode, random_token, sha256};
+use crate::codec::{base64url, is_token, now_secs, percent_encode, random_token, sha256};
 use crate::dpop::DpopKey;
 use crate::flight::{Flight, Flights};
 use crate::identity::Named;
 use crate::material::Material;
+use crate::renewal::{Locks, Nonces, Renewer};
 use crate::tokens::{TOKEN_LIMIT, Tokens};
 use crate::wire::{json_object, proved_post, status_outcome};
 
@@ -110,6 +121,8 @@ pub struct Atproto {
     world: World,
     outbound: Outbound,
     flights: Flights,
+    locks: Locks,
+    nonces: Nonces,
 }
 
 impl std::fmt::Debug for Atproto {
@@ -133,6 +146,17 @@ impl Atproto {
             world,
             outbound,
             flights: Flights::new(time_limit),
+            locks: Locks::default(),
+            nonces: Nonces::default(),
+        }
+    }
+
+    fn renewer(&self) -> Renewer<'_> {
+        Renewer {
+            outbound: &self.outbound,
+            policy: self.world.policy,
+            locks: &self.locks,
+            nonces: &self.nonces,
         }
     }
 
@@ -194,6 +218,15 @@ impl Atproto {
             &flight.key,
             flight.nonce.clone(),
         )?;
+        // The session's first refresh starts from the nonce the server
+        // issued last to its key.
+        if let Some(nonce) = &answered.nonce {
+            self.nonces.keep(
+                flight.token.origin.as_str(),
+                &flight.key.thumbprint(),
+                nonce,
+            );
+        }
         let answer = json_object(&answered.response).map_err(|outcome| match outcome {
             Outcome::NotFound => Outcome::Refused,
             other => other,
@@ -215,7 +248,16 @@ impl CredentialAdapter for Atproto {
         if self.flights.waits(&request.state) {
             return Err(Outcome::Conflict);
         }
-        let (authserver, expected) = self.destination(&request.hint)?;
+        // Signing in again names the account the material holds, and
+        // nothing the sponsor typed.
+        let named = match &request.again {
+            Some(again) => Material::decode(again, self.world.policy)
+                .ok_or(Outcome::Refused)?
+                .subject
+                .clone(),
+            None => request.hint.clone(),
+        };
+        let (authserver, expected) = self.destination(&named)?;
         let endpoints = server::endpoints(&self.outbound, &authserver)?;
         let verifier = Secret::new(random_token()?);
         let challenge = base64url(&sha256(verifier.expose().as_bytes()));
@@ -312,6 +354,8 @@ impl CredentialAdapter for Atproto {
         let material = Material {
             subject,
             access: tokens.access,
+            access_expires_at: now_secs()
+                .saturating_add(i64::try_from(tokens.expires_in).unwrap_or(i64::MAX)),
             refresh: tokens.refresh,
             pds: document.pds,
             authserver: flight.authserver,
@@ -327,6 +371,10 @@ impl CredentialAdapter for Atproto {
         })
     }
 
+    fn cancel_sign_in(&self, request: &SignInRequest) {
+        drop(self.flights.take(&request.state));
+    }
+
     fn authorize(
         &self,
         _slot: &dyn MaterialSlot,
@@ -335,5 +383,13 @@ impl CredentialAdapter for Atproto {
         // No ask is answered yet; each is refused before the material is
         // read or anything is reached.
         Err(Outcome::Unsupported)
+    }
+
+    fn renew(&self, slot: &dyn MaterialSlot) -> Result<Freshness, Outcome> {
+        self.renewer().renew(slot)
+    }
+
+    fn revoke(&self, slot: &dyn MaterialSlot) -> Result<Revocation, Outcome> {
+        self.renewer().revoke(slot)
     }
 }

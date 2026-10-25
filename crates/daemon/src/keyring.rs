@@ -33,6 +33,14 @@
 //! before the commit that names its record, so a daemon that stops between
 //! the two leaves a file no record names; the daemon sweeps such files when
 //! it starts.
+//!
+//! A credential being renewed has a rotating mark, `<credential
+//! id>.rotating`, written and synced before its adapter spends the
+//! provider's single-use secret and deleted only once the new material is
+//! kept. A mark the daemon finds when it starts is a renewal that never
+//! finished: the provider may have rotated the secret the material still
+//! holds, so the credential needs signing in again and its material is
+//! never offered to the provider for renewal again.
 
 use std::fmt;
 use std::io;
@@ -298,6 +306,61 @@ pub fn write_issued(dir: &Path, id: ConnectionId, issued: &SealedIssued) -> io::
 pub fn read_issued(dir: &Path, id: ConnectionId) -> io::Result<SealedIssued> {
     let sealed = std::fs::read(dir.join(issued_file(id)))?;
     unseal_bytes(&sealed, Kept::Issued).map(SealedIssued::new)
+}
+
+/// The suffix of a credential's rotating mark.
+pub const ROTATING_SUFFIX: &str = ".rotating";
+
+/// The file name of a credential's rotating mark.
+pub fn rotating_file(id: CredentialId) -> String {
+    format!("{id}{ROTATING_SUFFIX}")
+}
+
+/// Marks, durably, that the provider's single-use secret in the credential
+/// `id`'s material is about to be spent: the mark is on the disk, and
+/// synced, before this returns. It holds no secret.
+pub fn mark_rotating(dir: &Path, id: CredentialId) -> io::Result<()> {
+    atomic_write(&dir.join(rotating_file(id)), b"rotating\n")
+}
+
+/// Clears the credential `id`'s rotating mark; one already gone is not an
+/// error.
+pub fn unmark_rotating(dir: &Path, id: CredentialId) -> io::Result<()> {
+    remove_kept(dir, &rotating_file(id))
+}
+
+/// Whether `name` is a rotating mark, or a temporary file written on the
+/// way to one.
+pub fn is_rotating_file(name: &str) -> bool {
+    let marked = |name: &str| {
+        name.strip_suffix(ROTATING_SUFFIX)
+            .is_some_and(|id| CredentialId::parse(id).is_some())
+    };
+    marked(name)
+        || name
+            .strip_suffix(".tmp")
+            .and_then(|rest| rest.rsplit_once('.'))
+            .is_some_and(|(file, _)| marked(file) && crate::store::is_temporary_of(name, file))
+}
+
+/// The credentials whose rotating mark is in `dir`: each one's renewal was
+/// under way when a daemon stopped.
+pub fn rotating_marks(dir: &Path) -> io::Result<Vec<CredentialId>> {
+    let mut marked = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if let Some(id) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_suffix(ROTATING_SUFFIX))
+            .and_then(CredentialId::parse)
+            && entry.file_type()?.is_file()
+        {
+            marked.push(id);
+        }
+    }
+    marked.sort();
+    Ok(marked)
 }
 
 /// Deletes a file the keyring kept; one already gone is not an error.

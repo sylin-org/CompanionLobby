@@ -124,15 +124,21 @@ fn with_at(schema: &Value, service: &ServiceName, labels: &[&str]) -> Value {
     schema
 }
 
-/// The answer to `reach` for `companion`, which reaches `reached`.
-pub fn reach(companion: &Companion, reached: &[Reached]) -> ToolResult {
+/// The answer to `reach` for `companion`, which reaches `reached` and whose
+/// connections `waiting` wait for the sponsor to sign their account in
+/// again.
+pub fn reach(
+    companion: &Companion,
+    reached: &[Reached],
+    waiting: &[(ServiceName, Label)],
+) -> ToolResult {
     let tools: Vec<String> = catalog(reached).into_iter().map(|(name, _)| name).collect();
     let display = &companion.display_name;
     let mut text = format!(
         "You are attached as {display} (moniker {moniker}). ",
         moniker = companion.moniker
     );
-    if reached.is_empty() {
+    if reached.is_empty() && waiting.is_empty() {
         text.push_str(&format!(
             "{display} reaches nothing yet: the sponsor has not connected a service for this companion."
         ));
@@ -153,6 +159,11 @@ pub fn reach(companion: &Companion, reached: &[Reached]) -> ToolResult {
             service = place.service,
             places = places.join(" and "),
             names = names.join(", "),
+        ));
+    }
+    for (service, label) in waiting {
+        text.push_str(&format!(
+            "{display} cannot reach {service} at {label} until the sponsor signs its account in again; its tools come back then. "
         ));
     }
     text.push_str(&format!(" Your tools: {}.", tools.join(", ")));
@@ -177,6 +188,10 @@ pub fn reach(companion: &Companion, reached: &[Reached]) -> ToolResult {
                 "displayName": companion.display_name.as_str(),
             },
             "connections": connections,
+            "waiting": waiting
+                .iter()
+                .map(|(service, label)| json!({ "service": service.as_str(), "at": label.as_str() }))
+                .collect::<Vec<_>>(),
             "tools": tools,
         })),
     }
@@ -193,6 +208,7 @@ pub fn credential_json(credential: &Credential) -> Value {
         "permissions": credential.permissions,
         "state": match credential.state {
             CredentialState::Ready => "ready",
+            CredentialState::NeedsSignIn => "needs_sign_in",
             CredentialState::Revoked => "revoked",
         },
     })
@@ -222,6 +238,7 @@ pub fn connection_json(connection: &Connection) -> Value {
         "label": connection.label.as_str(),
         "state": match connection.state {
             ConnectionState::Ready => "ready",
+            ConnectionState::NeedsSignIn => "needs_sign_in",
             ConnectionState::Revoked => "revoked",
         },
         "revision": connection.revision,
@@ -336,24 +353,44 @@ pub fn told(entry: &mut Value, names: &Names) {
 }
 
 /// One encoded journal entry as a sentence: who, as which companion, did
-/// what, through which connection, and how it ended.
+/// what, through which connection, and how it ended, with the reason in the
+/// sponsor's words when it did not end well. The names are the ones the
+/// entry kept from when it was written; an entry that kept none is told
+/// with the names `names` holds now.
 pub fn sentence(entry: &Value, names: &Names) -> String {
     let text = |field: &str| entry[field].as_str().unwrap_or_default();
-    let named = entry["companion"]
-        .as_str()
-        .map(|id| Names::find(&names.companions, id));
-    let companion = match named {
+    let kept = |field: &str| entry[field].as_str().filter(|name| !name.is_empty());
+    let named = kept("companionName")
+        .map(|name| Some(name.to_owned()))
+        .or_else(|| {
+            entry["companion"]
+                .as_str()
+                .map(|id| Names::find(&names.companions, id).map(str::to_owned))
+        });
+    let companion = match &named {
         None => "a companion".to_owned(),
-        Some(found) => found.map_or_else(|| "a companion since removed".to_owned(), str::to_owned),
+        Some(found) => found
+            .clone()
+            .unwrap_or_else(|| "a companion since removed".to_owned()),
     };
-    // Removing a companion takes its name with it, so its own removal names
-    // it only while it is still known.
-    let removed = named.flatten().unwrap_or("a companion");
-    let service = capitalized(text("service"));
-    let at = entry["connection"]
-        .as_str()
-        .and_then(|id| Names::find(&names.connections, id))
+    // A companion's own removal names it only when its name was kept.
+    let removed = named
+        .clone()
+        .flatten()
+        .unwrap_or_else(|| "a companion".to_owned());
+    let service = kept("serviceTitle").map_or_else(|| capitalized(text("service")), str::to_owned);
+    let at = kept("connectionLabel")
+        .or_else(|| {
+            entry["connection"]
+                .as_str()
+                .and_then(|id| Names::find(&names.connections, id))
+        })
         .map_or_else(String::new, |label| format!(" at {label}"));
+    let kind = kept("kindTitle");
+    let with_kind = kind.map_or_else(String::new, |kind| format!(" with {kind}"));
+    let provider = kind.unwrap_or("its provider");
+    let account = kept("accountLabel");
+    let the_account = account.unwrap_or("the account");
     let command = text("command");
     let mind = entry["initiator"] == "mind";
     let who = match text("initiator") {
@@ -362,6 +399,12 @@ pub fn sentence(entry: &Value, names: &Names) -> String {
         _ if matches!(command, "attach" | "detach") => "A mind".to_owned(),
         _ => format!("A mind as {companion}"),
     };
+    let outcome = text("outcome");
+    if command == "end_unfinished_renewal" && outcome == "done" {
+        return stopped(format!(
+            "The lobby stopped while it renewed {the_account} for {companion}{with_kind} and cannot tell whether {provider} renewed it, so {companion} needs signing in again"
+        ));
+    }
     // What happened, said once as done and once as attempted.
     let (done, attempt) = match (text("kind"), command) {
         ("invoked" | "settled", _) => {
@@ -405,20 +448,41 @@ pub fn sentence(entry: &Value, names: &Names) -> String {
             "replace the attach secret".to_owned(),
         ),
         (_, "begin_sign_in") => (
-            format!("started signing {companion} in"),
-            format!("start signing {companion} in"),
+            format!("started signing {companion} in{with_kind}"),
+            format!("start signing {companion} in{with_kind}"),
         ),
         (_, "complete_sign_in") => (
-            format!("signed {companion} in"),
-            format!("sign {companion} in"),
+            format!(
+                "signed {companion} in{with_kind}{}",
+                account.map_or_else(String::new, |account| format!(" as {account}"))
+            ),
+            format!("sign {companion} in{with_kind}"),
         ),
         (_, "cancel_sign_in") => (
-            format!("cancelled a sign-in for {companion}"),
-            format!("cancel a sign-in for {companion}"),
+            format!("cancelled signing {companion} in{with_kind}"),
+            format!("cancel signing {companion} in{with_kind}"),
         ),
-        (_, "revoke_credential") => (
-            format!("revoked the account {companion} held"),
-            format!("revoke the account {companion} held"),
+        (_, "revoke_credential") => {
+            let what = match (account, kind) {
+                (Some(account), Some(kind)) => {
+                    format!("{account}, the {kind} account {companion} held")
+                }
+                (Some(account), None) => format!("{account}, the account {companion} held"),
+                _ => format!("the account {companion} held"),
+            };
+            (format!("revoked {what}"), format!("revoke {what}"))
+        }
+        (_, "revoke_at_provider") => (
+            format!("revoked {the_account} at {provider} too"),
+            format!("revoke {the_account} at {provider} too"),
+        ),
+        (_, "renew_credential") => (
+            format!("kept {the_account} signed in for {companion}{with_kind}"),
+            format!("keep {the_account} signed in for {companion}{with_kind}"),
+        ),
+        (_, "end_unfinished_renewal") => (
+            format!("ended an unfinished renewal of {the_account} for {companion}"),
+            format!("end an unfinished renewal of {the_account} for {companion}"),
         ),
         (_, "grant_connection") => (
             format!("opened a connection for {companion} to {service}{at}"),
@@ -438,26 +502,73 @@ pub fn sentence(entry: &Value, names: &Names) -> String {
         ),
     };
     let sign_in = matches!(command, "begin_sign_in" | "complete_sign_in");
-    let ended = match text("outcome") {
-        "done" => return stopped(format!("{who} {done}")),
-        "accepted" => return format!("{who} {done}; the service finishes it later."),
-        "pending" => return stopped(format!("{who} set out to {attempt}")),
-        "refused" => "it was refused",
-        "not_found" => "what it named was not found",
-        "conflict" => "it clashed with a change made first",
-        "invalid_input" => "what was asked for was refused",
-        "needs_sign_in" => "the account needs signing in again",
-        "needs_permission" => "the account lacks the permission",
-        "revoked" => "it had been revoked",
-        "temporarily_unavailable" if sign_in => "the sign-in page could not be reached",
-        "rate_limited" if sign_in => "the sign-in page asked the lobby to slow down",
-        "temporarily_unavailable" => "it could not be reached",
-        "rate_limited" => "it was asked to slow down",
-        "outcome_unknown" => "whether it landed is unknown",
-        "unsupported" => "it is not offered",
-        _ => "something went wrong inside the lobby",
+    let again = format!("so {companion} needs signing in again");
+    let ended: String = match (command, outcome) {
+        (_, "done") => return stopped(format!("{who} {done}")),
+        (_, "accepted") => return format!("{who} {done}; the service finishes it later."),
+        (_, "pending") => return stopped(format!("{who} set out to {attempt}")),
+        ("renew_credential", "needs_sign_in") => {
+            format!("{provider} ended that sign-in, {again}")
+        }
+        ("renew_credential", "outcome_unknown") => {
+            format!("the lobby cannot tell whether {provider} renewed it, {again}")
+        }
+        ("renew_credential", "refused") => {
+            format!("{provider} answered with what the lobby cannot keep, {again}")
+        }
+        ("renew_credential", "rate_limited") => {
+            format!("{provider} asked the lobby to slow down; it tries again later")
+        }
+        ("renew_credential", "temporarily_unavailable") => {
+            format!("{provider} could not be reached; it tries again later")
+        }
+        ("revoke_at_provider", "unsupported") => {
+            format!("{provider} offers no way to revoke it there, so it ends there when it expires")
+        }
+        ("revoke_at_provider", _) => {
+            format!("{provider} did not confirm it, so it ends there when it expires")
+        }
+        ("complete_sign_in", "refused" | "invalid_input") => {
+            "the answer from the sign-in page did not prove it".to_owned()
+        }
+        ("complete_sign_in", "conflict") => {
+            "that account belongs to another companion, or another account waits to be signed in again".to_owned()
+        }
+        ("complete_sign_in", "not_found") => "the companion was removed meanwhile".to_owned(),
+        ("begin_sign_in", "not_found") => "no account answers to what was typed".to_owned(),
+        ("begin_sign_in", "unsupported") => {
+            "the provider does not offer the sign-in the lobby requires".to_owned()
+        }
+        ("begin_sign_in", "conflict") => {
+            "a sign-in for it was already waiting, or it is signed in with that kind already".to_owned()
+        }
+        ("grant_connection", "unsupported") => {
+            format!("the account cannot give {service} the proof it asks for")
+        }
+        ("grant_connection", "needs_sign_in") => "the account needs signing in again".to_owned(),
+        ("grant_connection", "refused") => format!("{service} refused it"),
+        ("grant_connection", "conflict") => "that name is taken already".to_owned(),
+        ("grant_connection", "revoked") => "the account was revoked meanwhile".to_owned(),
+        (_, "refused") => "it was refused".to_owned(),
+        (_, "not_found") => "what it named was not found".to_owned(),
+        (_, "conflict") => "it clashed with a change made first".to_owned(),
+        (_, "invalid_input") => "what was asked for was refused".to_owned(),
+        (_, "needs_sign_in") => "the account needs signing in again".to_owned(),
+        (_, "needs_permission") => "the account lacks the permission".to_owned(),
+        (_, "revoked") => "it had been revoked".to_owned(),
+        (_, "temporarily_unavailable") if sign_in => {
+            "the sign-in page could not be reached".to_owned()
+        }
+        (_, "rate_limited") if sign_in => {
+            "the sign-in page asked the lobby to slow down".to_owned()
+        }
+        (_, "temporarily_unavailable") => "it could not be reached".to_owned(),
+        (_, "rate_limited") => "it was asked to slow down".to_owned(),
+        (_, "outcome_unknown") => "whether it landed is unknown".to_owned(),
+        (_, "unsupported") => "it is not offered".to_owned(),
+        _ => "something went wrong inside the lobby".to_owned(),
     };
-    format!("{who} tried to {attempt}, but {ended}.")
+    stopped(format!("{who} tried to {attempt}, but {ended}"))
 }
 
 /// `text` closed with a full stop, unless a name it ends with closes it
@@ -661,7 +772,7 @@ mod tests {
 
     #[test]
     fn reach_reports_the_companion_and_the_live_tool_set() {
-        let answer = reach(&ada(), &[]);
+        let answer = reach(&ada(), &[], &[]);
         let text = answer.rendered();
         assert!(text.contains("Ada") && text.contains("reach"));
         let structured = answer.structured.expect("structured");
@@ -690,7 +801,26 @@ mod tests {
         let schema = &two[1].1.input_schema;
         assert_eq!(schema["properties"]["at"]["enum"], json!(["front", "back"]));
         assert_eq!(schema["required"], json!(["at"]));
-        let answer = reach(&ada(), &[board(&["front", "back"])]);
+        let answer = reach(&ada(), &[board(&["front", "back"])], &[]);
+        let waiting = reach(
+            &ada(),
+            &[],
+            &[(
+                ServiceName::new("board").expect("service"),
+                Label::new("front").expect("label"),
+            )],
+        );
+        assert!(
+            waiting.rendered().contains(
+                "cannot reach board at front until the sponsor signs its account in again"
+            ),
+            "{}",
+            waiting.rendered()
+        );
+        assert_eq!(
+            waiting.structured.expect("structured")["waiting"],
+            json!([{ "service": "board", "at": "front" }])
+        );
         let structured = answer.structured.clone().expect("structured");
         assert_eq!(structured["tools"], json!(["reach", "board_read"]));
         assert_eq!(structured["connections"][1]["at"], "back");
@@ -739,7 +869,43 @@ mod tests {
             ),
             (
                 json!({ "initiator": "sponsor", "companion": ada, "kind": "command", "command": "begin_sign_in", "outcome": "conflict" }),
-                "You tried to start signing Ada in, but it clashed with a change made first.",
+                "You tried to start signing Ada in, but a sign-in for it was already waiting, or it is signed in with that kind already.",
+            ),
+            (
+                json!({ "initiator": "sponsor", "companion": ada, "companionName": "Ada", "kindTitle": "Atmosphere", "accountLabel": "ada.example.test", "kind": "command", "command": "complete_sign_in", "outcome": "done" }),
+                "You signed Ada in with Atmosphere as ada.example.test.",
+            ),
+            (
+                json!({ "initiator": "sponsor", "companion": gone, "companionName": "Ada", "kindTitle": "Atmosphere", "accountLabel": "ada.example.test", "kind": "command", "command": "revoke_credential", "outcome": "done" }),
+                "You revoked ada.example.test, the Atmosphere account Ada held.",
+            ),
+            (
+                json!({ "initiator": "sponsor", "companion": ada, "companionName": "Ada", "kindTitle": "Atmosphere", "accountLabel": "ada.example.test", "kind": "command", "command": "revoke_at_provider", "outcome": "unsupported" }),
+                "You tried to revoke ada.example.test at Atmosphere too, but Atmosphere offers no way to revoke it there, so it ends there when it expires.",
+            ),
+            (
+                json!({ "initiator": "lobby", "companion": ada, "companionName": "Ada", "kindTitle": "Atmosphere", "accountLabel": "ada.example.test", "kind": "command", "command": "renew_credential", "outcome": "done" }),
+                "The lobby kept ada.example.test signed in for Ada with Atmosphere.",
+            ),
+            (
+                json!({ "initiator": "lobby", "companion": ada, "companionName": "Ada", "kindTitle": "Atmosphere", "accountLabel": "ada.example.test", "kind": "command", "command": "renew_credential", "outcome": "needs_sign_in" }),
+                "The lobby tried to keep ada.example.test signed in for Ada with Atmosphere, but Atmosphere ended that sign-in, so Ada needs signing in again.",
+            ),
+            (
+                json!({ "initiator": "lobby", "companion": ada, "companionName": "Ada", "kindTitle": "Atmosphere", "accountLabel": "ada.example.test", "kind": "command", "command": "renew_credential", "outcome": "outcome_unknown" }),
+                "The lobby tried to keep ada.example.test signed in for Ada with Atmosphere, but the lobby cannot tell whether Atmosphere renewed it, so Ada needs signing in again.",
+            ),
+            (
+                json!({ "initiator": "lobby", "companion": ada, "companionName": "Ada", "kindTitle": "Atmosphere", "accountLabel": "ada.example.test", "kind": "command", "command": "end_unfinished_renewal", "outcome": "done" }),
+                "The lobby stopped while it renewed ada.example.test for Ada with Atmosphere and cannot tell whether Atmosphere renewed it, so Ada needs signing in again.",
+            ),
+            (
+                json!({ "initiator": "sponsor", "companion": gone, "companionName": "Ada", "kind": "command", "command": "remove_companion", "outcome": "done" }),
+                "You removed Ada.",
+            ),
+            (
+                json!({ "initiator": "mind", "attachment": mind, "companion": ada, "companionName": "Ada Lovelace", "connection": front, "connectionLabel": "back", "service": "board", "serviceTitle": "Board", "tool": "read", "kind": "settled", "outcome": "done" }),
+                "A mind as Ada Lovelace called read on Board at back.",
             ),
             (
                 json!({ "initiator": "lobby", "companion": gone, "kind": "command", "command": "detach", "outcome": "done" }),

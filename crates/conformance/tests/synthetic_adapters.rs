@@ -1,7 +1,7 @@
 //! Both synthetic adapters hold to their contracts, in process, against the
 //! test kit's fakes.
 
-use lobby_conformance::credential::{self, CountingSlot, CredentialFixture};
+use lobby_conformance::credential::{self, CountingSlot, CredentialFixture, RenewalFixture};
 use lobby_conformance::service::{self, ServiceFixture};
 use lobby_contracts::{
     Address, AddressPolicy, Authority, Authorization, AuthorizationAsk, CredentialAdapter, Outcome,
@@ -71,7 +71,33 @@ impl CredentialFixture for PassbookFixture {
     }
 
     fn unsupported_asks(&self) -> Vec<AuthorizationAsk> {
-        vec![AuthorizationAsk::Bearer]
+        Vec::new()
+    }
+}
+
+impl RenewalFixture for PassbookFixture {
+    fn issue_briefly(&self) {
+        self.authority.key_lifetime(1);
+    }
+
+    fn renewals_presented(&self) -> Vec<String> {
+        self.authority.renewals_presented()
+    }
+
+    fn live_secret(&self) -> Option<String> {
+        self.authority.live_renewal()
+    }
+
+    fn rate_limit(&self, limiting: bool) {
+        self.authority.rate_limit_renewals(limiting);
+    }
+
+    fn refuse(&self) {
+        self.authority.refuse_renewals(true);
+    }
+
+    fn revocations(&self) -> Vec<String> {
+        self.authority.revoked()
     }
 }
 
@@ -83,6 +109,63 @@ fn the_passbook_holds_to_the_credential_contract() {
             authority: PassbookAuthority::start(),
         },
     );
+}
+
+#[test]
+fn the_passbook_renews_in_the_order_the_contract_lays_down() {
+    credential::renewal(
+        &Passbook::new(),
+        &PassbookFixture {
+            authority: PassbookAuthority::start(),
+        },
+    );
+}
+
+#[test]
+fn two_authorizations_racing_a_due_key_renew_it_once() {
+    let fixture = PassbookFixture {
+        authority: PassbookAuthority::start(),
+    };
+    fixture.authority.key_lifetime(1);
+    let adapter = Passbook::new();
+    fixture.approve_as("racer");
+    let request = SignInRequest {
+        hint: fixture.hint(),
+        state: "racing-state".to_owned(),
+        return_to: "http://127.0.0.1:1/signin/passbook/return".to_owned(),
+        again: None,
+    };
+    let start = adapter.begin_sign_in(&request).expect("start");
+    let signed = adapter
+        .complete_sign_in(
+            &request,
+            &SignInReturn {
+                query: browse(&start.url),
+            },
+        )
+        .expect("signed in");
+    // The key the authority issues next lives long, so one renewal is
+    // enough for both.
+    fixture.authority.key_lifetime(3600);
+    let slot = CountingSlot::holding(Ok(signed.material), signed.permissions);
+    let ask = AuthorizationAsk::ServiceProof {
+        audience: "racing-audience".to_owned(),
+        method: "racing.method".to_owned(),
+        lifetime_secs: 60,
+    };
+    std::thread::scope(|scope| {
+        let one = scope.spawn(|| adapter.authorize(&slot, &ask));
+        let two = scope.spawn(|| adapter.authorize(&slot, &ask));
+        assert!(one.join().expect("one").is_ok());
+        assert!(two.join().expect("two").is_ok());
+    });
+    assert_eq!(
+        fixture.authority.renewals_presented().len(),
+        1,
+        "one renewal for two authorizations"
+    );
+    assert_eq!(slot.steps(), ["mark", "commit"]);
+    assert_eq!(fixture.authority.minted().len(), 2);
 }
 
 /// Mints with the passbook from material a real sign-in produced, as the
@@ -115,6 +198,7 @@ impl BoardFixture {
             hint: authority.origin(),
             state: "board-state".to_owned(),
             return_to: "http://127.0.0.1:1/signin/passbook/return".to_owned(),
+            again: None,
         };
         let start = adapter.begin_sign_in(&request).expect("start");
         let returned = SignInReturn {

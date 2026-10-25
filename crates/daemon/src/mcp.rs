@@ -20,7 +20,7 @@
 //! changes: the lobby tells an attached host when the companion's connections
 //! change, over the attachment's notice stream (see [`crate::http`]).
 
-use lobby_contracts::{Companion, ToolDescriptor, ToolResult};
+use lobby_contracts::{Companion, Label, ServiceName, ToolDescriptor, ToolResult};
 use serde_json::{Map, Value, json};
 
 use crate::domain::CallRefusal;
@@ -34,6 +34,10 @@ pub const LIST_CHANGED: &str = "notifications/tools/list_changed";
 pub trait Toolbox {
     /// What the attachment's companion reaches right now.
     fn reached(&self) -> Vec<Reached>;
+
+    /// The connections of the attachment's companion that wait for the
+    /// sponsor to sign their account in again, by service and label.
+    fn waiting(&self) -> Vec<(ServiceName, Label)>;
 
     /// Calls the service tool `name`.
     fn call(&self, name: &str, arguments: Map<String, Value>) -> Result<ToolResult, CallRefusal>;
@@ -211,7 +215,7 @@ fn tools_call(
             }),
         );
     }
-    let answer = projections::reach(companion, &tools.reached());
+    let answer = projections::reach(companion, &tools.reached(), &tools.waiting());
     success(id, result_json(&answer, false))
 }
 
@@ -248,6 +252,10 @@ mod tests {
 
     impl Toolbox for Nothing {
         fn reached(&self) -> Vec<Reached> {
+            Vec::new()
+        }
+
+        fn waiting(&self) -> Vec<(ServiceName, Label)> {
             Vec::new()
         }
 

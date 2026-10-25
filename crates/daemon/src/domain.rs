@@ -56,10 +56,34 @@
 //! adapter is asked to start anything. The sponsor follows a sign-in by an
 //! id of its own, never by the `state` the provider carries back, and may
 //! cancel it while it waits; one that waits past its time expires, and a
-//! return for a cancelled or expired sign-in signs nothing in. A connection exists only because its
-//! service adapter established it with a credential of its companion.
+//! return for a cancelled or expired sign-in signs nothing in; whatever its
+//! adapter kept for it is let go at once. A connection exists only because
+//! its service adapter established it with a credential of its companion.
+//!
+//! A credential is kept alive by its adapter, which the lobby asks to renew
+//! it whenever the adapter said it would want to be asked, on a blocking
+//! thread with nothing held. A renewal is journaled from the moment its
+//! adapter marks the material rotating, just before the provider's
+//! single-use secret is spent, and the mark is on the disk before that.
+//! When the provider refuses the renewal, or the renewal ends with the mark
+//! still in place so the lobby cannot know whether the provider rotated the
+//! secret, the credential needs signing in again: in one commit it and every
+//! ready connection made from it wait, their tools leave the catalog, and
+//! every attachment of the companion hears its tools changed once. A daemon
+//! that finds a mark when it starts does the same before anything else, and
+//! the old material is never renewed again. Signing the same account in
+//! again restores the credential, under its own id, and every connection
+//! that waited, with what their services issued, without a new grant;
+//! signing in another account while one waits is refused.
+//!
 //! Revoking a credential revokes every connection made from it in the same
-//! commit, under one journal entry, and deletes what they keep.
+//! commit, under one journal entry, and deletes what they keep; then, with
+//! nothing held, its adapter revokes it at the provider, journaled as a
+//! command of its own, and the sponsor reads whether the provider confirmed.
+//!
+//! Each journal entry carries the names the sponsor read for what it
+//! concerns when it was written: the companion, the account and its kind,
+//! the connection and its service.
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -70,14 +94,15 @@ use std::time::{Duration, Instant};
 use lobby_contracts::{
     Address, Attachment, AttachmentId, Companion, CompanionId, Connection, ConnectionId,
     ConnectionState, Credential, CredentialAdapter, CredentialId, CredentialState, DisplayName,
-    Initiator, JournalEntry, JournalKind, Label, Moniker, NameProblem, Outcome, ProviderKind,
-    SealedMaterial, ServiceAdapter, ServiceName, SignInRequest, SignInReturn, SignInStart,
-    SignedIn, Sponsor, ToolArguments, ToolResult,
+    Freshness, Initiator, JournalEntry, JournalKind, JournalNames, Label, MaterialSlot,
+    MaterialUpdate, Moniker, NameProblem, Outcome, ProviderKind, Revocation, SealedMaterial,
+    ServiceAdapter, ServiceName, SignInRequest, SignInReturn, SignInStart, SignedIn, Sponsor,
+    ToolArguments, ToolResult,
 };
 use serde_json::{Map, Value};
 use tokio::sync::watch;
 
-use crate::broker::Broker;
+use crate::broker::{Broker, Held, Slot};
 use crate::calls::{self, Ticket};
 use crate::journal::{Journal, Note, Page, PageProblem};
 use crate::keyring::{self, AttachmentToken};
@@ -94,6 +119,14 @@ pub const SIGN_INS_WAITING: usize = 32;
 /// How many ended sign-ins the lobby remembers, to say why a late return
 /// signs nothing in.
 pub const SIGN_INS_REMEMBERED: usize = 64;
+/// The shortest pause between two passes that keep credentials alive.
+pub const RENEWAL_PAUSE_MIN: Duration = Duration::from_secs(1);
+/// The longest pause between two such passes, so every ready credential's
+/// adapter is asked at least this often.
+pub const RENEWAL_PAUSE_MAX: Duration = Duration::from_secs(300);
+/// How long after a renewal that could not finish, and changed nothing,
+/// the credential is asked again.
+pub const RENEWAL_RETRY: Duration = Duration::from_secs(30);
 
 /// Where a sign-in the lobby started stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,6 +306,9 @@ struct Awaited {
     id: String,
     companion: CompanionId,
     kind: ProviderKind,
+    /// The account the sponsor meant: what was typed, or the label of the
+    /// account signed in again.
+    meant: String,
     request: SignInRequest,
     started: Instant,
     expires_at: u64,
@@ -284,7 +320,7 @@ impl Awaited {
             id: self.id.clone(),
             companion: self.companion,
             kind: self.kind.clone(),
-            account: self.request.hint.trim().to_owned(),
+            account: self.meant.clone(),
             status,
             expires_at: self.expires_at,
         }
@@ -294,12 +330,23 @@ impl Awaited {
 struct Core {
     store: Store,
     journal: Journal,
+    /// The adapters, for the titles journal entries carry.
+    registry: Registry,
+    dir: PathBuf,
     attachments: HashMap<AttachmentId, Live>,
     awaited: HashMap<String, Awaited>,
     /// Sign-ins whose adapter is starting them, with nothing parked yet.
     starting: Vec<(CompanionId, ProviderKind)>,
     /// Sign-ins that ended, by their `state`, newest last.
     ended: VecDeque<(String, SignInView)>,
+    /// Sign-ins that ended since the last command, whose adapters let go
+    /// of them once the lobby is released.
+    released: Vec<(ProviderKind, SignInRequest)>,
+    /// When each ready credential's adapter wants to be asked to renew it.
+    due: HashMap<CredentialId, Instant>,
+    /// Advances whenever a credential changes, so the keep-alive pass looks
+    /// again at once.
+    renewals: watch::Sender<u64>,
     journal_healthy: bool,
     events: VecDeque<Event>,
 }
@@ -314,6 +361,51 @@ pub struct Lobby {
     sign_in_limit: Duration,
 }
 
+/// How a credential the sponsor revoked was revoked at its provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtProvider {
+    /// The provider confirmed it.
+    Confirmed,
+    /// The provider offers no revocation; what it granted ends when it
+    /// expires there.
+    NotOffered,
+    /// The provider could not be reached, or did not confirm it.
+    NotConfirmed,
+    /// The lobby held no material to name it to the provider with.
+    NotAsked,
+}
+
+impl AtProvider {
+    /// The stable wire name.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::NotOffered => "not_offered",
+            Self::NotConfirmed => "not_confirmed",
+            Self::NotAsked => "not_asked",
+        }
+    }
+}
+
+/// A revoked credential, and what its provider said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revoked {
+    /// The credential as the revocation left it.
+    pub credential: Credential,
+    /// What its provider said.
+    pub provider: AtProvider,
+}
+
+/// How a sign-in the provider sent back ended, and the companion it was for
+/// when the lobby knew the sign-in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completed {
+    /// The companion the sign-in was for, when the lobby waited for it.
+    pub companion: Option<CompanionId>,
+    /// The credential it signed in or restored, or why it did not.
+    pub result: Result<Credential, Refusal>,
+}
+
 /// The fixed names commands carry in the journal.
 const CREATE_COMPANION: &str = "create_companion";
 const RENAME_COMPANION: &str = "rename_companion";
@@ -326,11 +418,15 @@ const BEGIN_SIGN_IN: &str = "begin_sign_in";
 const COMPLETE_SIGN_IN: &str = "complete_sign_in";
 const CANCEL_SIGN_IN: &str = "cancel_sign_in";
 const REVOKE_CREDENTIAL: &str = "revoke_credential";
+const REVOKE_AT_PROVIDER: &str = "revoke_at_provider";
+const RENEW_CREDENTIAL: &str = "renew_credential";
+const END_UNFINISHED_RENEWAL: &str = "end_unfinished_renewal";
 const GRANT_CONNECTION: &str = "grant_connection";
 const REVOKE_CONNECTION: &str = "revoke_connection";
 const SWEEP_KEYRING: &str = "sweep_keyring";
 
-/// Who a journal entry is about, short of its kind and outcome.
+/// Who a journal entry is about, short of its kind and outcome, with the
+/// names the sponsor reads for it.
 #[derive(Debug, Clone)]
 struct Subject {
     initiator: Initiator,
@@ -338,6 +434,7 @@ struct Subject {
     connection: Option<ConnectionId>,
     service: Option<ServiceName>,
     name: &'static str,
+    names: JournalNames,
 }
 
 impl Subject {
@@ -348,6 +445,7 @@ impl Subject {
             connection: None,
             service: None,
             name,
+            names: JournalNames::default(),
         }
     }
 
@@ -366,6 +464,7 @@ impl Subject {
             tool: None,
             kind: JournalKind::Command { name: self.name },
             outcome,
+            names: self.names.clone(),
         }
     }
 }
@@ -386,10 +485,15 @@ impl Lobby {
             core: Mutex::new(Core {
                 store,
                 journal,
+                registry: registry.clone(),
+                dir: dir.to_path_buf(),
                 attachments: HashMap::new(),
                 awaited: HashMap::new(),
                 starting: Vec::new(),
                 ended: VecDeque::new(),
+                released: Vec::new(),
+                due: HashMap::new(),
+                renewals: watch::channel(0).0,
                 journal_healthy: true,
                 events: VecDeque::new(),
             }),
@@ -414,12 +518,33 @@ impl Lobby {
         self.core.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Runs one command, then every event it emitted, before the next command.
+    /// Runs one command, then every event it emitted, before the next
+    /// command; then, with the lobby released, lets the adapters of
+    /// the sign-ins that ended go of them.
     fn run<T, E>(&self, command: impl FnOnce(&mut Core) -> Result<T, E>) -> Result<T, E> {
-        let mut core = self.core();
-        let result = command(&mut core);
-        core.settle_events(&self.feed, &self.command);
+        let (result, released) = {
+            let mut core = self.core();
+            let result = command(&mut core);
+            core.settle_events(&self.feed, &self.command);
+            (result, std::mem::take(&mut core.released))
+        };
+        self.release(released);
         result
+    }
+
+    /// Tells each sign-in's adapter to let go of it.
+    fn release(&self, released: Vec<(ProviderKind, SignInRequest)>) {
+        for (kind, request) in released {
+            if let Some(adapter) = self.registry.credential(&kind) {
+                adapter.cancel_sign_in(&request);
+            }
+        }
+    }
+
+    /// Follows the changes of credentials, so the pass that keeps them
+    /// alive looks again at once when one is signed in or restored.
+    pub fn renewal_changes(&self) -> watch::Receiver<u64> {
+        self.core().renewals.subscribe()
     }
 
     /// Replaces an attach secret that could have been read or planted, a
@@ -454,14 +579,58 @@ impl Lobby {
         })
     }
 
-    /// Deletes every material and issued-data file that no ready credential
-    /// or connection names: what a daemon that stopped between writing a
-    /// file and committing its record left behind, or a file a revocation
-    /// could not delete. A command the lobby initiates when it starts,
-    /// journaled only when there is something to sweep. Returns how many
-    /// files were swept.
+    /// Ends every renewal a daemon that stopped left unfinished: each ready
+    /// credential with a rotating mark needs signing in again, with its
+    /// connections, in one commit the lobby initiates and journals, and
+    /// only then is its mark cleared. Run when the daemon starts, before
+    /// anything renews or reads material; when it cannot finish, the daemon
+    /// does not start. Returns how many credentials it ended.
+    pub fn end_unfinished_renewals(&self) -> Result<usize, Refusal> {
+        let marked = keyring::rotating_marks(&self.dir).map_err(|error| {
+            trace::line(&format!("the rotating marks could not be listed: {error}"));
+            Refusal::new(
+                Outcome::Internal,
+                "The lobby could not list the renewals it marks; the trace log in the data directory says why.",
+            )
+        })?;
+        self.run(|core| {
+            let mut ended = 0;
+            for id in marked {
+                let ready = core
+                    .store
+                    .state()
+                    .credential(id)
+                    .is_some_and(|credential| credential.state == CredentialState::Ready);
+                if ready {
+                    let subject = core.credential_subject(Initiator::Lobby, id, END_UNFINISHED_RENEWAL);
+                    core.begin_as(&subject)?;
+                    core.needs_sign_in(id, &subject, Outcome::Done)?;
+                    ended += 1;
+                    trace::line(&format!(
+                        "credential {id} had a renewal that never finished; it needs signing in again"
+                    ));
+                }
+            }
+            Ok(ended)
+        })
+    }
+
+    /// Deletes every material and issued-data file that no live credential
+    /// or connection names, and every rotating mark no ready credential
+    /// holds: what a daemon that stopped between writing a file and
+    /// committing its record left behind, or a file a revocation could not
+    /// delete. A command the lobby initiates when it starts, journaled only
+    /// when there is something to sweep. Returns how many files were swept.
     pub fn sweep_keyring(&self) -> Result<usize, Refusal> {
-        let found = keyring::sealed_files(&self.dir).map_err(|error| {
+        let listed = keyring::sealed_files(&self.dir).and_then(|mut found| {
+            found.extend(
+                keyring::rotating_marks(&self.dir)?
+                    .into_iter()
+                    .map(keyring::rotating_file),
+            );
+            Ok(found)
+        });
+        let found = listed.map_err(|error| {
             trace::line(&format!("the keyring could not be listed: {error}"));
             Refusal::new(
                 Outcome::Internal,
@@ -473,14 +642,21 @@ impl Lobby {
             let named: Vec<String> = state
                 .credentials
                 .iter()
-                .filter(|credential| credential.state == CredentialState::Ready)
+                .filter(|credential| credential.state != CredentialState::Revoked)
                 .map(|credential| keyring::material_file(credential.id))
                 .chain(
                     state
                         .connections
                         .iter()
-                        .filter(|connection| connection.state == ConnectionState::Ready)
+                        .filter(|connection| connection.state != ConnectionState::Revoked)
                         .map(|connection| keyring::issued_file(connection.id)),
+                )
+                .chain(
+                    state
+                        .credentials
+                        .iter()
+                        .filter(|credential| credential.state == CredentialState::Ready)
+                        .map(|credential| keyring::rotating_file(credential.id)),
                 )
                 .collect();
             let orphans: Vec<String> = found
@@ -625,8 +801,14 @@ impl Lobby {
             let had = record.portrait;
             record.portrait = kind;
             record.revision += 1;
-            let subject = Subject::new(sponsor, Some(id), SET_PORTRAIT);
+            let subject = core.named(Subject::new(sponsor, Some(id), SET_PORTRAIT));
             core.begin_as(&subject)?;
+            // A replacement keeps the portrait it replaces until its commit
+            // lands, and puts it back when the commit fails.
+            let replaced = match (had, image) {
+                (Some(_), Some(_)) => portrait::read(&self.dir, id).ok(),
+                _ => None,
+            };
             if let Some(bytes) = image
                 && let Err(error) = portrait::write(&self.dir, id, bytes)
             {
@@ -644,8 +826,18 @@ impl Lobby {
                 }
             }
             if let Err(refusal) = core.land_as(&subject, next) {
-                if had.is_none() && image.is_some() {
-                    self.discard_portrait(id);
+                if image.is_some() {
+                    match &replaced {
+                        Some(bytes) => {
+                            if let Err(error) = portrait::write(&self.dir, id, bytes) {
+                                trace::line(&format!(
+                                    "the replaced portrait of {id} could not be put back: {error}"
+                                ));
+                            }
+                        }
+                        None if had.is_none() => self.discard_portrait(id),
+                        None => {}
+                    }
                 }
                 return Err(refusal);
             }
@@ -711,7 +903,12 @@ impl Lobby {
                 .credentials
                 .iter()
                 .filter(|credential| credential.companion == id)
-                .map(|credential| keyring::material_file(credential.id))
+                .flat_map(|credential| {
+                    [
+                        keyring::material_file(credential.id),
+                        keyring::rotating_file(credential.id),
+                    ]
+                })
                 .chain(
                     next.connections
                         .iter()
@@ -844,7 +1041,10 @@ impl Lobby {
     /// asked with `hint`. `origin` is the lobby's own origin, where the
     /// provider sends the browser back. Refused while the companion already
     /// waits on a sign-in of that kind, before the adapter starts anything.
-    /// Returns the sign-in and where the browser goes.
+    /// When the companion holds a credential of that kind that needs signing
+    /// in again, this is that sign-in: the adapter names the same account
+    /// to the provider from its material, whatever `hint` says. Returns the
+    /// sign-in and where the browser goes.
     pub fn begin_sign_in(
         &self,
         companion: CompanionId,
@@ -852,10 +1052,14 @@ impl Lobby {
         hint: &str,
         origin: &str,
     ) -> Result<(SignInView, SignInStart), Refusal> {
-        let subject = Subject::new(Initiator::Sponsor, Some(companion), BEGIN_SIGN_IN);
         let limit = self.sign_in_limit;
-        let (adapter, kind) = self.run(|core| {
+        let (adapter, kind, again, subject) = self.run(|core| {
             core.expire_overdue(limit);
+            let mut subject = core.named(Subject::new(
+                Initiator::Sponsor,
+                Some(companion),
+                BEGIN_SIGN_IN,
+            ));
             let validated = (|| {
                 core.store
                     .state()
@@ -866,24 +1070,52 @@ impl Lobby {
                 core.no_sign_in_waiting(companion, &kind)?;
                 Ok((adapter, kind))
             })();
-            let found = validated.map_err(|refusal| core.refused_as(&subject, refusal))?;
+            if let Ok((_, kind)) = &validated {
+                subject = core.with_kind(subject, kind);
+            }
+            let (adapter, kind) =
+                validated.map_err(|refusal| core.refused_as(&subject, refusal))?;
+            let again = core.waiting_credential(companion, &kind);
+            if let Some(credential) = &again {
+                subject = core.with_account(subject, credential);
+            }
             core.begin_as(&subject)?;
-            core.starting.push((companion, found.1.clone()));
-            Ok(found)
+            core.starting.push((companion, kind.clone()));
+            Ok((adapter, kind, again, subject))
         })?;
         let state = keyring::random_token();
+        let meant = again.as_ref().map_or_else(
+            || hint.trim().to_owned(),
+            |credential| credential.label.to_string(),
+        );
+        let material = match &again {
+            Some(credential) => keyring::read_material(&self.dir, credential.id)
+                .map(Some)
+                .map_err(|error| {
+                    trace::line(&format!(
+                        "the material of credential {} could not be read to sign it in again: {error}",
+                        credential.id
+                    ));
+                    Outcome::Internal
+                }),
+            None => Ok(None),
+        };
         let started = state
             .as_ref()
             .map_err(|_| Outcome::Internal)
-            .and_then(|state| {
-                let request = SignInRequest {
+            .and_then(|state| material.map(|material| (state, material)))
+            .and_then(|(state, material)| {
+                let mut request = SignInRequest {
                     hint: hint.to_owned(),
                     state: state.clone(),
                     return_to: format!("{origin}/signin/{kind}/return"),
+                    again: material,
                 };
-                adapter
-                    .begin_sign_in(&request)
-                    .map(|start| (start, request))
+                let start = adapter.begin_sign_in(&request)?;
+                // The adapter keeps what it needs; the lobby keeps no
+                // material beside the sign-in while it waits.
+                request.again = None;
+                Ok((start, request))
             });
         self.run(|core| {
             core.starting
@@ -896,6 +1128,7 @@ impl Lobby {
                         id: uuid::Uuid::now_v7().simple().to_string(),
                         companion,
                         kind,
+                        meant,
                         request,
                         started: Instant::now(),
                         expires_at: epoch_millis().saturating_add(limit.as_millis() as u64),
@@ -924,8 +1157,8 @@ impl Lobby {
                 .awaited
                 .iter()
                 .find(|(_, awaited)| awaited.id == id)
-                .map(|(state, awaited)| (state.clone(), awaited.companion));
-            let Some((state, companion)) = found else {
+                .map(|(state, awaited)| (state.clone(), awaited.companion, awaited.kind.clone()));
+            let Some((state, companion, kind)) = found else {
                 return Err(core.refused_as(
                     &Subject::new(Initiator::Sponsor, None, CANCEL_SIGN_IN),
                     Refusal::new(
@@ -934,7 +1167,12 @@ impl Lobby {
                     ),
                 ));
             };
-            let subject = Subject::new(Initiator::Sponsor, Some(companion), CANCEL_SIGN_IN);
+            let subject = core.named(Subject::new(
+                Initiator::Sponsor,
+                Some(companion),
+                CANCEL_SIGN_IN,
+            ));
+            let subject = core.with_kind(subject, &kind);
             core.begin_as(&subject)?;
             let view = core.end_sign_in(&state, SignInStatus::Cancelled);
             core.settle_as(&subject, Outcome::Done);
@@ -946,14 +1184,10 @@ impl Lobby {
     /// back to the return route. The sign-in ends whatever its adapter says:
     /// it is used once. A return the lobby is not waiting for is refused
     /// without a journal entry: nothing proves who sent it.
-    pub fn complete_sign_in(
-        &self,
-        kind: &str,
-        query: Vec<(String, String)>,
-    ) -> Result<Credential, Refusal> {
+    pub fn complete_sign_in(&self, kind: &str, query: Vec<(String, String)>) -> Completed {
         let returned = SignInReturn { query };
         let limit = self.sign_in_limit;
-        let (state, awaited) = self.run(|core| {
+        let waited = self.run(|core| {
             core.expire_overdue(limit);
             let state = returned.get("state").unwrap_or_default().to_owned();
             if !core
@@ -961,35 +1195,42 @@ impl Lobby {
                 .get(&state)
                 .is_some_and(|awaited| awaited.kind.as_str() == kind)
             {
-                return Err(core.why_not_waiting(&state));
+                let companion = core.ended_for(&state);
+                return Err((companion, core.why_not_waiting(&state)));
             }
-            let awaited = core.awaited.remove(&state).ok_or_else(gone)?;
-            let subject = Subject::new(
+            let awaited = core.awaited.remove(&state).ok_or_else(|| (None, gone()))?;
+            let subject = core.named(Subject::new(
                 Initiator::Sponsor,
                 Some(awaited.companion),
                 COMPLETE_SIGN_IN,
-            );
+            ));
+            let subject = core.with_kind(subject, &awaited.kind);
             if let Err(refusal) = core.begin_as(&subject) {
+                let companion = awaited.companion;
                 core.awaited.insert(state, awaited);
-                return Err(refusal);
+                return Err((Some(companion), refusal));
             }
             core.starting
                 .push((awaited.companion, awaited.kind.clone()));
-            Ok((state, awaited))
-        })?;
-        let subject = Subject::new(
-            Initiator::Sponsor,
-            Some(awaited.companion),
-            COMPLETE_SIGN_IN,
-        );
+            Ok((state, awaited, subject))
+        });
+        let (state, awaited, subject) = match waited {
+            Ok(waited) => waited,
+            Err((companion, refusal)) => {
+                return Completed {
+                    companion,
+                    result: Err(refusal),
+                };
+            }
+        };
         let signed = match self.registry.credential(&awaited.kind) {
             Some(adapter) => adapter.complete_sign_in(&awaited.request, &returned),
             None => Err(Outcome::Unsupported),
         };
-        self.run(|core| {
+        let result = self.run(|core| {
             core.starting
                 .retain(|(waiting, of)| !(*waiting == awaited.companion && *of == awaited.kind));
-            let landed = self.land_sign_in(core, &subject, &awaited, signed);
+            let landed = self.land_sign_in(core, subject, &awaited, signed);
             let status = if landed.is_ok() {
                 SignInStatus::SignedIn
             } else {
@@ -997,22 +1238,29 @@ impl Lobby {
             };
             core.remember_ended(&state, awaited.view(status));
             landed
-        })
+        });
+        Completed {
+            companion: Some(awaited.companion),
+            result,
+        }
     }
 
-    /// Checks what the adapter signed in and commits the credential.
+    /// Checks what the adapter signed in and commits the credential: a new
+    /// one, or the one that waited for this account to sign in again,
+    /// restored with every connection that waited for it.
     fn land_sign_in(
         &self,
         core: &mut Core,
-        subject: &Subject,
+        subject: Subject,
         awaited: &Awaited,
         signed: Result<SignedIn, Outcome>,
     ) -> Result<Credential, Refusal> {
         let signed = signed.map_err(|outcome| {
-            core.settle_as(subject, outcome);
+            core.settle_as(&subject, outcome);
             complete_refusal(outcome)
         })?;
         let state = core.store.state();
+        let waiting = core.waiting_credential(awaited.companion, &awaited.kind);
         let checked = if !Credential::permissions_are_valid(&signed.permissions) {
             Err(Refusal::new(
                 Outcome::Internal,
@@ -1032,12 +1280,25 @@ impl Lobby {
                 Outcome::Conflict,
                 "That account is signed in for another companion; an account belongs to one companion.",
             ))
+        } else if let Some(waiting) = waiting
+            .as_ref()
+            .filter(|waiting| waiting.account != signed.account)
+        {
+            Err(Refusal::new(
+                Outcome::Conflict,
+                format!(
+                    "That is another account than {}, which waits to be signed in again; sign in as it, or revoke it first.",
+                    waiting.label
+                ),
+            ))
         } else {
             core.no_ready_credential(awaited.companion, &awaited.kind)
         };
-        checked.inspect_err(|refusal| core.settle_as(subject, refusal.outcome))?;
+        checked.inspect_err(|refusal| core.settle_as(&subject, refusal.outcome))?;
         let credential = Credential {
-            id: CredentialId::from_u128(new_id()),
+            id: waiting
+                .as_ref()
+                .map_or_else(|| CredentialId::from_u128(new_id()), |waiting| waiting.id),
             companion: awaited.companion,
             kind: awaited.kind.clone(),
             account: signed.account,
@@ -1045,38 +1306,88 @@ impl Lobby {
             permissions: signed.permissions,
             state: CredentialState::Ready,
         };
+        let subject = core.with_account(subject, &credential);
+        // A restored credential's material goes back as it was when the
+        // commit that restores it fails.
+        let replaced = waiting
+            .as_ref()
+            .and_then(|_| keyring::read_material(&self.dir, credential.id).ok());
         if let Err(error) = keyring::write_material(&self.dir, credential.id, &signed.material) {
             trace::line(&format!(
-                "the material of a new credential could not be kept: {error}"
+                "the material of a signed-in credential could not be kept: {error}"
             ));
-            core.settle_as(subject, Outcome::TemporarilyUnavailable);
+            core.settle_as(&subject, Outcome::TemporarilyUnavailable);
             return Err(Refusal::new(
                 Outcome::TemporarilyUnavailable,
                 "The lobby could not keep the new credential, so nothing was signed in; try again.",
             ));
         }
         let mut next = core.store.state().clone();
-        next.credentials.push(credential.clone());
-        if let Err(refusal) = core.land_as(subject, next) {
-            self.discard(&keyring::material_file(credential.id));
+        let mut restored = Vec::new();
+        if waiting.is_some() {
+            for slot in &mut next.credentials {
+                if slot.id == credential.id {
+                    *slot = credential.clone();
+                }
+            }
+            for connection in &mut next.connections {
+                if connection.credential == credential.id
+                    && connection.state == ConnectionState::NeedsSignIn
+                {
+                    connection.state = ConnectionState::Ready;
+                    connection.revision += 1;
+                    restored.push(connection.clone());
+                }
+            }
+        } else {
+            next.credentials.push(credential.clone());
+        }
+        if let Err(refusal) = core.land_as(&subject, next) {
+            match replaced {
+                Some(material) => {
+                    if let Err(error) = keyring::write_material(&self.dir, credential.id, &material)
+                    {
+                        trace::line(&format!(
+                            "the material of credential {} could not be put back: {error}",
+                            credential.id
+                        ));
+                    }
+                }
+                None => self.discard(&keyring::material_file(credential.id)),
+            }
             return Err(refusal);
+        }
+        if waiting.is_some()
+            && let Err(error) = keyring::unmark_rotating(&self.dir, credential.id)
+        {
+            trace::line(&format!(
+                "the rotating mark of credential {} could not be cleared: {error}",
+                credential.id
+            ));
         }
         core.events
             .push_back(Event::CredentialChanged(credential.clone()));
+        core.events
+            .extend(restored.into_iter().map(Event::ConnectionChanged));
         Ok(credential)
     }
 
     /// Revokes the credential `id` and, in the same commit, every connection
-    /// made from it; what they keep is deleted. The account stays reserved
-    /// to the credential's companion.
-    pub fn revoke_credential(&self, id: CredentialId) -> Result<Credential, Refusal> {
-        self.run(|core| {
+    /// made from it; what they keep is deleted, and the account stays
+    /// reserved to the credential's companion. Then, with nothing held, its
+    /// adapter revokes it at the provider, a step journaled on its own, and
+    /// the answer says what the provider said.
+    pub fn revoke_credential(&self, id: CredentialId) -> Result<Revoked, Refusal> {
+        let (credential, material, subject) = self.run(|core| {
             let found = core.store.state().credential(id).cloned();
-            let subject = Subject::new(
+            let mut subject = core.named(Subject::new(
                 Initiator::Sponsor,
                 found.as_ref().map(|credential| credential.companion),
                 REVOKE_CREDENTIAL,
-            );
+            ));
+            if let Some(credential) = &found {
+                subject = core.with_account(subject, credential);
+            }
             let mut credential = match found {
                 None => {
                     return Err(core.refused_as(
@@ -1093,6 +1404,9 @@ impl Lobby {
                 Some(credential) => credential,
             };
             core.begin_as(&subject)?;
+            // The material names the account to the provider once the
+            // lobby's own revocation landed; it is held only in memory.
+            let material = keyring::read_material(&self.dir, id).ok();
             credential.state = CredentialState::Revoked;
             let mut next = core.store.state().clone();
             let mut revoked = Vec::new();
@@ -1102,14 +1416,16 @@ impl Lobby {
                 }
             }
             for connection in &mut next.connections {
-                if connection.credential == id && connection.state == ConnectionState::Ready {
+                if connection.credential == id && connection.state != ConnectionState::Revoked {
                     connection.state = ConnectionState::Revoked;
                     connection.revision += 1;
                     revoked.push(connection.clone());
                 }
             }
             core.land_as(&subject, next)?;
+            core.due.remove(&id);
             self.discard(&keyring::material_file(id));
+            self.discard(&keyring::rotating_file(id));
             for connection in &revoked {
                 self.discard(&keyring::issued_file(connection.id));
             }
@@ -1117,7 +1433,38 @@ impl Lobby {
                 .push_back(Event::CredentialChanged(credential.clone()));
             core.events
                 .extend(revoked.into_iter().map(Event::ConnectionChanged));
-            Ok(credential)
+            let at_provider = Subject {
+                name: REVOKE_AT_PROVIDER,
+                ..subject
+            };
+            let material = match material {
+                Some(material) if core.begin_as(&at_provider).is_ok() => Some(material),
+                _ => None,
+            };
+            Ok((credential, material, at_provider))
+        })?;
+        let Some(material) = material else {
+            return Ok(Revoked {
+                credential,
+                provider: AtProvider::NotAsked,
+            });
+        };
+        let answered = match self.registry.credential(&credential.kind) {
+            Some(adapter) => adapter.revoke(&Held::new(id, material)),
+            None => Err(Outcome::Unsupported),
+        };
+        let (provider, outcome) = match answered {
+            Ok(Revocation::Confirmed) => (AtProvider::Confirmed, Outcome::Done),
+            Ok(Revocation::NotOffered) => (AtProvider::NotOffered, Outcome::Unsupported),
+            Err(outcome) => (AtProvider::NotConfirmed, outcome),
+        };
+        self.run(|core| {
+            core.settle_as(&subject, outcome);
+            Ok::<_, Refusal>(())
+        })?;
+        Ok(Revoked {
+            credential,
+            provider,
         })
     }
 
@@ -1127,13 +1474,25 @@ impl Lobby {
     /// connection is committed only when the credential is still ready and
     /// the label still free.
     pub fn grant_connection(&self, grant: Grant<'_>) -> Result<Connection, Refusal> {
-        let pinned = self.run(|core| {
-            let subject = Subject::new(Initiator::Sponsor, Some(grant.companion), GRANT_CONNECTION)
-                .through(None, ServiceName::new(grant.service));
+        let (pinned, subject) = self.run(|core| {
+            let mut subject = core.named(
+                Subject::new(Initiator::Sponsor, Some(grant.companion), GRANT_CONNECTION)
+                    .through(None, ServiceName::new(grant.service)),
+            );
+            subject.names.connection = Label::new(grant.label).ok();
+            if let Some(credential) = core
+                .store
+                .state()
+                .credential(grant.credential)
+                .filter(|credential| credential.companion == grant.companion)
+                .cloned()
+            {
+                subject = core.with_account(subject, &credential);
+            }
             let validated = self.pin_grant(core, &grant);
             let pinned = validated.map_err(|refusal| core.refused_as(&subject, refusal))?;
             core.begin_as(&subject)?;
-            Ok(pinned)
+            Ok((pinned, subject))
         })?;
         let Pinned {
             service,
@@ -1143,21 +1502,27 @@ impl Lobby {
             address,
             label,
         } = pinned;
-        let subject = Subject::new(Initiator::Sponsor, Some(grant.companion), GRANT_CONNECTION)
-            .through(None, Some(service.clone()));
         let broker = Broker::new(self, credential.id, credential_adapter);
         let established = adapter.establish(&address, &broker);
+        // An authorization that renewed the credential, or found it needs
+        // signing in again, settles that before the grant does.
+        self.settle_renewal(broker.slot(), broker.refused().map_or(Ok(None), Err));
         self.run(|core| {
             let issued = established.map_err(|outcome| {
                 core.settle_as(&subject, outcome);
                 Refusal::from_adapter(outcome)
             })?;
             let state = core.store.state();
-            let still_ready = state
+            let now = state
                 .credential(credential.id)
-                .is_some_and(|current| current.state == CredentialState::Ready)
-                && state.companion(grant.companion).is_some();
-            let checked = if !still_ready {
+                .map(|current| current.state)
+                .filter(|_| state.companion(grant.companion).is_some());
+            let checked = if now == Some(CredentialState::NeedsSignIn) {
+                Err(Refusal::new(
+                    Outcome::NeedsSignIn,
+                    "The account needs signing in again, so nothing was connected; sign the companion in again first.",
+                ))
+            } else if now != Some(CredentialState::Ready) {
                 Err(Refusal::new(
                     Outcome::Revoked,
                     "The credential was revoked while the connection was being made.",
@@ -1201,14 +1566,16 @@ impl Lobby {
     pub fn revoke_connection(&self, id: ConnectionId) -> Result<Connection, Refusal> {
         self.run(|core| {
             let found = core.store.state().connection(id).cloned();
-            let subject = Subject::new(
-                Initiator::Sponsor,
-                found.as_ref().map(|connection| connection.companion),
-                REVOKE_CONNECTION,
-            )
-            .through(
-                found.as_ref().map(|connection| connection.id),
-                found.as_ref().map(|connection| connection.service.clone()),
+            let subject = core.named(
+                Subject::new(
+                    Initiator::Sponsor,
+                    found.as_ref().map(|connection| connection.companion),
+                    REVOKE_CONNECTION,
+                )
+                .through(
+                    found.as_ref().map(|connection| connection.id),
+                    found.as_ref().map(|connection| connection.service.clone()),
+                ),
             );
             let mut connection = match found {
                 None => {
@@ -1262,6 +1629,258 @@ impl Lobby {
         })
     }
 
+    /// Marks the credential `id` rotating for its adapter, when `read` is
+    /// still its material and it is ready: the renewal's pending entry is
+    /// journaled and the mark is on the disk before this answers, and
+    /// neither happens otherwise.
+    pub fn mark_rotating(&self, id: CredentialId, read: &SealedMaterial) -> Result<(), Outcome> {
+        self.run(|core| {
+            let ready = core
+                .store
+                .state()
+                .credential(id)
+                .is_some_and(|credential| credential.state == CredentialState::Ready);
+            if !ready {
+                return Err(Outcome::Revoked);
+            }
+            let current = keyring::read_material(&self.dir, id).map_err(|error| {
+                trace::line(&format!(
+                    "the material of credential {id} could not be read to mark it: {error}"
+                ));
+                Outcome::Internal
+            })?;
+            if current != *read || self.dir.join(keyring::rotating_file(id)).exists() {
+                return Err(Outcome::Conflict);
+            }
+            let subject = core.credential_subject(Initiator::Lobby, id, RENEW_CREDENTIAL);
+            core.begin_as(&subject)
+                .map_err(|_| Outcome::TemporarilyUnavailable)?;
+            if let Err(error) = keyring::mark_rotating(&self.dir, id) {
+                trace::line(&format!(
+                    "credential {id} could not be marked rotating, so it was not renewed: {error}"
+                ));
+                core.settle_as(&subject, Outcome::TemporarilyUnavailable);
+                return Err(Outcome::TemporarilyUnavailable);
+            }
+            Ok(())
+        })
+    }
+
+    /// Clears the credential `id`'s rotating mark for its adapter: the
+    /// provider spent nothing.
+    pub fn unmark_rotating(&self, id: CredentialId) {
+        if let Err(error) = keyring::unmark_rotating(&self.dir, id) {
+            trace::line(&format!(
+                "the rotating mark of credential {id} could not be cleared: {error}"
+            ));
+        }
+    }
+
+    /// Keeps a renewal's new material for the credential `id`, when it is
+    /// still ready, its material is still what the renewal replaces, and the
+    /// renewal grants no more than the credential holds; then clears the
+    /// mark. When the new material cannot be kept the mark stays, and the
+    /// renewal ends with the credential needing signing in again.
+    pub fn commit_material(&self, id: CredentialId, update: MaterialUpdate) -> Result<(), Outcome> {
+        self.run(|core| {
+            let credential = core
+                .store
+                .state()
+                .credential(id)
+                .filter(|credential| credential.state == CredentialState::Ready)
+                .cloned()
+                .ok_or(Outcome::Revoked)?;
+            let current = keyring::read_material(&self.dir, id).map_err(|error| {
+                trace::line(&format!(
+                    "the material of credential {id} could not be read to renew it: {error}"
+                ));
+                Outcome::Internal
+            })?;
+            if current != *update.expected() {
+                return Err(Outcome::Conflict);
+            }
+            if !update
+                .permissions()
+                .iter()
+                .all(|permission| credential.permissions.contains(permission))
+            {
+                return Err(Outcome::Refused);
+            }
+            if let Err(error) = keyring::write_material(&self.dir, id, update.replacement()) {
+                trace::line(&format!(
+                    "the renewed material of credential {id} could not be kept: {error}"
+                ));
+                return Err(Outcome::TemporarilyUnavailable);
+            }
+            if update.permissions() != credential.permissions.as_slice() {
+                let mut narrowed = credential.clone();
+                narrowed.permissions = update.permissions().to_vec();
+                let mut next = core.store.state().clone();
+                for slot in &mut next.credentials {
+                    if slot.id == id {
+                        *slot = narrowed.clone();
+                    }
+                }
+                match core.store.commit(next) {
+                    Ok(()) => core.events.push_back(Event::CredentialChanged(narrowed)),
+                    Err(error) => trace::line(&format!(
+                        "the narrowed permissions of credential {id} could not be committed: {error}"
+                    )),
+                }
+            }
+            if let Err(error) = keyring::unmark_rotating(&self.dir, id) {
+                trace::line(&format!(
+                    "the rotating mark of credential {id} could not be cleared: {error}"
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    /// Settles what an adapter did through `slot`, once it answered:
+    /// `answered` is its renewal's answer, with `Ok(None)` for an answer
+    /// that says nothing about when to renew next. A renewal that ended with
+    /// its mark still in place, or that the provider refused, leaves the
+    /// credential needing signing in again with its connections; one that
+    /// could not finish, and changed nothing, is tried again later.
+    pub fn settle_renewal(&self, slot: &Slot<'_>, answered: Result<Option<Freshness>, Outcome>) {
+        let id = slot.credential();
+        let handed = slot.handed();
+        let marked = slot.marked();
+        let result: Result<(), Refusal> = self.run(|core| {
+            let subject = core.credential_subject(Initiator::Lobby, id, RENEW_CREDENTIAL);
+            let ready = core
+                .store
+                .state()
+                .credential(id)
+                .is_some_and(|credential| credential.state == CredentialState::Ready);
+            if !ready {
+                core.due.remove(&id);
+                if marked {
+                    core.settle_as(&subject, Outcome::Revoked);
+                }
+                return Ok(());
+            }
+            let still_marked = self.dir.join(keyring::rotating_file(id)).exists();
+            let unchanged = || {
+                handed.as_ref().is_some_and(|handed| {
+                    keyring::read_material(&self.dir, id).is_ok_and(|current| current == *handed)
+                })
+            };
+            match answered {
+                // The secret may have been spent and nothing new was kept:
+                // the old material is never renewed again. A mark this slot
+                // did not write belongs to a renewal still under way, which
+                // settles itself.
+                _ if marked && still_marked => {
+                    let outcome = match answered {
+                        Err(Outcome::NeedsSignIn) => Outcome::NeedsSignIn,
+                        _ => Outcome::Unknown,
+                    };
+                    trace::line(&format!(
+                        "credential {id} ended a renewal with its mark in place; it needs signing in again"
+                    ));
+                    core.needs_sign_in(id, &subject, outcome)
+                }
+                Ok(freshness) => {
+                    if marked {
+                        core.settle_as(&subject, Outcome::Done);
+                    }
+                    if let Some(freshness) = freshness {
+                        core.due.insert(
+                            id,
+                            Instant::now() + Duration::from_secs(freshness.renew_in_secs),
+                        );
+                    } else if marked {
+                        core.due.remove(&id);
+                    }
+                    Ok(())
+                }
+                Err(outcome @ (Outcome::NeedsSignIn | Outcome::Refused)) if unchanged() => {
+                    if !marked {
+                        core.begin_as(&subject)?;
+                    }
+                    trace::line(&format!(
+                        "credential {id} could not be renewed ({}); it needs signing in again",
+                        outcome.code()
+                    ));
+                    core.needs_sign_in(id, &subject, outcome)
+                }
+                Err(outcome) => {
+                    if marked {
+                        core.settle_as(&subject, outcome);
+                    }
+                    trace::line(&format!(
+                        "credential {id} could not be renewed just now ({}); it is tried again later",
+                        outcome.code()
+                    ));
+                    core.due.insert(id, Instant::now() + RENEWAL_RETRY);
+                    Ok(())
+                }
+            }
+        });
+        if let Err(refusal) = result {
+            trace::line(&format!(
+                "the end of a renewal of credential {id} could not be recorded: {}",
+                refusal.message
+            ));
+        }
+    }
+
+    /// Keeps every ready credential alive: asks each one's adapter, when it
+    /// is due, to renew it, one at a time and with nothing held, and settles
+    /// what each renewal did. Answers how long to wait before the next pass.
+    pub fn keep_alive(&self) -> Duration {
+        let now = Instant::now();
+        let due: Vec<(CredentialId, Arc<dyn CredentialAdapter>)> = {
+            let core = self.core();
+            core.store
+                .state()
+                .credentials
+                .iter()
+                .filter(|credential| credential.state == CredentialState::Ready)
+                .filter(|credential| core.due.get(&credential.id).is_none_or(|at| *at <= now))
+                .filter_map(|credential| {
+                    self.registry
+                        .credential(&credential.kind)
+                        .map(|adapter| (credential.id, adapter))
+                })
+                .collect()
+        };
+        for (id, adapter) in due {
+            let slot = Slot::new(self, id);
+            let answered = adapter.renew(&slot).map(Some);
+            self.settle_renewal(&slot, answered);
+        }
+        let core = self.core();
+        let now = Instant::now();
+        core.store
+            .state()
+            .credentials
+            .iter()
+            .filter(|credential| credential.state == CredentialState::Ready)
+            .filter_map(|credential| core.due.get(&credential.id))
+            .map(|at| at.saturating_duration_since(now))
+            .min()
+            .unwrap_or(RENEWAL_PAUSE_MAX)
+            .clamp(RENEWAL_PAUSE_MIN, RENEWAL_PAUSE_MAX)
+    }
+
+    /// The connections of `companion` that wait for a sign-in, by service.
+    pub fn waiting(&self, companion: CompanionId) -> Vec<(ServiceName, Label)> {
+        self.core()
+            .store
+            .state()
+            .connections
+            .iter()
+            .filter(|connection| {
+                connection.companion == companion
+                    && connection.state == ConnectionState::NeedsSignIn
+            })
+            .map(|connection| (connection.service.clone(), connection.label.clone()))
+            .collect()
+    }
+
     /// What `companion` reaches right now: each installed service it holds a
     /// ready connection to, its tools, and the labels and addresses of those
     /// connections.
@@ -1311,13 +1930,29 @@ impl Lobby {
             attachment: attachment.id,
         };
         let candidates = self.reached(companion);
-        let (service, tool) = candidates
-            .iter()
-            .find_map(|reached| {
-                calls::find_tool(&reached.service, &reached.tools, name)
-                    .map(|tool| (reached.service.clone(), tool))
-            })
-            .ok_or(CallRefusal::UnknownTool)?;
+        let found = candidates.iter().find_map(|reached| {
+            calls::find_tool(&reached.service, &reached.tools, name)
+                .map(|tool| (reached.service.clone(), tool))
+        });
+        let Some((service, tool)) = found else {
+            // A tool whose connections all wait for a sign-in is named, so
+            // the mind hears why it is gone and what brings it back.
+            let waiting = self.waiting(companion);
+            let named = waiting.iter().find(|(service, _)| {
+                self.registry.service(service).is_some_and(|adapter| {
+                    calls::find_tool(service, &adapter.catalog(), name).is_some()
+                })
+            });
+            return Err(match named {
+                Some((service, label)) => CallRefusal::Ended(Refusal::new(
+                    Outcome::NeedsSignIn,
+                    format!(
+                        "{name} is gone for now: the account behind {service} at {label} needs the sponsor to sign it in again on the manager page, and the tool comes back once they do."
+                    ),
+                )),
+                None => CallRefusal::UnknownTool,
+            });
+        };
         let at = arguments.remove(projections::AT);
         let ticket = self.run(|core| {
             let ready: Vec<&Connection> = core
@@ -1439,8 +2074,9 @@ impl Lobby {
         let mut core = self.core();
         core.expire_overdue(limit);
         core.settle_events(&self.feed, &self.command);
+        let released = std::mem::take(&mut core.released);
         let state = core.store.state();
-        Snapshot {
+        let snapshot = Snapshot {
             companions: core.views(),
             credentials: state.credentials.clone(),
             connections: state.connections.clone(),
@@ -1460,7 +2096,10 @@ impl Lobby {
             position: self.feed.position(),
             journal_healthy: core.journal_healthy,
             journal_high_water: core.journal.high_water(),
-        }
+        };
+        drop(core);
+        self.release(released);
+        snapshot
     }
 
     /// A page of the journal; see [`crate::journal::Reader::page`]. With
@@ -1562,11 +2201,23 @@ impl Lobby {
                     "That companion holds no credential with that id.",
                 )
             })?;
-        if credential.state != CredentialState::Ready {
-            return Err(Refusal::new(
-                Outcome::Revoked,
-                "That credential was revoked; sign the companion in again first.",
-            ));
+        match credential.state {
+            CredentialState::Ready => {}
+            CredentialState::NeedsSignIn => {
+                return Err(Refusal::new(
+                    Outcome::NeedsSignIn,
+                    format!(
+                        "{} needs signing in again first; its connections come back with it.",
+                        credential.label
+                    ),
+                ));
+            }
+            CredentialState::Revoked => {
+                return Err(Refusal::new(
+                    Outcome::Revoked,
+                    "That credential was revoked; sign the companion in again first.",
+                ));
+            }
         }
         let description = adapter.describe();
         if !description.accepts.contains(&credential.kind) {
@@ -1640,6 +2291,7 @@ fn call_note(
         tool: Some(ticket.tool.clone()),
         kind,
         outcome,
+        names: JournalNames::default(),
     }
 }
 
@@ -1697,6 +2349,151 @@ fn gone() -> Refusal {
 }
 
 impl Core {
+    /// `subject` with the names the sponsor reads now for what it names,
+    /// where it names none yet.
+    fn named(&self, mut subject: Subject) -> Subject {
+        self.fill(
+            &mut subject.names,
+            subject.companion,
+            subject.connection,
+            subject.service.as_ref(),
+        );
+        subject
+    }
+
+    /// Fills the names `names` lacks for `companion`, `connection` and
+    /// `service` from the state as it is now.
+    fn fill(
+        &self,
+        names: &mut JournalNames,
+        companion: Option<CompanionId>,
+        connection: Option<ConnectionId>,
+        service: Option<&ServiceName>,
+    ) {
+        let state = self.store.state();
+        if names.companion.is_none() {
+            names.companion = companion
+                .and_then(|id| state.companion(id))
+                .map(|record| record.companion.display_name.clone());
+        }
+        if names.service.is_none() {
+            names.service = service.and_then(|service| {
+                DisplayName::new(&crate::registry::capitalized(service.as_str())).ok()
+            });
+        }
+        if names.connection.is_none() {
+            names.connection = connection
+                .and_then(|id| state.connection(id))
+                .map(|connection| connection.label.clone());
+        }
+    }
+
+    /// `subject` naming the kind of account `kind` by its title.
+    fn with_kind(&self, mut subject: Subject, kind: &ProviderKind) -> Subject {
+        subject.names.kind = DisplayName::new(&self.registry.title(kind)).ok();
+        subject
+    }
+
+    /// `subject` naming `credential`'s account and its kind.
+    fn with_account(&self, subject: Subject, credential: &Credential) -> Subject {
+        let mut subject = self.with_kind(subject, &credential.kind);
+        subject.names.account = Some(credential.label.clone());
+        subject
+    }
+
+    /// The subject of a command about the credential `id`, with every name.
+    fn credential_subject(
+        &self,
+        initiator: Initiator,
+        id: CredentialId,
+        name: &'static str,
+    ) -> Subject {
+        let credential = self.store.state().credential(id).cloned();
+        let subject = self.named(Subject::new(
+            initiator,
+            credential.as_ref().map(|credential| credential.companion),
+            name,
+        ));
+        match &credential {
+            Some(credential) => self.with_account(subject, credential),
+            None => subject,
+        }
+    }
+
+    /// The credential of `kind` that `companion` holds and that needs
+    /// signing in again, if it holds one.
+    fn waiting_credential(
+        &self,
+        companion: CompanionId,
+        kind: &ProviderKind,
+    ) -> Option<Credential> {
+        self.store
+            .state()
+            .credentials
+            .iter()
+            .find(|credential| {
+                credential.companion == companion
+                    && credential.kind == *kind
+                    && credential.state == CredentialState::NeedsSignIn
+            })
+            .cloned()
+    }
+
+    /// The companion of the sign-in that ended under `state`, if the lobby
+    /// remembers it.
+    fn ended_for(&self, state: &str) -> Option<CompanionId> {
+        self.ended
+            .iter()
+            .rev()
+            .find(|(ended, _)| ended == state)
+            .map(|(_, view)| view.companion)
+    }
+
+    /// Commits the credential `id` and every ready connection made from it
+    /// as waiting for a sign-in, in one commit, then settles `subject`,
+    /// whose pending entry was written before, with `settled`. Its material
+    /// and what the services issued stay, for signing in again and for
+    /// revoking at the provider; its rotating mark is cleared once the
+    /// commit landed, since the state now says what the mark said.
+    fn needs_sign_in(
+        &mut self,
+        id: CredentialId,
+        subject: &Subject,
+        settled: Outcome,
+    ) -> Result<(), Refusal> {
+        let mut next = self.store.state().clone();
+        let mut credential = None;
+        for slot in &mut next.credentials {
+            if slot.id == id && slot.state == CredentialState::Ready {
+                slot.state = CredentialState::NeedsSignIn;
+                credential = Some(slot.clone());
+            }
+        }
+        let Some(credential) = credential else {
+            self.settle_as(subject, settled);
+            return Ok(());
+        };
+        let mut waiting = Vec::new();
+        for connection in &mut next.connections {
+            if connection.credential == id && connection.state == ConnectionState::Ready {
+                connection.state = ConnectionState::NeedsSignIn;
+                connection.revision += 1;
+                waiting.push(connection.clone());
+            }
+        }
+        self.land_with(subject, next, settled)?;
+        self.due.remove(&id);
+        if let Err(error) = keyring::unmark_rotating(&self.dir, id) {
+            trace::line(&format!(
+                "the rotating mark of credential {id} could not be cleared: {error}"
+            ));
+        }
+        self.events.push_back(Event::CredentialChanged(credential));
+        self.events
+            .extend(waiting.into_iter().map(Event::ConnectionChanged));
+        Ok(())
+    }
+
     fn attached_as(&self, companion: CompanionId) -> usize {
         self.attachments
             .values()
@@ -1841,6 +2638,7 @@ impl Core {
     fn end_sign_in(&mut self, state: &str, status: SignInStatus) -> Option<SignInView> {
         let awaited = self.awaited.remove(state)?;
         let view = awaited.view(status);
+        self.released.push((awaited.kind, awaited.request));
         self.remember_ended(state, view.clone());
         Some(view)
     }
@@ -1913,7 +2711,10 @@ impl Core {
     }
 
     /// Writes one journal entry, emitting it.
-    fn record(&mut self, note: Note) -> io::Result<JournalEntry> {
+    fn record(&mut self, mut note: Note) -> io::Result<JournalEntry> {
+        let (companion, connection, service) =
+            (note.companion, note.connection, note.service.clone());
+        self.fill(&mut note.names, companion, connection, service.as_ref());
         let what = match note.kind {
             JournalKind::Command { name } => name,
             JournalKind::Invoked => "an invoked call",
@@ -2001,6 +2802,16 @@ impl Core {
     /// Commits `next` after a pending entry was written, then writes the
     /// settled entry.
     fn land_as(&mut self, subject: &Subject, next: State) -> Result<(), Refusal> {
+        self.land_with(subject, next, Outcome::Done)
+    }
+
+    /// [`Core::land_as`], settling a landed commit with `settled`.
+    fn land_with(
+        &mut self,
+        subject: &Subject,
+        next: State,
+        settled: Outcome,
+    ) -> Result<(), Refusal> {
         if let Err(error) = self.store.commit(next) {
             trace::line(&format!("{} could not be committed: {error}", subject.name));
             let refusal = Refusal::new(
@@ -2010,7 +2821,7 @@ impl Core {
             self.settle_as(subject, refusal.outcome);
             return Err(refusal);
         }
-        self.settle_as(subject, Outcome::Done);
+        self.settle_as(subject, settled);
         Ok(())
     }
 
@@ -2023,7 +2834,7 @@ impl Core {
         name: &'static str,
         next: State,
     ) -> Result<(), Refusal> {
-        let subject = Subject::new(initiator, companion, name);
+        let subject = self.named(Subject::new(initiator, companion, name));
         self.begin_as(&subject)?;
         self.land_as(&subject, next)
     }
@@ -2031,6 +2842,7 @@ impl Core {
     /// Runs every emitted event through the handlers, in order, including the
     /// events the handlers' own commands emit.
     fn settle_events(&mut self, feed: &Feed, command: &str) {
+        let mut changed: Vec<CompanionId> = Vec::new();
         while let Some(event) = self.events.pop_front() {
             // The feed handler: every event becomes one item of the live feed.
             feed.publish(&projections::event_json(
@@ -2039,18 +2851,28 @@ impl Core {
                 command,
             ));
             match event {
-                // The catalog handler: every attachment of the companion
-                // learns that its tools changed.
+                // The catalog handler: a companion whose connections changed
+                // is noted, and hears it once when the drain ends.
                 Event::ConnectionChanged(connection) => {
-                    for live in self.attachments.values() {
-                        if live.attachment.companion == connection.companion {
-                            live.catalog.send_modify(|changes| *changes += 1);
-                        }
+                    if !changed.contains(&connection.companion) {
+                        changed.push(connection.companion);
                     }
+                }
+                // The keep-alive handler: a credential that changed is
+                // looked at again at once.
+                Event::CredentialChanged(_) => {
+                    self.renewals.send_modify(|changes| *changes += 1);
                 }
                 // The cascade handler: a removed companion's attachments end.
                 Event::CompanionRemoved(companion) => self.end_attachments_of(companion),
                 _ => {}
+            }
+        }
+        // Every attachment of each companion whose connections changed
+        // learns, once for the whole drain, that its tools changed.
+        for live in self.attachments.values() {
+            if changed.contains(&live.attachment.companion) {
+                live.catalog.send_modify(|changes| *changes += 1);
             }
         }
     }
@@ -2295,6 +3117,7 @@ mod tests {
         let pairs = passbook_return(lobby, companion, authority, holder);
         lobby
             .complete_sign_in("passbook", pairs)
+            .result
             .expect("signed in")
     }
 
@@ -2342,6 +3165,247 @@ mod tests {
             Vec::new(),
         );
         Lobby::open(&dir.0, "companion-lobby", registry).expect("open")
+    }
+
+    /// A lobby with the passbook and the board, a companion `ada` signed in
+    /// at `authority` as `holder-ada`, and connected to `board` as `front`.
+    fn connected_lobby(
+        dir: &Dir,
+        authority: &lobby_testkit::passbook::PassbookAuthority,
+        board: &lobby_testkit::board::BoardServer,
+    ) -> (Lobby, CompanionId, Credential, Connection) {
+        let registry = Registry::new(
+            vec![Arc::new(lobby_testkit::passbook::Passbook::new())],
+            vec![Arc::new(lobby_testkit::board::Board::new())],
+        );
+        let lobby = Lobby::open(&dir.0, "companion-lobby", registry).expect("open");
+        let ada = lobby
+            .create_companion("ada", "Ada")
+            .expect("ada")
+            .record
+            .companion
+            .id;
+        let credential = passbook_sign_in(&lobby, ada, authority, "holder-ada");
+        let connection = lobby
+            .grant_connection(Grant {
+                companion: ada,
+                credential: credential.id,
+                service: "board",
+                address: &board.origin(),
+                label: "front",
+            })
+            .expect("connected");
+        (lobby, ada, credential, connection)
+    }
+
+    fn states(lobby: &Lobby) -> (Vec<CredentialState>, Vec<ConnectionState>) {
+        let snapshot = lobby.snapshot();
+        (
+            snapshot
+                .credentials
+                .iter()
+                .map(|credential| credential.state)
+                .collect(),
+            snapshot
+                .connections
+                .iter()
+                .map(|connection| connection.state)
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_renewal_commits_once_on_top_of_what_it_read_and_never_more_than_held() {
+        let dir = Dir::new("commit-once");
+        let authority = lobby_testkit::passbook::PassbookAuthority::start();
+        let board = lobby_testkit::board::BoardServer::start(&authority);
+        let (lobby, _, credential, _) = connected_lobby(&dir, &authority, &board);
+        let slot = Slot::new(&lobby, credential.id);
+        let read = slot.read().expect("material");
+        let held = vec!["stamp".to_owned()];
+        let first = MaterialUpdate::new(
+            read.clone(),
+            SealedMaterial::new(b"renewed once".to_vec()),
+            held.clone(),
+            &held,
+        )
+        .expect("an update");
+        slot.commit(first).expect("it lands on what it read");
+        let again = MaterialUpdate::new(
+            read,
+            SealedMaterial::new(b"renewed twice".to_vec()),
+            held.clone(),
+            &held,
+        )
+        .expect("an update");
+        assert_eq!(
+            slot.commit(again),
+            Err(Outcome::Conflict),
+            "an update made from material already replaced never lands"
+        );
+        assert_eq!(
+            lobby.read_material(credential.id),
+            Ok(SealedMaterial::new(b"renewed once".to_vec()))
+        );
+        let claimed = vec!["stamp".to_owned(), "more".to_owned()];
+        let wider = MaterialUpdate::new(
+            SealedMaterial::new(b"renewed once".to_vec()),
+            SealedMaterial::new(b"widened".to_vec()),
+            claimed.clone(),
+            &claimed,
+        )
+        .expect("the adapter claims it held more");
+        assert_eq!(
+            slot.commit(wider),
+            Err(Outcome::Refused),
+            "the lobby holds the credential to what it was granted"
+        );
+        assert_eq!(
+            lobby.read_material(credential.id),
+            Ok(SealedMaterial::new(b"renewed once".to_vec()))
+        );
+    }
+
+    #[test]
+    fn a_renewal_left_marked_by_a_stopped_daemon_needs_sign_in_and_is_never_renewed_again() {
+        let dir = Dir::new("left-marked");
+        let authority = lobby_testkit::passbook::PassbookAuthority::start();
+        let board = lobby_testkit::board::BoardServer::start(&authority);
+        authority.key_lifetime(1);
+        let (lobby, ada, credential, connection) = connected_lobby(&dir, &authority, &board);
+        // The grant's stamp renewed the key first, as it was due.
+        assert_eq!(commands(&dir, RENEW_CREDENTIAL), ["pending", "done"]);
+        let presented = authority.renewals_presented().len();
+        assert_eq!(presented, 1);
+        // A renewal marks the material, and the daemon stops before the
+        // provider's answer is kept.
+        let slot = Slot::new(&lobby, credential.id);
+        let read = slot.read().expect("material");
+        slot.mark_rotating(&read).expect("marked");
+        drop(slot);
+        drop(lobby);
+
+        let registry = Registry::new(
+            vec![Arc::new(lobby_testkit::passbook::Passbook::new())],
+            vec![Arc::new(lobby_testkit::board::Board::new())],
+        );
+        let lobby = Lobby::open(&dir.0, "companion-lobby", registry).expect("open again");
+        assert_eq!(lobby.end_unfinished_renewals(), Ok(1));
+        assert_eq!(
+            states(&lobby),
+            (
+                vec![CredentialState::NeedsSignIn],
+                vec![ConnectionState::NeedsSignIn]
+            )
+        );
+        assert!(
+            !dir.0.join(keyring::rotating_file(credential.id)).exists(),
+            "the state says what the mark said"
+        );
+        assert_eq!(
+            lobby.sweep_keyring(),
+            Ok(0),
+            "its files stay for signing in again"
+        );
+        lobby.keep_alive();
+        assert_eq!(
+            authority.renewals_presented().len(),
+            presented,
+            "the marked renewal is never presented"
+        );
+        assert_eq!(commands(&dir, END_UNFINISHED_RENEWAL), ["pending", "done"]);
+        assert!(lobby.reached(ada).is_empty(), "its tools are gone");
+
+        // Signing the same account in again restores it and its connection.
+        let restored = passbook_sign_in(&lobby, ada, &authority, "holder-ada");
+        assert_eq!(restored.id, credential.id, "the same credential");
+        assert_eq!(
+            states(&lobby),
+            (vec![CredentialState::Ready], vec![ConnectionState::Ready])
+        );
+        let back = lobby.snapshot().connections[0].clone();
+        assert_eq!(back.id, connection.id, "the same connection, no new grant");
+        assert_eq!(back.revision, connection.revision + 2);
+        assert_eq!(board.listener().count("/admit"), 1, "no new admission");
+        assert_eq!(lobby.reached(ada).len(), 1, "its tools are back");
+    }
+
+    #[test]
+    fn a_refused_renewal_leaves_the_credential_and_its_connections_waiting_in_one_commit() {
+        let dir = Dir::new("refused-renewal");
+        let authority = lobby_testkit::passbook::PassbookAuthority::start();
+        let board = lobby_testkit::board::BoardServer::start(&authority);
+        authority.key_lifetime(1);
+        let (lobby, ada, _, _) = connected_lobby(&dir, &authority, &board);
+        authority.refuse_renewals(true);
+        let revision = std::fs::read_to_string(dir.0.join(crate::store::STATE_FILE))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|state| state["revision"].as_u64())
+            .expect("a revision");
+        lobby.keep_alive();
+        assert_eq!(
+            states(&lobby),
+            (
+                vec![CredentialState::NeedsSignIn],
+                vec![ConnectionState::NeedsSignIn]
+            )
+        );
+        let after = std::fs::read_to_string(dir.0.join(crate::store::STATE_FILE))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|state| state["revision"].as_u64())
+            .expect("a revision");
+        assert_eq!(after, revision + 1, "one commit");
+        assert_eq!(
+            commands(&dir, RENEW_CREDENTIAL),
+            ["pending", "done", "pending", "needs_sign_in"],
+            "the grant renewed the key once, and the next renewal was refused"
+        );
+        assert_eq!(authority.renewals_presented().len(), 2);
+        lobby.keep_alive();
+        assert_eq!(
+            authority.renewals_presented().len(),
+            2,
+            "a credential that needs signing in is never renewed"
+        );
+
+        // Another account is refused while this one waits.
+        let other = lobby
+            .complete_sign_in(
+                "passbook",
+                passbook_return(&lobby, ada, &authority, "holder-other"),
+            )
+            .result
+            .expect_err("another account");
+        assert_eq!(other.outcome, Outcome::Conflict);
+        assert_eq!(
+            states(&lobby).0,
+            [CredentialState::NeedsSignIn],
+            "nothing was signed in"
+        );
+    }
+
+    #[test]
+    fn a_renewal_the_provider_asks_to_slow_down_changes_nothing() {
+        let dir = Dir::new("rate-limited");
+        let authority = lobby_testkit::passbook::PassbookAuthority::start();
+        let board = lobby_testkit::board::BoardServer::start(&authority);
+        authority.key_lifetime(1);
+        let (lobby, _, credential, _) = connected_lobby(&dir, &authority, &board);
+        let before = lobby.read_material(credential.id).expect("material");
+        authority.rate_limit_renewals(true);
+        lobby.keep_alive();
+        assert_eq!(
+            states(&lobby),
+            (vec![CredentialState::Ready], vec![ConnectionState::Ready])
+        );
+        assert_eq!(lobby.read_material(credential.id), Ok(before));
+        assert!(!dir.0.join(keyring::rotating_file(credential.id)).exists());
+        assert_eq!(
+            commands(&dir, RENEW_CREDENTIAL),
+            ["pending", "done", "pending", "rate_limited"]
+        );
     }
 
     fn commands(dir: &Dir, name: &str) -> Vec<String> {
@@ -2411,6 +3475,7 @@ mod tests {
         lobby.cancel_sign_in(&waiting[0].id).expect("cancelled");
         let refused = lobby
             .complete_sign_in("passbook", pairs)
+            .result
             .expect_err("cancelled");
         assert_eq!(refused.outcome, Outcome::NotFound);
         assert!(refused.message.contains("cancelled"), "{}", refused.message);
@@ -2437,6 +3502,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         let refused = lobby
             .complete_sign_in("passbook", pairs)
+            .result
             .expect_err("expired");
         assert_eq!(refused.outcome, Outcome::NotFound);
         assert!(
@@ -2533,6 +3599,7 @@ mod tests {
                 "passbook",
                 passbook_return(&lobby, bea, &authority, "holder-ada"),
             )
+            .result
             .expect_err("the account stays reserved to ada");
         assert_eq!(taken.outcome, Outcome::Conflict);
         let second = passbook_sign_in(&lobby, ada, &authority, "holder-ada");

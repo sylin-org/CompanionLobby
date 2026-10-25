@@ -204,8 +204,10 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
     let done = text(&back);
     assert!(
         done.contains("<link rel=\"stylesheet\" href=\"/manager.css\">")
-            && done.contains("<a class=\"button primary\" href=\"/\">Back to the lobby</a>"),
-        "the page a sign-in lands on wears the lobby's look and leads back: {done}"
+            && done.contains(&format!(
+                "<a class=\"button primary\" href=\"/companion/{id}\">Back to Ada Lovelace</a>"
+            )),
+        "the page a sign-in lands on wears the lobby's look and leads to the companion's page: {done}"
     );
     assert!(!done.contains(DID) && !done.contains(HANDLE), "{done}");
     let ended = install.json("/api/lobby")["signIns"].clone();
@@ -289,8 +291,9 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
         "You created Ada Lovelace.",
         "You changed the portrait of Ada Lovelace.",
         "A mind attached as Ada Lovelace.",
-        "You started signing Ada Lovelace in.",
-        "You signed Ada Lovelace in.",
+        "You started signing Ada Lovelace in with Atmosphere.",
+        "You signed Ada Lovelace in with Atmosphere as ada.example.test.",
+        "You signed Ada Lovelace in with Passbook as ada.",
         "You opened a connection for Ada Lovelace to Board at front.",
         "A mind as Ada Lovelace called read on Board at front.",
         "You revoked the connection of Ada Lovelace to Board at front.",
@@ -359,6 +362,10 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
         .iter()
         .map(|entry| entry["sentence"].as_str().expect("a sentence").to_owned())
         .collect();
-    assert_eq!(said, ["You removed a companion."]);
+    assert_eq!(
+        said,
+        ["You removed Ada Lovelace."],
+        "a removed companion keeps its history by name"
+    );
     install.stop();
 }

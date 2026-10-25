@@ -3,10 +3,16 @@
 //! A credential record names its companion, the provider kind that signed it
 //! in, the account the provider authenticated with the label the sponsor
 //! knows it by, the permissions the provider granted, and its state. It
-//! never holds
-//! the material itself: material is a blob only the adapter of its provider
-//! kind can decode, which the daemon keeps sealed beside the record and hands
-//! back only through a [`MaterialSlot`].
+//! never holds the material itself: material is a blob only the adapter of
+//! its provider kind can decode, which the daemon keeps sealed beside the
+//! record and hands back only through a [`MaterialSlot`].
+//!
+//! A credential is kept alive by its adapter: the daemon asks it to
+//! [`renew`](CredentialAdapter::renew) the material whenever the adapter
+//! said it would want to be asked, and the adapter spends the provider's
+//! single-use secret only after the slot has durably marked it rotating, so
+//! a daemon that stops between the provider's rotation and the commit of the
+//! new material comes back knowing the credential needs signing in again.
 
 use std::fmt;
 
@@ -127,6 +133,11 @@ impl fmt::Display for AccountLabel {
 pub enum CredentialState {
     /// Signed in; its material can mint authorizations.
     Ready,
+    /// The provider refused to renew it, or the lobby cannot be sure a
+    /// renewal landed: its material mints nothing and is never renewed
+    /// again, its connections wait, and signing the same account in again
+    /// restores it and them.
+    NeedsSignIn,
     /// The sponsor revoked it: its material is gone, every connection made
     /// from it is revoked, and the account stays reserved to its companion.
     Revoked,
@@ -185,6 +196,11 @@ pub struct SignInRequest {
     /// The lobby's own return URL, where the provider sends the sponsor's
     /// browser back.
     pub return_to: String,
+    /// When the sponsor signs a credential that needs signing in again, its
+    /// material: the sign-in is for that same account, named to the provider
+    /// from the material whatever `hint` says, and completing it must sign
+    /// in that account.
+    pub again: Option<SealedMaterial>,
 }
 
 /// Where the sponsor's browser goes to sign in.
@@ -227,6 +243,23 @@ pub struct SignedIn {
     pub material: SealedMaterial,
 }
 
+/// What a renewal left: how long until the adapter wants to be asked again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Freshness {
+    /// Seconds until the material should be renewed.
+    pub renew_in_secs: u64,
+}
+
+/// What the provider said when the lobby revoked a credential there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Revocation {
+    /// The provider confirmed that what it granted is revoked.
+    Confirmed,
+    /// The provider offers no way to revoke; what it granted ends when it
+    /// expires there.
+    NotOffered,
+}
+
 /// The contract every credential adapter implements.
 ///
 /// Calls are synchronous and may block on the network; the daemon runs them
@@ -234,6 +267,21 @@ pub struct SignedIn {
 /// not support before it reads material or touches the network, refuses
 /// material it did not encode, and never returns provider text: every
 /// failure is an [`Outcome`].
+///
+/// Renewing a credential follows one order, whatever the provider: read the
+/// material, decide it is due, [`mark`](MaterialSlot::mark_rotating) it
+/// rotating, and only then send the request that spends the provider's
+/// single-use secret; on an answer that keeps the profile,
+/// [`commit`](MaterialSlot::commit) the new material, which clears the mark.
+/// When the provider certainly spent nothing (it asked for fewer requests,
+/// or refused before acting) the adapter
+/// [`unmarks`](MaterialSlot::unmark_rotating) it. Any other end leaves the
+/// mark, and the daemon then treats the credential as needing sign-in and
+/// never offers the old secret again. One credential renews once at a time:
+/// the adapter holds a lock of its own, keyed by
+/// [`MaterialSlot::credential`], across the whole renewal and every
+/// authorization that reads the material, and the daemon holds none of its
+/// own while the adapter runs.
 pub trait CredentialAdapter: Send + Sync {
     /// The provider kind this adapter serves.
     fn kind(&self) -> ProviderKind;
@@ -249,12 +297,28 @@ pub trait CredentialAdapter: Send + Sync {
         returned: &SignInReturn,
     ) -> Result<SignedIn, Outcome>;
 
-    /// Mints an authorization for `ask` from the material in `slot`.
+    /// Lets go at once of whatever the adapter keeps for the sign-in
+    /// `request` started, which the lobby stopped waiting for.
+    fn cancel_sign_in(&self, request: &SignInRequest);
+
+    /// Mints an authorization for `ask` from the material in `slot`,
+    /// renewing the material first when it is due.
     fn authorize(
         &self,
         slot: &dyn MaterialSlot,
         ask: &AuthorizationAsk,
     ) -> Result<Authorization, Outcome>;
+
+    /// Keeps the credential in `slot` alive: renews its material when it is
+    /// due, in the order the contract lays down, and says when to ask again.
+    /// A refusal the provider meant is [`Outcome::NeedsSignIn`]; a renewal
+    /// that may have spent the secret without a new one kept is
+    /// [`Outcome::Unknown`].
+    fn renew(&self, slot: &dyn MaterialSlot) -> Result<Freshness, Outcome>;
+
+    /// Revokes at the provider what it granted for the material in `slot`,
+    /// which the lobby has already revoked on its side.
+    fn revoke(&self, slot: &dyn MaterialSlot) -> Result<Revocation, Outcome>;
 }
 
 #[cfg(test)]

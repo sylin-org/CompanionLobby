@@ -18,7 +18,7 @@ use lobby_daemon::contact::{self, Probe};
 use lobby_daemon::loopback::{self, Answer, Call};
 use lobby_daemon::mcp::LIST_CHANGED;
 use lobby_outbound::{Outbound, Request};
-use lobby_testkit::board::{Admission, BoardServer};
+use lobby_testkit::board::BoardServer;
 use lobby_testkit::passbook::PassbookAuthority;
 use lobby_testkit::{Peer, TempHome, free_port, secrets_in};
 use serde_json::{Value, json};
@@ -705,7 +705,9 @@ pub fn a_late_result_after_a_revocation_is_never_a_success(exe: &Path) {
 /// Revoking one connection tells the host its tools changed and drops that
 /// label from `at`; revoking the credential revokes every connection made
 /// from it in one journaled command, deletes what they kept, empties the
-/// catalog down to `reach` and tells the host again.
+/// catalog down to `reach` and tells the host again, once; then the
+/// credential is revoked at its provider too, a step journaled on its own,
+/// and the answer says the provider confirmed it.
 pub fn revoking_the_credential_cascades_to_its_connections(exe: &Path) {
     let authority = PassbookAuthority::start();
     let front = BoardServer::start(&authority);
@@ -756,7 +758,13 @@ pub fn revoking_the_credential_cascades_to_its_connections(exe: &Path) {
         &json!({}),
     );
     assert_eq!(revoked.status, 200, "{}", text(&revoked));
+    assert_eq!(body(&revoked)["provider"], "confirmed");
+    assert_eq!(authority.revoked().len(), 1, "the authority was asked");
     peer.notification(LIST_CHANGED);
+    assert!(
+        peer.notification_within(LIST_CHANGED, QUIET).is_none(),
+        "the host hears the change once"
+    );
     assert_eq!(names(&tools(&mut peer, 3)), ["reach"]);
     let refused = call(&mut peer, 4, "board_read", json!({}));
     assert_eq!(refused["error"]["code"], -32602);
@@ -795,9 +803,11 @@ pub fn revoking_the_credential_cascades_to_its_connections(exe: &Path) {
         commands,
         [
             ("revoke_credential".to_owned(), "pending".to_owned()),
-            ("revoke_credential".to_owned(), "done".to_owned())
+            ("revoke_credential".to_owned(), "done".to_owned()),
+            ("revoke_at_provider".to_owned(), "pending".to_owned()),
+            ("revoke_at_provider".to_owned(), "done".to_owned()),
         ],
-        "one journaled command revokes the credential and its connections"
+        "one journaled command revokes the credential and its connections, and one at the provider"
     );
     let again = install.operator(
         "POST",
@@ -805,47 +815,4 @@ pub fn revoking_the_credential_cascades_to_its_connections(exe: &Path) {
         &json!({}),
     );
     assert_eq!(again.status, 409);
-}
-
-/// A board that wants a plain bearer token asks for something the passbook
-/// never gives: the establishment is refused as unsupported before the
-/// authority is asked for anything, nothing reaches the board's admission,
-/// and no connection exists.
-pub fn an_unsupported_ask_is_refused_before_the_provider_is_reached(exe: &Path) {
-    let authority = PassbookAuthority::start();
-    let board = BoardServer::start(&authority);
-    board.admit_with(Admission::Plain);
-    let install = Install::new(exe, "unsupported");
-    install.open();
-    let ada = install.create("ada");
-    let credential = install.signed_in(&ada, &authority, "holder-ada");
-    let before = authority.listener().requests().len();
-    let refused = install.grant(&ada, &credential, &board, "front");
-    assert_eq!(refused.status, 403, "{}", text(&refused));
-    assert_eq!(body(&refused)["outcome"], "unsupported");
-    assert_eq!(
-        authority.listener().requests().len(),
-        before,
-        "the authority was not reached"
-    );
-    assert_eq!(authority.listener().count("/stamp"), 0);
-    assert_eq!(board.listener().count("/admit"), 0);
-    assert_eq!(install.json("/api/lobby")["connections"], json!([]));
-    let grants: Vec<String> = install
-        .journal()
-        .iter()
-        .filter(|entry| entry["command"] == "grant_connection")
-        .map(|entry| entry["outcome"].as_str().expect("outcome").to_owned())
-        .collect();
-    assert_eq!(grants, ["pending", "unsupported"]);
-
-    board.admit_with(Admission::Audience);
-    install.connected(&ada, &credential, &board, "front");
-    let minted = authority.minted();
-    assert_eq!(minted.len(), 1);
-    assert_eq!(
-        minted[0].audience,
-        board.audience(),
-        "a stamp for the board's own audience once it asks for one"
-    );
 }

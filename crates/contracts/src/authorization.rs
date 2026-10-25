@@ -2,18 +2,18 @@
 //!
 //! A service adapter never holds credential material. When it needs to prove
 //! who it acts for, it asks the daemon's [`Authority`](crate::Authority) for
-//! an authorization in the exact shape the service wants: a bearer token or
-//! a proof for one audience and method. The credential adapter of the connection's credential mints it from material
-//! only it can read, or refuses an ask it does not support before it reads
-//! anything. The answer is a scheme and a [`Secret`] token.
+//! an authorization in the exact shape the service wants: a proof for one
+//! audience and method. The credential adapter of the connection's
+//! credential mints it from material only it can read, or refuses an ask it
+//! does not support before it reads anything. The answer is a scheme and a
+//! [`Secret`] token. A shape joins this enum with the first adapter that
+//! answers it.
 
 use std::fmt;
 
 /// A shape of authorization a service adapter asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthorizationAsk {
-    /// A bearer token for the account itself.
-    Bearer,
     /// A short-lived proof, for the service that declared `audience`, that
     /// the account may call `method` there.
     ServiceProof {

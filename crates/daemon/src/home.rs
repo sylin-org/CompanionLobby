@@ -438,6 +438,7 @@ fn is_lobby_file(name: &str) -> bool {
     .contains(&name)
         || is_journal_file(name)
         || crate::keyring::is_sealed_file(name)
+        || crate::keyring::is_rotating_file(name)
         || [ATTACH_SECRET_FILE, RECORD_FILE, STATE_FILE]
             .iter()
             .any(|file| is_temporary_of(name, file))

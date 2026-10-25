@@ -5,8 +5,8 @@
 use std::time::Duration;
 
 use lobby_contracts::{
-    AuthorizationAsk, CredentialAdapter, MaterialSlot, Outcome, SealedMaterial, SignInRequest,
-    SignInReturn,
+    AuthorizationAsk, CredentialAdapter, CredentialId, MaterialSlot, MaterialUpdate, Outcome,
+    SealedMaterial, SignInRequest, SignInReturn,
 };
 use lobby_credential_atproto::{Atproto, World};
 use lobby_testkit::atproto::{AtprotoWorld, Flaw};
@@ -33,6 +33,7 @@ fn request(hint: &str, state: &str) -> SignInRequest {
         hint: hint.to_owned(),
         state: state.to_owned(),
         return_to: RETURN_TO.to_owned(),
+        again: None,
     }
 }
 
@@ -488,8 +489,22 @@ fn an_opaque_access_token_signs_in_all_the_same() {
 struct Untouched;
 
 impl MaterialSlot for Untouched {
+    fn credential(&self) -> CredentialId {
+        CredentialId::from_u128(1)
+    }
+
     fn read(&self) -> Result<SealedMaterial, Outcome> {
         panic!("the material is never read for an ask the adapter does not answer")
+    }
+
+    fn mark_rotating(&self, _read: &SealedMaterial) -> Result<(), Outcome> {
+        panic!("nothing is marked for an ask the adapter does not answer")
+    }
+
+    fn unmark_rotating(&self) {}
+
+    fn commit(&self, _update: MaterialUpdate) -> Result<(), Outcome> {
+        panic!("nothing is committed for an ask the adapter does not answer")
     }
 }
 
@@ -497,19 +512,15 @@ impl MaterialSlot for Untouched {
 fn every_ask_is_refused_as_unsupported_before_the_material_is_read() {
     let world = world();
     let adapter = adapter(&world);
-    for ask in [
-        AuthorizationAsk::Bearer,
-        AuthorizationAsk::ServiceProof {
-            audience: "did:web:service.example.test".to_owned(),
-            method: "com.example.method".to_owned(),
-            lifetime_secs: 60,
-        },
-    ] {
-        assert_eq!(
-            adapter.authorize(&Untouched, &ask).map(|_| ()),
-            Err(Outcome::Unsupported)
-        );
-    }
+    let ask = AuthorizationAsk::ServiceProof {
+        audience: "did:web:service.example.test".to_owned(),
+        method: "com.example.method".to_owned(),
+        lifetime_secs: 60,
+    };
+    assert_eq!(
+        adapter.authorize(&Untouched, &ask).map(|_| ()),
+        Err(Outcome::Unsupported)
+    );
     assert!(world.server().requests().is_empty());
 }
 

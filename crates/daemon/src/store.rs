@@ -13,10 +13,12 @@
 //! that is empty, does not parse, names no schema or another schema, or holds
 //! a value its own rules refuse (a duplicate moniker, an identifier of the
 //! wrong shape, a credential of a companion it does not hold, an account
-//! signed in for two companions, two ready credentials of one kind for one
-//! companion, a ready connection through a revoked credential or one label
-//! naming two ready connections of a service) is refused, and the daemon
-//! does not start on it. A refused file is never rewritten: the daemon writes
+//! signed in for two companions, two credentials of one kind for one
+//! companion that are not revoked, a connection whose state its credential
+//! does not allow, or one label naming two connections of a service that are
+//! not revoked) is refused, and the daemon does not start on it. A ready
+//! connection goes through a ready credential, and a connection that waits
+//! for a sign-in through a credential that needs one. A refused file is never rewritten: the daemon writes
 //! only a schema it reads.
 //!
 //! Every write is atomic ([`atomic_write`]): the new bytes go to a temporary
@@ -143,14 +145,14 @@ impl State {
             }) {
                 return Some("holds one account signed in for two companions");
             }
-            if credential.state == CredentialState::Ready
+            if credential.state != CredentialState::Revoked
                 && self.credentials[..index].iter().any(|other| {
-                    other.state == CredentialState::Ready
+                    other.state != CredentialState::Revoked
                         && other.kind == credential.kind
                         && other.companion == credential.companion
                 })
             {
-                return Some("holds two ready credentials of one kind for one companion");
+                return Some("holds two live credentials of one kind for one companion");
             }
         }
         for (index, connection) in self.connections.iter().enumerate() {
@@ -169,18 +171,23 @@ impl State {
             if connection.revision == 0 {
                 return Some("holds a connection at revision 0");
             }
-            if connection.state == ConnectionState::Ready {
-                if credential.state != CredentialState::Ready {
-                    return Some("holds a ready connection through a revoked credential");
-                }
-                if self.connections[..index].iter().any(|other| {
-                    other.state == ConnectionState::Ready
+            let allowed = match connection.state {
+                ConnectionState::Ready => credential.state == CredentialState::Ready,
+                ConnectionState::NeedsSignIn => credential.state == CredentialState::NeedsSignIn,
+                ConnectionState::Revoked => true,
+            };
+            if !allowed {
+                return Some("holds a connection whose credential does not allow its state");
+            }
+            if connection.state != ConnectionState::Revoked
+                && self.connections[..index].iter().any(|other| {
+                    other.state != ConnectionState::Revoked
                         && other.companion == connection.companion
                         && other.service == connection.service
                         && other.label == connection.label
-                }) {
-                    return Some("holds one label naming two ready connections of a service");
-                }
+                })
+            {
+                return Some("holds one label naming two live connections of a service");
             }
         }
         None
@@ -238,6 +245,7 @@ struct ConnectionForm {
 #[serde(rename_all = "camelCase")]
 enum StateForm {
     Ready,
+    NeedsSignIn,
     Revoked,
 }
 
@@ -334,6 +342,7 @@ fn encode(state: &State) -> Vec<u8> {
                 permissions: credential.permissions.clone(),
                 state: match credential.state {
                     CredentialState::Ready => StateForm::Ready,
+                    CredentialState::NeedsSignIn => StateForm::NeedsSignIn,
                     CredentialState::Revoked => StateForm::Revoked,
                 },
             })
@@ -350,6 +359,7 @@ fn encode(state: &State) -> Vec<u8> {
                 label: connection.label.as_str().to_owned(),
                 state: match connection.state {
                     ConnectionState::Ready => StateForm::Ready,
+                    ConnectionState::NeedsSignIn => StateForm::NeedsSignIn,
                     ConnectionState::Revoked => StateForm::Revoked,
                 },
                 revision: connection.revision,
@@ -430,6 +440,7 @@ fn decode(bytes: &[u8]) -> Result<State, String> {
                     .then_some(entry.permissions)?,
                 state: match entry.state {
                     StateForm::Ready => CredentialState::Ready,
+                    StateForm::NeedsSignIn => CredentialState::NeedsSignIn,
                     StateForm::Revoked => CredentialState::Revoked,
                 },
             })
@@ -452,6 +463,7 @@ fn decode(bytes: &[u8]) -> Result<State, String> {
                 label: Label::new(&entry.label).ok()?,
                 state: match entry.state {
                     StateForm::Ready => ConnectionState::Ready,
+                    StateForm::NeedsSignIn => ConnectionState::NeedsSignIn,
                     StateForm::Revoked => ConnectionState::Revoked,
                 },
                 revision: entry.revision,

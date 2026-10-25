@@ -16,12 +16,22 @@ use crate::identity;
 /// The longest token accepted.
 pub const TOKEN_LIMIT: usize = 4096;
 
+/// How long an access token is taken to live when the answer does not say.
+pub const ACCESS_SECS_UNSAID: u64 = 300;
+
+/// The longest life an access token is taken to have, whatever the answer
+/// says.
+pub const ACCESS_SECS_MAX: u64 = 30 * 24 * 60 * 60;
+
 /// A token answer that keeps the profile.
 pub struct Tokens {
     pub(crate) access: Secret,
     pub(crate) refresh: Secret,
     pub(crate) subject: String,
     pub(crate) granted: Vec<String>,
+    /// How many seconds the access token lives, as the answer says, within
+    /// [`ACCESS_SECS_MAX`].
+    pub(crate) expires_in: u64,
 }
 
 /// `answer` as tokens, when it keeps the profile for a request that asked
@@ -60,11 +70,16 @@ pub fn checked(answer: &Value, asked: &str) -> Result<Tokens, Outcome> {
     {
         return Err(Outcome::Refused);
     }
+    let expires_in = answer["expires_in"]
+        .as_u64()
+        .unwrap_or(ACCESS_SECS_UNSAID)
+        .min(ACCESS_SECS_MAX);
     Ok(Tokens {
         access,
         refresh,
         subject,
         granted,
+        expires_in,
     })
 }
 
@@ -102,6 +117,13 @@ mod tests {
         assert_eq!(tokens.refresh.expose(), "refresh-1");
         assert_eq!(tokens.subject, DID);
         assert_eq!(tokens.granted, ["atproto"]);
+        assert_eq!(tokens.expires_in, 3600);
+        let mut unsaid = answer();
+        unsaid["expires_in"] = Value::Null;
+        assert_eq!(
+            checked(&unsaid, "atproto").expect("kept").expires_in,
+            ACCESS_SECS_UNSAID
+        );
         let mut lower = answer();
         lower["token_type"] = json!("dpop");
         assert!(checked(&lower, "atproto").is_ok(), "the type has no case");

@@ -21,6 +21,7 @@ use crate::codec::{base64url, base64url_decode, now_secs, random_bytes, random_t
 pub const PROOF_LIFETIME_SECS: i64 = 120;
 
 /// One OAuth session's DPoP key. Its `Debug` never prints the key.
+#[derive(Clone)]
 pub struct DpopKey(SigningKey);
 
 impl std::fmt::Debug for DpopKey {
@@ -66,6 +67,12 @@ impl DpopKey {
             "x": coordinate(point.x()),
             "y": coordinate(point.y()),
         })
+    }
+
+    /// The key's RFC 7638 thumbprint: the SHA-256 of its JWK's required
+    /// members in lexicographic order, which is how `serde_json` keeps them.
+    pub fn thumbprint(&self) -> String {
+        base64url(&crate::codec::sha256(self.jwk().to_string().as_bytes()))
     }
 
     /// A proof for one request: `method` to `url`, carrying `nonce` when the
@@ -157,6 +164,28 @@ mod tests {
             "a fresh jti every time"
         );
         assert!(second_claims.get("nonce").is_none());
+    }
+
+    #[test]
+    fn the_thumbprint_follows_rfc_7638() {
+        // RFC 7638 section 3.1 uses an RSA key; this one checks the member
+        // order and the hash for a P-256 key by hand.
+        let key = DpopKey::generate().expect("a key");
+        let jwk = key.jwk();
+        let members = format!(
+            "{{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"{}\",\"y\":\"{}\"}}",
+            jwk["x"].as_str().expect("x"),
+            jwk["y"].as_str().expect("y")
+        );
+        assert_eq!(jwk.to_string(), members);
+        assert_eq!(
+            key.thumbprint(),
+            base64url(&crate::codec::sha256(members.as_bytes()))
+        );
+        assert_ne!(
+            key.thumbprint(),
+            DpopKey::generate().expect("another").thumbprint()
+        );
     }
 
     #[test]

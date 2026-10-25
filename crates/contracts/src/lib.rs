@@ -43,10 +43,10 @@ pub use companion::{Companion, CompanionId, DisplayName, Moniker, NameProblem};
 pub use connection::{Connection, ConnectionId, ConnectionState, Label};
 pub use credential::{
     AccountKey, AccountLabel, Credential, CredentialAdapter, CredentialId, CredentialState,
-    ProviderKind, SignInRequest, SignInReturn, SignInStart, SignedIn,
+    Freshness, ProviderKind, Revocation, SignInRequest, SignInReturn, SignInStart, SignedIn,
 };
-pub use journal::{Initiator, JournalEntry, JournalKind};
-pub use material::{MaterialSlot, SealedIssued, SealedMaterial};
+pub use journal::{Initiator, JournalEntry, JournalKind, JournalNames};
+pub use material::{MaterialSlot, MaterialUpdate, SealedIssued, SealedMaterial};
 pub use mind::{Attachment, AttachmentId};
 pub use outcome::{Outcome, Retry};
 pub use service::{Authority, ServiceAdapter, ServiceDescription, ServiceName};

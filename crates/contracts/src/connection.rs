@@ -65,6 +65,10 @@ impl fmt::Display for Label {
 pub enum ConnectionState {
     /// Established; its tools are in its companion's catalog.
     Ready,
+    /// Its credential needs signing in again: its tools are gone until the
+    /// sponsor signs the same account in again, which restores it with what
+    /// the service issued for it.
+    NeedsSignIn,
     /// The sponsor revoked it, or its credential: its tools are gone and what
     /// the service issued for it is deleted.
     Revoked,

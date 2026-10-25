@@ -8,7 +8,8 @@
 //! the response; and client id metadata documents, which the loopback
 //! client id stands in for. Its authorize, PAR and token endpoints must live
 //! on its own origin. A server missing any of it is refused before anything
-//! is pushed.
+//! is pushed. A revocation endpoint is used when the metadata names one on
+//! the server's own origin; a server without one cannot be asked to revoke.
 
 use lobby_contracts::{Address, Outcome};
 use lobby_outbound::Outbound;
@@ -23,8 +24,10 @@ pub struct Endpoints {
     pub authorize: Endpoint,
     /// Where the request is pushed.
     pub pushed: Endpoint,
-    /// Where the code is exchanged.
+    /// Where the code is exchanged and the session refreshed.
     pub token: Endpoint,
+    /// Where a grant is revoked, when the server offers it.
+    pub revocation: Option<Endpoint>,
 }
 
 /// The endpoints of `issuer`, when its metadata satisfies the profile.
@@ -62,6 +65,7 @@ fn checked(metadata: &Value, issuer: &Address) -> Option<Endpoints> {
         authorize: endpoint("authorization_endpoint")?,
         pushed: endpoint("pushed_authorization_request_endpoint")?,
         token: endpoint("token_endpoint")?,
+        revocation: endpoint("revocation_endpoint"),
     })
 }
 
@@ -99,6 +103,17 @@ mod tests {
         assert_eq!(endpoints.pushed.path, "/oauth/par");
         assert_eq!(endpoints.token.path, "/oauth/token");
         assert_eq!(endpoints.authorize.path, "/oauth/authorize");
+        assert_eq!(endpoints.revocation, None, "none named, none used");
+        let mut revoking = complete();
+        revoking["revocation_endpoint"] = json!("https://as.test/oauth/revoke");
+        let endpoints = checked(&revoking, &issuer()).expect("satisfied");
+        assert_eq!(
+            endpoints.revocation.map(|endpoint| endpoint.path),
+            Some("/oauth/revoke".to_owned())
+        );
+        revoking["revocation_endpoint"] = json!("https://elsewhere.test/oauth/revoke");
+        let endpoints = checked(&revoking, &issuer()).expect("satisfied");
+        assert_eq!(endpoints.revocation, None, "never on another origin");
     }
 
     #[test]

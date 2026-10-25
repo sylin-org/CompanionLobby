@@ -125,6 +125,8 @@ struct Book {
     limiting_refreshes: bool,
     widened_refresh: Option<String>,
     grants: Vec<Grant>,
+    /// Every refresh token the token endpoint took up past its DPoP checks.
+    refreshes: Vec<String>,
     revocations: Vec<String>,
     flaws: Vec<Flaw>,
     pds_names: Option<String>,
@@ -273,18 +275,11 @@ impl AtprotoWorld {
         locked(&self.book).widened_refresh = Some(scope.to_owned());
     }
 
-    /// Every refresh token presented to the token endpoint, oldest first,
-    /// whether or not it refreshed anything.
+    /// Every refresh token the token endpoint took up, oldest first,
+    /// whether or not it refreshed anything: each request past the DPoP
+    /// checks, so a request answered only with a fresh nonce is not one.
     pub fn refresh_tokens_presented(&self) -> Vec<String> {
-        self.server
-            .requests()
-            .iter()
-            .filter(|request| {
-                request.route() == "/oauth/token"
-                    && request.field("grant_type").as_deref() == Some("refresh_token")
-            })
-            .filter_map(|request| request.field("refresh_token"))
-            .collect()
+        locked(&self.book).refreshes.clone()
     }
 
     /// Every token the revocation endpoint was asked to revoke, oldest
@@ -672,13 +667,14 @@ fn refresh(
     nonce: &str,
 ) -> Reply {
     let refuse = |code: &str| error(400, code).with_header("DPoP-Nonce", nonce);
+    let presented = request.field("refresh_token").unwrap_or_default();
+    book.refreshes.push(presented.clone());
     if book.limiting_refreshes {
         return error(429, "rate_limited").with_header("DPoP-Nonce", nonce);
     }
     if book.refusing_refreshes {
         return refuse("invalid_grant");
     }
-    let presented = request.field("refresh_token").unwrap_or_default();
     let Some(index) = book
         .grants
         .iter()

@@ -67,8 +67,3 @@ fn a_connection_revoked_mid_call_never_delivers_a_success() {
 fn revoking_a_credential_cascades_and_the_host_hears_the_catalog_shrink() {
     host::revoking_the_credential_cascades_to_its_connections(Path::new(EXE));
 }
-
-#[test]
-fn an_ask_the_credential_cannot_answer_is_refused_before_the_provider_is_reached() {
-    host::an_unsupported_ask_is_refused_before_the_provider_is_reached(Path::new(EXE));
-}

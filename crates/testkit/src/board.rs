@@ -2,9 +2,8 @@
 //!
 //! A board is a list of posts. It admits a member who presents a stamp from
 //! a passbook authority and gives back a badge; with the badge a member reads
-//! the newest posts and posts one. Each board says on its about page what it
-//! wants presented: a stamp for its own audience, or a plain bearer token,
-//! which no passbook gives.
+//! the newest posts and posts one. Each board names on its about page the
+//! audience a stamp it takes must be for.
 //!
 //! The adapter speaks the board in the board's own words: it establishes a
 //! connection by asking the lobby's authority for the stamp the board wants
@@ -44,15 +43,6 @@ pub const READ_MAX: u64 = 50;
 /// The longest post, in characters.
 pub const POST_MAX: usize = 2000;
 
-/// What a board asks a member to present when it admits them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Admission {
-    /// A stamp for the board's own audience.
-    Audience,
-    /// A plain bearer token.
-    Plain,
-}
-
 /// One post on a fake board.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Post {
@@ -64,7 +54,6 @@ pub struct Post {
 
 #[derive(Debug)]
 struct Floor {
-    admission: Admission,
     audience: String,
     badges: Vec<(String, String)>,
     presented: Vec<String>,
@@ -86,7 +75,6 @@ impl BoardServer {
     /// its own audience.
     pub fn start(authority: &PassbookAuthority) -> Self {
         let floor = Arc::new(Mutex::new(Floor {
-            admission: Admission::Audience,
             audience: unique_token("audience"),
             badges: Vec::new(),
             presented: Vec::new(),
@@ -111,11 +99,6 @@ impl BoardServer {
     /// The audience the board names on its about page.
     pub fn audience(&self) -> String {
         locked(&self.floor).audience.clone()
-    }
-
-    /// Changes what the board asks members to present.
-    pub fn admit_with(&self, admission: Admission) {
-        locked(&self.floor).admission = admission;
     }
 
     /// Puts a post on the board, as another member would.
@@ -157,13 +140,7 @@ fn answer(floor: &Mutex<Floor>, stamps: &crate::passbook::Verifier, request: &Re
             .map(|(_, holder)| holder.clone())
     };
     match (request.method.as_str(), request.route()) {
-        ("GET", "/about") => Reply::json(
-            200,
-            &match floor.admission {
-                Admission::Audience => json!({ "audience": floor.audience }),
-                Admission::Plain => json!({}),
-            },
-        ),
+        ("GET", "/about") => Reply::json(200, &json!({ "audience": floor.audience })),
         ("POST", "/admit") => {
             let presented = request
                 .header("authorization")
@@ -173,11 +150,8 @@ fn answer(floor: &Mutex<Floor>, stamps: &crate::passbook::Verifier, request: &Re
             let minted = presented
                 .strip_prefix("Bearer ")
                 .and_then(|stamp| stamps.verify(stamp));
-            let fits = minted.as_ref().is_some_and(|minted| match floor.admission {
-                Admission::Audience => {
-                    minted.audience == floor.audience && minted.method == ADMIT_METHOD
-                }
-                Admission::Plain => false,
+            let fits = minted.as_ref().is_some_and(|minted| {
+                minted.audience == floor.audience && minted.method == ADMIT_METHOD
             });
             match minted.filter(|_| fits) {
                 Some(minted) => {
@@ -405,14 +379,13 @@ impl ServiceAdapter for Board {
         }
         let about: Value =
             serde_json::from_slice(&about.body).map_err(|_| Outcome::TemporarilyUnavailable)?;
-        let ask = if let Some(audience) = about["audience"].as_str() {
-            AuthorizationAsk::ServiceProof {
-                audience: audience.to_owned(),
-                method: ADMIT_METHOD.to_owned(),
-                lifetime_secs: 60,
-            }
-        } else {
-            AuthorizationAsk::Bearer
+        let audience = about["audience"]
+            .as_str()
+            .ok_or(Outcome::TemporarilyUnavailable)?;
+        let ask = AuthorizationAsk::ServiceProof {
+            audience: audience.to_owned(),
+            method: ADMIT_METHOD.to_owned(),
+            lifetime_secs: 60,
         };
         let authorization = authority.authorize(&ask)?;
         let admitted = self

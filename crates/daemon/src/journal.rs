@@ -9,7 +9,12 @@
 //!
 //! Entries hold no content and no secrets. Each field is a typed identifier,
 //! a validated name, a fixed lobby word or an outcome code, so nothing a
-//! sponsor typed beyond a moniker and nothing a service sent can reach it.
+//! sponsor typed beyond a name and nothing a service sent beyond an
+//! account's label can reach it. Beside the identifiers an entry keeps the
+//! names the sponsor read for them when it was written: the companion's
+//! display name, the account's label and its kind's title, and the
+//! connection's label and its service's title, so it reads the same after a
+//! rename or a removal.
 //!
 //! The live file is `journal.jsonl`. When an entry would take it past
 //! [`GENERATION_BYTES`], it becomes `journal.1.jsonl`, the older generations
@@ -38,7 +43,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lobby_contracts::{
-    CompanionId, ConnectionId, Initiator, JournalEntry, JournalKind, Outcome, ServiceName, ToolName,
+    CompanionId, ConnectionId, Initiator, JournalEntry, JournalKind, JournalNames, Outcome,
+    ServiceName, ToolName,
 };
 use serde_json::{Map, Value, json};
 
@@ -102,6 +108,8 @@ pub struct Note {
     pub kind: JournalKind,
     /// How it ended, or `pending` while it has not.
     pub outcome: Outcome,
+    /// The names of what it concerns, as of now.
+    pub names: JournalNames,
 }
 
 impl Note {
@@ -120,6 +128,7 @@ impl Note {
             tool: None,
             kind: JournalKind::Command { name },
             outcome,
+            names: JournalNames::default(),
         }
     }
 }
@@ -226,6 +235,7 @@ impl Journal {
             tool: note.tool,
             kind: note.kind,
             outcome: note.outcome,
+            names: note.names,
         };
         #[cfg(test)]
         if self.refuse_from.is_some_and(|from| entry.seq >= from) {
@@ -505,6 +515,30 @@ pub fn encode(store_id: &str, entry: &JournalEntry) -> Value {
         }
     }
     object.insert("outcome".into(), json!(entry.outcome.code()));
+    let names = &entry.names;
+    for (field, name) in [
+        (
+            "companionName",
+            names.companion.as_ref().map(|name| name.as_str()),
+        ),
+        ("kindTitle", names.kind.as_ref().map(|name| name.as_str())),
+        (
+            "accountLabel",
+            names.account.as_ref().map(|name| name.as_str()),
+        ),
+        (
+            "serviceTitle",
+            names.service.as_ref().map(|name| name.as_str()),
+        ),
+        (
+            "connectionLabel",
+            names.connection.as_ref().map(|name| name.as_str()),
+        ),
+    ] {
+        if let Some(name) = name {
+            object.insert(field.into(), json!(name));
+        }
+    }
     Value::Object(object)
 }
 
