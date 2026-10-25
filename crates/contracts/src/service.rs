@@ -9,8 +9,8 @@
 //! adapter mints for it on demand.
 
 use crate::{
-    Address, AddressPolicy, Authorization, AuthorizationAsk, Outcome, ProviderKind, SealedIssued,
-    ToolArguments, ToolDescriptor, ToolName, ToolResult,
+    Address, AddressPolicy, Authorization, AuthorizationAsk, Explained, IssuedSlot, ProviderKind,
+    SealedIssued, ToolArguments, ToolDescriptor, ToolName, ToolResult,
 };
 
 /// Whether `text` is a short lowercase name: `[a-z][a-z0-9]{1,15}`.
@@ -58,6 +58,11 @@ pub struct ServiceDescription {
     pub accepts: Vec<ProviderKind>,
     /// Which addresses a connection may name.
     pub addresses: AddressPolicy,
+    /// What a credential of an accepted kind must have been granted to
+    /// establish a connection, in that provider's own words. The lobby
+    /// asks the provider for these whenever it signs an account of that
+    /// kind in.
+    pub permissions: Vec<String>,
 }
 
 /// The daemon's broker for one connection being established: it mints
@@ -66,7 +71,7 @@ pub struct ServiceDescription {
 pub trait Authority: Send + Sync {
     /// Asks the credential adapter for one authorization in the shape `ask`
     /// names, and hands back exactly what it minted.
-    fn authorize(&self, ask: &AuthorizationAsk) -> Result<Authorization, Outcome>;
+    fn authorize(&self, ask: &AuthorizationAsk) -> Result<Authorization, Explained>;
 }
 
 /// The contract every service adapter implements.
@@ -74,7 +79,9 @@ pub trait Authority: Send + Sync {
 /// Calls are synchronous and may block on the network; the daemon runs them on
 /// a blocking thread with no lock held. A read that fails answers an outcome
 /// that says so; a write whose effect is uncertain answers
-/// [`Outcome::Unknown`], never a success and never a plain failure.
+/// [`Outcome::Unknown`](crate::Outcome::Unknown), never a success and never a
+/// plain failure. A definite refusal is explained in the service's words:
+/// the fact the service stated and the next step.
 pub trait ServiceAdapter: Send + Sync {
     /// The service's name, which prefixes every tool it declares.
     fn name(&self) -> ServiceName;
@@ -88,20 +95,28 @@ pub trait ServiceAdapter: Send + Sync {
         &self,
         address: &Address,
         authority: &dyn Authority,
-    ) -> Result<SealedIssued, Outcome>;
+    ) -> Result<SealedIssued, Explained>;
 
     /// Every tool this adapter offers, named without the service prefix.
+    /// The first is where a mind starts.
     fn catalog(&self) -> Vec<ToolDescriptor>;
 
-    /// Performs one tool call through the connection at `address` that the
-    /// service issued `issued` for.
+    /// The tools of the catalog that what the service issued for one
+    /// connection allows; every one unless the adapter says otherwise.
+    fn available(&self, issued: &SealedIssued) -> Vec<ToolName> {
+        let _ = issued;
+        self.catalog().into_iter().map(|tool| tool.name).collect()
+    }
+
+    /// Performs one tool call through the connection at `address`, whose
+    /// issued data `slot` guards.
     fn call(
         &self,
         tool: &ToolName,
         arguments: &ToolArguments,
         address: &Address,
-        issued: &SealedIssued,
-    ) -> Result<ToolResult, Outcome>;
+        slot: &dyn IssuedSlot,
+    ) -> Result<ToolResult, Explained>;
 }
 
 #[cfg(test)]

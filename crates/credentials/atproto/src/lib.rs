@@ -82,7 +82,7 @@ use std::time::{Duration, Instant};
 
 use lobby_contracts::{
     AccountKey, AccountLabel, Address, Authorization, AuthorizationAsk, CredentialAdapter,
-    Freshness, MaterialSlot, Outcome, ProviderKind, Revocation, Secret, SignInRequest,
+    Explained, Freshness, MaterialSlot, Outcome, ProviderKind, Revocation, Secret, SignInRequest,
     SignInReturn, SignInStart, SignedIn,
 };
 use lobby_outbound::Outbound;
@@ -379,10 +379,10 @@ impl CredentialAdapter for Atproto {
         &self,
         _slot: &dyn MaterialSlot,
         _ask: &AuthorizationAsk,
-    ) -> Result<Authorization, Outcome> {
+    ) -> Result<Authorization, Explained> {
         // No ask is answered yet; each is refused before the material is
         // read or anything is reached.
-        Err(Outcome::Unsupported)
+        Err(Outcome::Unsupported.into())
     }
 
     fn renew(&self, slot: &dyn MaterialSlot) -> Result<Freshness, Outcome> {

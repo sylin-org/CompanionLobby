@@ -4,8 +4,8 @@
 use lobby_conformance::credential::{self, CountingSlot, CredentialFixture, RenewalFixture};
 use lobby_conformance::service::{self, ServiceFixture};
 use lobby_contracts::{
-    Address, AddressPolicy, Authority, Authorization, AuthorizationAsk, CredentialAdapter, Outcome,
-    SealedMaterial, SignInRequest, SignInReturn, SignInStart, ToolArguments, ToolName,
+    Address, AddressPolicy, Authority, Authorization, AuthorizationAsk, CredentialAdapter,
+    Explained, SealedMaterial, SignInRequest, SignInReturn, SignInStart, ToolArguments, ToolName,
 };
 use lobby_outbound::{Outbound, Request};
 use lobby_testkit::board::{Board, BoardServer};
@@ -143,6 +143,7 @@ fn two_authorizations_racing_a_due_key_renew_it_once() {
         state: "racing-state".to_owned(),
         return_to: "http://127.0.0.1:1/signin/passbook/return".to_owned(),
         again: None,
+        permissions: Vec::new(),
     };
     let start = adapter.begin_sign_in(&request).expect("start");
     let signed = adapter
@@ -185,7 +186,7 @@ struct Minting {
 }
 
 impl Authority for Minting {
-    fn authorize(&self, ask: &AuthorizationAsk) -> Result<Authorization, Outcome> {
+    fn authorize(&self, ask: &AuthorizationAsk) -> Result<Authorization, Explained> {
         self.adapter
             .authorize(&CountingSlot::new(Ok(self.material.clone())), ask)
     }
@@ -208,6 +209,7 @@ impl BoardFixture {
             state: "board-state".to_owned(),
             return_to: "http://127.0.0.1:1/signin/passbook/return".to_owned(),
             again: None,
+            permissions: Vec::new(),
         };
         let start = adapter.begin_sign_in(&request).expect("start");
         let returned = SignInReturn {
@@ -257,6 +259,10 @@ impl ServiceFixture for BoardFixture {
 
     fn requests(&self) -> usize {
         self.board.listener().requests().len()
+    }
+
+    fn forget_issued(&self) {
+        self.board.forget_badges();
     }
 }
 

@@ -6,11 +6,13 @@
 //! [`MaterialSlot`] so a credential adapter reads its material through the
 //! daemon, which re-checks, at the moment of the read, that the credential is
 //! still the one the call was pinned to, and commits a renewal only on top
-//! of the material it replaces.
+//! of the material it replaces. It implements [`IssuedSlot`] for each tool
+//! call, so a service adapter whose service stopped taking what it issued
+//! can establish the connection again, once, and keep what it issues anew.
 
 use std::fmt;
 
-use crate::{CredentialId, Outcome};
+use crate::{Authority, CredentialId, Outcome};
 
 /// Credential material, encoded by its credential adapter and opaque to
 /// everyone else. Its `Debug` never prints the bytes.
@@ -130,6 +132,30 @@ pub trait MaterialSlot: Send + Sync {
     /// clears the mark. Refused when the credential or its material changed
     /// meanwhile, or the update grants more than the credential holds.
     fn commit(&self, update: MaterialUpdate) -> Result<(), Outcome>;
+}
+
+/// The daemon's guard around what a service issued for one connection,
+/// for one tool call through it.
+///
+/// A service adapter reads what the service issued through it. When the
+/// service no longer takes that (it expired, or the service answers that
+/// it does not know it), the adapter establishes the connection again
+/// through [`IssuedSlot::authority`], which mints a fresh proof from the
+/// connection's credential, and keeps what the service issued anew with
+/// [`IssuedSlot::reissue`]. The lobby keeps it only while the connection is
+/// still the one the call was pinned to.
+pub trait IssuedSlot: Send + Sync {
+    /// What the service issued, as the lobby keeps it now.
+    fn read(&self) -> Result<SealedIssued, Outcome>;
+
+    /// The authority that mints from the connection's credential, to
+    /// establish the connection again.
+    fn authority(&self) -> &dyn Authority;
+
+    /// Keeps `issued`, which the service issued when the connection was
+    /// established again, in place of what was read. Refused when the
+    /// connection was revoked or changed meanwhile.
+    fn reissue(&self, issued: SealedIssued) -> Result<(), Outcome>;
 }
 
 #[cfg(test)]

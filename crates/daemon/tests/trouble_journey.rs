@@ -263,7 +263,7 @@ fn a_refused_renewal_shrinks_the_catalog_in_one_notice_and_signing_in_again_rest
     );
     let told = gone["result"]["content"][0]["text"].as_str().expect("text");
     assert!(told.contains("sign it in again"), "{told}");
-    assert!(told.contains("board at front"), "{told}");
+    assert!(told.contains("Board at front"), "{told}");
     let named = call(&mut peer, 30, "board_read", json!({ "at": "back" }));
     assert_eq!(
         named["result"]["structuredContent"]["outcome"],
@@ -273,7 +273,7 @@ fn a_refused_renewal_shrinks_the_catalog_in_one_notice_and_signing_in_again_rest
         .as_str()
         .expect("text");
     assert!(
-        told.contains("board at back"),
+        told.contains("Board at back"),
         "the connection at names is the one said to wait: {told}"
     );
     let reach = call(&mut peer, 4, "reach", json!({}));
@@ -281,7 +281,7 @@ fn a_refused_renewal_shrinks_the_catalog_in_one_notice_and_signing_in_again_rest
         .as_str()
         .expect("text");
     assert!(
-        said.contains("cannot reach board at front until the sponsor signs its account in again"),
+        said.contains("cannot reach Board at front until the sponsor signs its account in again"),
         "{said}"
     );
     assert!(outcomes_of(&install, "renew_credential").contains(&"needs_sign_in".to_owned()));

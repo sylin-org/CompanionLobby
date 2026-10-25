@@ -2,7 +2,9 @@
 //!
 //! Every adapter, the daemon and the MCP projection answer with one of these
 //! outcomes. No variant can carry provider text: messages a mind or a sponsor
-//! reads are authored by the lobby.
+//! reads are authored by the lobby, or by an adapter's author as an
+//! [`Explained`] outcome, whose sentence is fixed text compiled into the
+//! adapter.
 
 use std::fmt;
 
@@ -138,6 +140,39 @@ impl fmt::Display for Outcome {
     }
 }
 
+/// An outcome with the sentence an adapter's author wrote for it: the fact
+/// that ended the request and what to do next, in the words of the service
+/// or provider the adapter speaks. The sentence is `'static` text compiled
+/// into the adapter, so nothing a provider or a service sent can reach it.
+/// An adapter with nothing to add answers a bare [`Outcome`], which becomes
+/// one carrying the lobby's own sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Explained {
+    /// How the request ended.
+    pub outcome: Outcome,
+    /// Why, and what to do next.
+    pub sentence: &'static str,
+}
+
+impl Explained {
+    /// `outcome`, explained by `sentence`.
+    pub const fn new(outcome: Outcome, sentence: &'static str) -> Self {
+        Self { outcome, sentence }
+    }
+}
+
+impl From<Outcome> for Explained {
+    fn from(outcome: Outcome) -> Self {
+        Self::new(outcome, outcome.sentence())
+    }
+}
+
+impl fmt::Display for Explained {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.outcome.code())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +202,15 @@ mod tests {
             assert!(!sentence.contains('{') && !sentence.contains('}'));
         }
         assert_eq!(std::mem::size_of::<Outcome>(), 1);
+    }
+
+    #[test]
+    fn a_bare_outcome_is_explained_by_the_lobbys_own_sentence() {
+        let explained = Explained::from(Outcome::Unknown);
+        assert_eq!(explained.outcome, Outcome::Unknown);
+        assert_eq!(explained.sentence, Outcome::Unknown.sentence());
+        let authored = Explained::new(Outcome::Refused, "The board is closed to new posts.");
+        assert_eq!(authored.to_string(), "refused");
     }
 
     #[test]

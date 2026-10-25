@@ -92,12 +92,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use lobby_contracts::{
-    Address, Attachment, AttachmentId, Companion, CompanionId, Connection, ConnectionId,
+    Address, Attachment, AttachmentId, Authority, Companion, CompanionId, Connection, ConnectionId,
     ConnectionState, Credential, CredentialAdapter, CredentialId, CredentialState, DisplayName,
-    Freshness, Initiator, JournalEntry, JournalKind, JournalNames, Label, MaterialSlot,
-    MaterialUpdate, Moniker, NameProblem, Outcome, ProviderKind, Revocation, SealedMaterial,
-    ServiceAdapter, ServiceName, SignInRequest, SignInReturn, SignInStart, SignedIn, Sponsor,
-    ToolArguments, ToolResult,
+    Explained, Freshness, Initiator, IssuedSlot, JournalEntry, JournalKind, JournalNames, Label,
+    MaterialSlot, MaterialUpdate, Moniker, NameProblem, Outcome, ProviderKind, Revocation,
+    SealedIssued, SealedMaterial, ServiceAdapter, ServiceName, SignInRequest, SignInReturn,
+    SignInStart, SignedIn, Sponsor, ToolArguments, ToolResult,
 };
 use serde_json::{Map, Value};
 use tokio::sync::watch;
@@ -127,6 +127,28 @@ pub const RENEWAL_PAUSE_MAX: Duration = Duration::from_secs(300);
 /// How long after a renewal that could not finish, and changed nothing,
 /// the credential is asked again.
 pub const RENEWAL_RETRY: Duration = Duration::from_secs(30);
+
+/// What a service issued for the connection one call goes through, with
+/// the authority to establish it again.
+struct Through<'a> {
+    lobby: &'a Lobby,
+    ticket: &'a Ticket,
+    authority: &'a Broker<'a>,
+}
+
+impl IssuedSlot for Through<'_> {
+    fn read(&self) -> Result<SealedIssued, Outcome> {
+        keyring::read_issued(&self.lobby.dir, self.ticket.connection).map_err(|_| Outcome::Revoked)
+    }
+
+    fn authority(&self) -> &dyn Authority {
+        self.authority
+    }
+
+    fn reissue(&self, issued: SealedIssued) -> Result<(), Outcome> {
+        self.lobby.reissue(self.ticket, &issued)
+    }
+}
 
 /// Where a sign-in the lobby started stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +253,16 @@ impl Refusal {
     fn because(mut self, conflict: SignInConflict) -> Self {
         self.conflict = Some(conflict);
         self
+    }
+
+    /// The refusal of an adapter that answered `explained`: the adapter's
+    /// own sentence when it wrote one, the lobby's words otherwise.
+    fn from_explained(explained: Explained) -> Self {
+        if explained.sentence == explained.outcome.sentence() {
+            Self::from_adapter(explained.outcome)
+        } else {
+            Self::new(explained.outcome, explained.sentence)
+        }
     }
 
     /// The refusal of an adapter that answered `outcome`, in the lobby's words.
@@ -1165,6 +1197,7 @@ impl Lobby {
                     state: state.clone(),
                     return_to: format!("{origin}/signin/{kind}/return"),
                     again: material,
+                    permissions: self.registry.permissions(&kind),
                 };
                 let start = adapter.begin_sign_in(&request)?;
                 // The adapter keeps what it needs; the lobby keeps no
@@ -1571,9 +1604,9 @@ impl Lobby {
         // signing in again, settles that before the grant does.
         self.settle_renewal(broker.slot(), broker.refused().map_or(Ok(None), Err));
         self.run(|core| {
-            let issued = established.map_err(|outcome| {
-                core.settle_as(&subject, outcome);
-                Refusal::from_adapter(outcome)
+            let issued = established.map_err(|explained| {
+                core.settle_as(&subject, explained.outcome);
+                Refusal::from_explained(explained)
             })?;
             let state = core.store.state();
             let now = state
@@ -1948,14 +1981,19 @@ impl Lobby {
     /// ready connection to, its tools, and the labels and addresses of those
     /// connections.
     pub fn reached(&self, companion: CompanionId) -> Vec<Reached> {
-        let mut by_service: Vec<(ServiceName, Vec<(Label, Address)>)> = Vec::new();
+        type Place = (Label, Address, ConnectionId);
+        let mut by_service: Vec<(ServiceName, Vec<Place>)> = Vec::new();
         {
             let core = self.core();
             for connection in &core.store.state().connections {
                 if connection.companion != companion || connection.state != ConnectionState::Ready {
                     continue;
                 }
-                let place = (connection.label.clone(), connection.address.clone());
+                let place = (
+                    connection.label.clone(),
+                    connection.address.clone(),
+                    connection.id,
+                );
                 match by_service
                     .iter_mut()
                     .find(|(service, _)| *service == connection.service)
@@ -1965,15 +2003,32 @@ impl Lobby {
                 }
             }
         }
-        // Catalogs are the adapters' fixed declarations, read with nothing held.
+        // Catalogs are the adapters' fixed declarations, and what each
+        // connection's issued data allows is read from the keyring, both
+        // with nothing held. A service's tools are those any of its ready
+        // connections allows, in catalog order.
         by_service
             .into_iter()
             .filter_map(|(service, connections)| {
                 let adapter = self.registry.service(&service)?;
+                let allowed: Vec<lobby_contracts::ToolName> = connections
+                    .iter()
+                    .filter_map(|(_, _, id)| keyring::read_issued(&self.dir, *id).ok())
+                    .flat_map(|issued| adapter.available(&issued))
+                    .collect();
+                let tools = adapter
+                    .catalog()
+                    .into_iter()
+                    .filter(|tool| allowed.contains(&tool.name))
+                    .collect();
                 Some(Reached {
-                    tools: adapter.catalog(),
+                    title: self.registry.service_title(&service),
+                    tools,
                     service,
-                    connections,
+                    connections: connections
+                        .into_iter()
+                        .map(|(label, address, _)| (label, address))
+                        .collect(),
                 })
             })
             .collect()
@@ -2001,7 +2056,7 @@ impl Lobby {
             .get(projections::AT)
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let Some((service, tool)) = found else {
+        let Some((service, tool)) = found.clone() else {
             // A tool whose connections all wait for a sign-in is named, so
             // the mind hears why it is gone and what brings it back: the
             // connection `at` names when it names one of them.
@@ -2021,13 +2076,15 @@ impl Lobby {
                 Some((service, label)) => CallRefusal::Ended(Refusal::new(
                     Outcome::NeedsSignIn,
                     format!(
-                        "{name} is gone for now: the account behind {service} at {label} needs the sponsor to sign it in again on the manager page, and the tool comes back once they do."
+                        "{name} is gone for now: the account behind {title} at {label} needs the sponsor to sign it in again on the manager page, and the tool comes back once they do.",
+                        title = self.registry.service_title(service)
                     ),
                 )),
                 None => CallRefusal::UnknownTool,
             });
         };
         let at = arguments.remove(projections::AT);
+        let title = self.registry.service_title(&service);
         let ticket = self.run(|core| {
             let ready: Vec<&Connection> = core
                 .store
@@ -2058,7 +2115,7 @@ impl Lobby {
                     return Err(CallRefusal::Ended(Refusal::new(
                         Outcome::NeedsSignIn,
                         format!(
-                            "The {service} called {label} waits for the sponsor to sign its account in again on the manager page; it comes back then. at is one of: {labels}."
+                            "The {title} called {label} waits for the sponsor to sign its account in again on the manager page; it comes back then. at is one of: {labels}."
                         ),
                     )));
                 }
@@ -2066,17 +2123,17 @@ impl Lobby {
                     .iter()
                     .find(|connection| connection.label.as_str() == label)
                     .ok_or_else(|| {
-                        format!("This companion reaches no {service} called that; at is one of: {labels}.")
+                        format!("This companion reaches no {title} called that; at is one of: {labels}.")
                     }),
                 Some(_) => Err(format!(
-                    "at names one {service} connection as text, one of: {labels}."
+                    "at names one {title} connection as text, one of: {labels}."
                 )),
                 None if ready.len() == 1 => Ok(&ready[0]),
                 None if ready.is_empty() => Err(format!(
-                    "This companion does not reach {service} now; call reach to see what it reaches."
+                    "This companion does not reach {title} now; call reach to see what it reaches."
                 )),
                 None => Err(format!(
-                    "This companion reaches more than one {service}; name one with at: {labels}."
+                    "This companion reaches more than one {title}; name one with at: {labels}."
                 )),
             };
             let connection = (*chosen.map_err(|message| {
@@ -2087,14 +2144,22 @@ impl Lobby {
                 .registry
                 .service(&service)
                 .ok_or(CallRefusal::UnknownTool)?;
+            let credential_adapter = core
+                .store
+                .state()
+                .credential(connection.credential)
+                .and_then(|credential| self.registry.credential(&credential.kind))
+                .ok_or(CallRefusal::UnknownTool)?;
             let ticket = Ticket {
                 connection: connection.id,
                 revision: connection.revision,
+                credential: connection.credential,
                 address: connection.address,
                 service: service.clone(),
                 tool: tool.name.clone(),
                 effect: tool.effect,
                 adapter,
+                credential_adapter,
             };
             core.record(call_note(mind, companion, &ticket, JournalKind::Invoked, Outcome::Pending))
                 .map_err(|_| {
@@ -2105,16 +2170,23 @@ impl Lobby {
                 })?;
             Ok(ticket)
         })?;
-        let result = keyring::read_issued(&self.dir, ticket.connection)
-            .map_err(|_| Outcome::Revoked)
-            .and_then(|issued| {
-                ticket.adapter.call(
-                    &ticket.tool,
-                    &ToolArguments(arguments),
-                    &ticket.address,
-                    &issued,
-                )
-            });
+        // The service adapter may establish the connection again, once,
+        // through a broker for the connection's credential; a minting that
+        // renewed the credential, or found it needs signing in again,
+        // settles that before the call does.
+        let broker = Broker::new(self, ticket.credential, ticket.credential_adapter.clone());
+        let slot = Through {
+            lobby: self,
+            ticket: &ticket,
+            authority: &broker,
+        };
+        let result = ticket.adapter.call(
+            &ticket.tool,
+            &ToolArguments(arguments),
+            &ticket.address,
+            &slot,
+        );
+        self.settle_renewal(broker.slot(), broker.refused().map_or(Ok(None), Err));
         let answer = self.run(|core| {
             let still_pinned = core
                 .store
@@ -2127,7 +2199,7 @@ impl Lobby {
             let answer = calls::settle(ticket.effect, still_pinned, result);
             let outcome = answer
                 .as_ref()
-                .map_or_else(|outcome| *outcome, |_| Outcome::Done);
+                .map_or_else(|explained| explained.outcome, |_| Outcome::Done);
             let _ = core.record(call_note(
                 mind,
                 companion,
@@ -2137,7 +2209,35 @@ impl Lobby {
             ));
             Ok::<_, CallRefusal>(answer)
         })?;
-        answer.map_err(|outcome| CallRefusal::Ended(Refusal::new(outcome, outcome.sentence())))
+        answer.map_err(|explained| {
+            CallRefusal::Ended(Refusal::new(explained.outcome, explained.sentence))
+        })
+    }
+
+    /// Keeps `issued`, which the service issued when a call established the
+    /// connection `ticket` pins again, while that connection is still ready
+    /// at the pinned revision.
+    fn reissue(&self, ticket: &Ticket, issued: &SealedIssued) -> Result<(), Outcome> {
+        self.run(|core| {
+            let pinned = core
+                .store
+                .state()
+                .connection(ticket.connection)
+                .is_some_and(|connection| {
+                    connection.state == ConnectionState::Ready
+                        && connection.revision == ticket.revision
+                });
+            if !pinned {
+                return Err(Outcome::Revoked);
+            }
+            keyring::write_issued(&self.dir, ticket.connection, issued).map_err(|error| {
+                trace::line(&format!(
+                    "what a service issued anew for connection {} could not be kept: {error}",
+                    ticket.connection
+                ));
+                Outcome::Internal
+            })
+        })
     }
 
     /// The provider kinds the sponsor may sign companions in with.

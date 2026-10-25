@@ -9,7 +9,9 @@
 //! connection by asking the lobby's authority for the stamp the board wants
 //! and trading it for a badge, which is all the connection keeps, and it
 //! offers two tools, `read` and `post`. Posts are written by other members,
-//! so their text and authors reach a mind only as quoted passages.
+//! so their text and authors reach a mind only as quoted passages. A board
+//! that stops taking a badge is asked to admit the member again, once, with
+//! a fresh stamp, and the connection keeps the new badge.
 //!
 //! Neither half ships in the product: the daemon compiles them in only for
 //! tests.
@@ -17,9 +19,9 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lobby_contracts::{
-    Address, AddressPolicy, Authority, AuthorizationAsk, Effect, Outcome, Passage, ProviderKind,
-    Retry, SealedIssued, ServiceAdapter, ServiceDescription, ServiceName, ToolArguments,
-    ToolDescriptor, ToolName, ToolResult,
+    Address, AddressPolicy, Authority, AuthorizationAsk, Effect, Explained, IssuedSlot, Outcome,
+    Passage, ProviderKind, Retry, SealedIssued, ServiceAdapter, ServiceDescription, ServiceName,
+    ToolArguments, ToolDescriptor, ToolName, ToolResult,
 };
 use lobby_outbound::{Failure, Outbound, Request};
 use serde_json::{Value, json};
@@ -42,6 +44,10 @@ pub const READ_MAX: u64 = 50;
 
 /// The longest post, in characters.
 pub const POST_MAX: usize = 2000;
+
+/// What the adapter says when a board does not admit the member.
+pub const NOT_ADMITTED: &str =
+    "The board does not admit this companion any more; the sponsor can open the connection again.";
 
 /// One post on a fake board.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +132,11 @@ impl BoardServer {
             .iter()
             .map(|(badge, _)| badge.clone())
             .collect()
+    }
+
+    /// Forgets every badge it gave out, as a board that restarted would.
+    pub fn forget_badges(&self) {
+        locked(&self.floor).badges.clear();
     }
 }
 
@@ -235,6 +246,35 @@ fn tool(name: &str) -> ToolName {
     ToolName::new(name).unwrap_or_else(|| unreachable!("{name} is a tool name"))
 }
 
+/// How a request to a board failed: the board no longer took the badge,
+/// which refuses the request before the board acts on it, or it ended
+/// otherwise.
+enum Failed {
+    Unadmitted,
+    Ended(Explained),
+}
+
+impl From<Outcome> for Failed {
+    fn from(outcome: Outcome) -> Self {
+        Self::Ended(outcome.into())
+    }
+}
+
+impl From<Explained> for Failed {
+    fn from(explained: Explained) -> Self {
+        Self::Ended(explained)
+    }
+}
+
+impl Failed {
+    fn explained(self) -> Explained {
+        match self {
+            Self::Unadmitted => Explained::new(Outcome::Refused, NOT_ADMITTED),
+            Self::Ended(explained) => explained,
+        }
+    }
+}
+
 impl Board {
     /// An adapter that reaches boards on this machine.
     pub fn new() -> Self {
@@ -248,7 +288,7 @@ impl Board {
         address: &Address,
         issued: &Issued,
         arguments: &ToolArguments,
-    ) -> Result<ToolResult, Outcome> {
+    ) -> Result<ToolResult, Failed> {
         let limit = match arguments.0.get("limit") {
             None => 20,
             Some(limit) => limit
@@ -268,9 +308,10 @@ impl Board {
             })?;
         match response.status {
             200 => {}
-            401 | 403 => return Err(Outcome::Refused),
-            429 => return Err(Outcome::RateLimited),
-            _ => return Err(Outcome::TemporarilyUnavailable),
+            401 => return Err(Failed::Unadmitted),
+            403 => return Err(Explained::new(Outcome::Refused, NOT_ADMITTED).into()),
+            429 => return Err(Outcome::RateLimited.into()),
+            _ => return Err(Outcome::TemporarilyUnavailable.into()),
         }
         let body: Value =
             serde_json::from_slice(&response.body).map_err(|_| Outcome::TemporarilyUnavailable)?;
@@ -313,7 +354,7 @@ impl Board {
         address: &Address,
         issued: &Issued,
         arguments: &ToolArguments,
-    ) -> Result<ToolResult, Outcome> {
+    ) -> Result<ToolResult, Failed> {
         let text = arguments
             .0
             .get("text")
@@ -334,10 +375,11 @@ impl Board {
             })?;
         match response.status {
             201 => {}
-            400 => return Err(Outcome::InvalidInput),
-            401 | 403 => return Err(Outcome::Refused),
-            429 => return Err(Outcome::RateLimited),
-            _ => return Err(Outcome::Unknown),
+            400 => return Err(Outcome::InvalidInput.into()),
+            401 => return Err(Failed::Unadmitted),
+            403 => return Err(Explained::new(Outcome::Refused, NOT_ADMITTED).into()),
+            429 => return Err(Outcome::RateLimited.into()),
+            _ => return Err(Outcome::Unknown.into()),
         }
         let number = serde_json::from_slice::<Value>(&response.body)
             .ok()
@@ -361,6 +403,7 @@ impl ServiceAdapter for Board {
         ServiceDescription {
             accepts: vec![ProviderKind::new(KIND).unwrap_or_else(|| unreachable!("a kind"))],
             addresses: AddressPolicy::LoopbackAllowed,
+            permissions: Vec::new(),
         }
     }
 
@@ -368,14 +411,14 @@ impl ServiceAdapter for Board {
         &self,
         address: &Address,
         authority: &dyn Authority,
-    ) -> Result<SealedIssued, Outcome> {
+    ) -> Result<SealedIssued, Explained> {
         let unavailable = |_| Outcome::TemporarilyUnavailable;
         let about = self
             .outbound
             .send(address, Request::new("GET", "/about"))
             .map_err(unavailable)?;
         if about.status != 200 {
-            return Err(Outcome::TemporarilyUnavailable);
+            return Err(Outcome::TemporarilyUnavailable.into());
         }
         let about: Value =
             serde_json::from_slice(&about.body).map_err(|_| Outcome::TemporarilyUnavailable)?;
@@ -398,8 +441,13 @@ impl ServiceAdapter for Board {
             .map_err(unavailable)?;
         match admitted.status {
             200 => {}
-            401 | 403 => return Err(Outcome::Refused),
-            _ => return Err(Outcome::TemporarilyUnavailable),
+            401 | 403 => {
+                return Err(Explained::new(
+                    Outcome::Refused,
+                    "The board did not admit the stamp the account gave.",
+                ));
+            }
+            _ => return Err(Outcome::TemporarilyUnavailable.into()),
         }
         let badge = serde_json::from_slice::<Value>(&admitted.body)
             .ok()
@@ -462,24 +510,36 @@ impl ServiceAdapter for Board {
         tool: &ToolName,
         arguments: &ToolArguments,
         address: &Address,
-        issued: &SealedIssued,
-    ) -> Result<ToolResult, Outcome> {
+        slot: &dyn IssuedSlot,
+    ) -> Result<ToolResult, Explained> {
         let allowed: &[&str] = match tool.as_str() {
             "read" => &["limit"],
             "post" => &["text"],
-            _ => return Err(Outcome::Unsupported),
+            _ => return Err(Outcome::Unsupported.into()),
         };
         if arguments
             .0
             .keys()
             .any(|key| !allowed.contains(&key.as_str()))
         {
-            return Err(Outcome::InvalidInput);
+            return Err(Outcome::InvalidInput.into());
         }
-        let issued = Issued::decode(issued).ok_or(Outcome::Internal)?;
-        match tool.as_str() {
-            "read" => self.read(address, &issued, arguments),
-            _ => self.post(address, &issued, arguments),
+        let perform = |issued: &Issued| match tool.as_str() {
+            "read" => self.read(address, issued, arguments),
+            _ => self.post(address, issued, arguments),
+        };
+        let issued = Issued::decode(&slot.read()?).ok_or(Outcome::Internal)?;
+        match perform(&issued) {
+            // The board refused the badge before acting on the request, so
+            // asking it to admit the member again and trying once more does
+            // nothing twice.
+            Err(Failed::Unadmitted) => {
+                let fresh = self.establish(address, slot.authority())?;
+                let issued = Issued::decode(&fresh).ok_or(Outcome::Internal)?;
+                slot.reissue(fresh)?;
+                perform(&issued).map_err(Failed::explained)
+            }
+            answer => answer.map_err(Failed::explained),
         }
     }
 }

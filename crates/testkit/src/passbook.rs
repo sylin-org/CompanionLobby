@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lobby_contracts::{
     AccountKey, AccountLabel, Address, AddressPolicy, Authorization, AuthorizationAsk,
-    CredentialAdapter, CredentialId, Freshness, MaterialSlot, MaterialUpdate, Outcome,
+    CredentialAdapter, CredentialId, Explained, Freshness, MaterialSlot, MaterialUpdate, Outcome,
     ProviderKind, Revocation, SealedMaterial, Secret, SignInRequest, SignInReturn, SignInStart,
     SignedIn,
 };
@@ -567,7 +567,7 @@ impl CredentialAdapter for Passbook {
         &self,
         slot: &dyn MaterialSlot,
         ask: &AuthorizationAsk,
-    ) -> Result<Authorization, Outcome> {
+    ) -> Result<Authorization, Explained> {
         let AuthorizationAsk::ServiceProof {
             audience, method, ..
         } = ask;

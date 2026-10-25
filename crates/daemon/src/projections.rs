@@ -48,7 +48,9 @@ pub const AT: &str = "at";
 pub struct Reached {
     /// The service.
     pub service: ServiceName,
-    /// Its tools, as its adapter declares them.
+    /// The name its makers give it, as the sponsor and the mind read it.
+    pub title: String,
+    /// Its tools, as its adapter declares them, those its connections allow.
     pub tools: Vec<ToolDescriptor>,
     /// Each ready connection's label and address, oldest first.
     pub connections: Vec<(Label, Address)>,
@@ -126,20 +128,22 @@ fn with_at(schema: &Value, service: &ServiceName, labels: &[&str]) -> Value {
 
 /// The answer to `reach` for `companion`, which reaches `reached` and whose
 /// connections `waiting` wait for the sponsor to sign their account in
-/// again.
+/// again: who the companion is, then for each service where it is, by the
+/// sponsor's names, the tool to start with and what else it may do there,
+/// in a few sentences.
 pub fn reach(
     companion: &Companion,
     reached: &[Reached],
-    waiting: &[(ServiceName, Label)],
+    waiting: &[(ServiceName, String, Label)],
 ) -> ToolResult {
     let tools: Vec<String> = catalog(reached).into_iter().map(|(name, _)| name).collect();
     let display = &companion.display_name;
-    let mut text = format!(
-        "You are attached as {display} (moniker {moniker}). ",
+    let mut sentences = vec![format!(
+        "You are {display} (moniker {moniker}), attached through Companion Lobby.",
         moniker = companion.moniker
-    );
+    )];
     if reached.is_empty() && waiting.is_empty() {
-        text.push_str(&format!(
+        sentences.push(format!(
             "{display} reaches nothing yet: the sponsor has not connected a service for this companion."
         ));
     }
@@ -149,24 +153,55 @@ pub fn reach(
             .iter()
             .map(|(label, address)| format!("{label} ({address})"))
             .collect();
-        let names: Vec<String> = place
-            .tools
+        let projected = |tool: &ToolDescriptor| tool.name.projected(&place.service);
+        let Some((first, rest)) = place.tools.split_first() else {
+            sentences.push(format!(
+                "{display} reaches {title} at {places}, where nothing is open to it now.",
+                title = place.title,
+                places = listed(&places),
+            ));
+            continue;
+        };
+        let reads: Vec<String> = rest
             .iter()
-            .map(|tool| tool.name.projected(&place.service))
+            .filter(|tool| tool.read_only_hint())
+            .map(projected)
             .collect();
-        text.push_str(&format!(
-            "{display} reaches {service} at {places}, with {names}; pass {AT} to say which. ",
-            service = place.service,
-            places = places.join(" and "),
-            names = names.join(", "),
+        let writes: Vec<String> = rest
+            .iter()
+            .filter(|tool| !tool.read_only_hint())
+            .map(projected)
+            .collect();
+        let mut can = Vec::new();
+        if !reads.is_empty() {
+            can.push(format!("read with {}", listed(&reads)));
+        }
+        if !writes.is_empty() {
+            can.push(format!("write with {}", listed(&writes)));
+        }
+        let then = if can.is_empty() {
+            String::new()
+        } else {
+            format!("; there it can also {}", can.join(" and "))
+        };
+        sentences.push(format!(
+            "{display} reaches {title} at {places}: start with {first}{then}.",
+            title = place.title,
+            places = listed(&places),
+            first = projected(first),
+        ));
+        if place.connections.len() > 1 {
+            sentences.push(format!(
+                "Every {title} tool takes {AT}, the name of the one it acts at.",
+                title = place.title
+            ));
+        }
+    }
+    for (_, title, label) in waiting {
+        sentences.push(format!(
+            "{display} cannot reach {title} at {label} until the sponsor signs its account in again; its tools come back then."
         ));
     }
-    for (service, label) in waiting {
-        text.push_str(&format!(
-            "{display} cannot reach {service} at {label} until the sponsor signs its account in again; its tools come back then. "
-        ));
-    }
-    text.push_str(&format!(" Your tools: {}.", tools.join(", ")));
     let connections: Vec<Value> = reached
         .iter()
         .flat_map(|place| {
@@ -180,7 +215,7 @@ pub fn reach(
         })
         .collect();
     ToolResult {
-        text: vec![Passage::Authored(text.replace("  ", " ").trim().to_owned())],
+        text: vec![Passage::Authored(sentences.join(" "))],
         structured: Some(json!({
             "companion": {
                 "id": companion.id.to_string(),
@@ -190,10 +225,19 @@ pub fn reach(
             "connections": connections,
             "waiting": waiting
                 .iter()
-                .map(|(service, label)| json!({ "service": service.as_str(), "at": label.as_str() }))
+                .map(|(service, _, label)| json!({ "service": service.as_str(), "at": label.as_str() }))
                 .collect::<Vec<_>>(),
             "tools": tools,
         })),
+    }
+}
+
+/// `items` as prose: `a`, `a and b`, `a, b and c`.
+fn listed(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
     }
 }
 
@@ -737,6 +781,7 @@ mod tests {
     fn board(labels: &[&str]) -> Reached {
         Reached {
             service: ServiceName::new("board").expect("service"),
+            title: "Board".to_owned(),
             tools: vec![ToolDescriptor {
                 name: ToolName::new("read").expect("tool"),
                 title: "Read".to_owned(),
@@ -810,12 +855,13 @@ mod tests {
             &[],
             &[(
                 ServiceName::new("board").expect("service"),
+                "Board".to_owned(),
                 Label::new("front").expect("label"),
             )],
         );
         assert!(
             waiting.rendered().contains(
-                "cannot reach board at front until the sponsor signs its account in again"
+                "cannot reach Board at front until the sponsor signs its account in again"
             ),
             "{}",
             waiting.rendered()
@@ -827,10 +873,39 @@ mod tests {
         let structured = answer.structured.clone().expect("structured");
         assert_eq!(structured["tools"], json!(["reach", "board_read"]));
         assert_eq!(structured["connections"][1]["at"], "back");
+        let said = answer.rendered();
         assert!(
-            answer
-                .rendered()
-                .contains("board at front (http://127.0.0.1:5300) and back")
+            said.contains(
+                "Ada reaches Board at front (http://127.0.0.1:5300) and back (http://127.0.0.1:5301): start with board_read."
+            ),
+            "{said}"
+        );
+        assert!(said.contains("Every Board tool takes at"), "{said}");
+    }
+
+    #[test]
+    fn reach_names_the_tool_to_start_with_and_what_else_reads_and_writes() {
+        let mut place = board(&["front"]);
+        let write = ToolDescriptor {
+            name: ToolName::new("post").expect("tool"),
+            title: "Post".to_owned(),
+            description: "Posts.".to_owned(),
+            input_schema: json!({ "type": "object" }),
+            effect: Effect::Write {
+                retry: lobby_contracts::Retry::Safe,
+            },
+        };
+        let mut second = place.tools[0].clone();
+        second.name = ToolName::new("list").expect("tool");
+        place.tools.extend([second, write]);
+        let said = reach(&ada(), &[place], &[]).rendered();
+        assert_eq!(
+            said,
+            "You are Ada (moniker ada), attached through Companion Lobby. Ada reaches Board at front (http://127.0.0.1:5300): start with board_read; there it can also read with board_list and write with board_post."
+        );
+        assert_eq!(
+            listed(&["a".to_owned(), "b".to_owned(), "c".to_owned()]),
+            "a, b and c"
         );
     }
 

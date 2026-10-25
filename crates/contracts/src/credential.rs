@@ -18,7 +18,9 @@ use std::fmt;
 
 use crate::companion::parse_hex_id;
 use crate::service::is_short_name;
-use crate::{Authorization, AuthorizationAsk, CompanionId, MaterialSlot, Outcome, SealedMaterial};
+use crate::{
+    Authorization, AuthorizationAsk, CompanionId, Explained, MaterialSlot, Outcome, SealedMaterial,
+};
 
 /// Identifier of a credential: a UUIDv7 rendered as 32 lowercase hex digits.
 ///
@@ -201,6 +203,11 @@ pub struct SignInRequest {
     /// from the material whatever `hint` says, and completing it must sign
     /// in that account.
     pub again: Option<SealedMaterial>,
+    /// What the lobby's services need an account of this kind granted, in
+    /// the provider's own words (see
+    /// [`ServiceDescription::permissions`](crate::ServiceDescription::permissions)),
+    /// which the adapter asks the provider for beside what it always asks.
+    pub permissions: Vec<String>,
 }
 
 /// Where the sponsor's browser goes to sign in.
@@ -302,12 +309,14 @@ pub trait CredentialAdapter: Send + Sync {
     fn cancel_sign_in(&self, request: &SignInRequest);
 
     /// Mints an authorization for `ask` from the material in `slot`,
-    /// renewing the material first when it is due.
+    /// renewing the material first when it is due. A refusal says, in the
+    /// provider's words, why the account cannot give that proof and what
+    /// the sponsor does about it.
     fn authorize(
         &self,
         slot: &dyn MaterialSlot,
         ask: &AuthorizationAsk,
-    ) -> Result<Authorization, Outcome>;
+    ) -> Result<Authorization, Explained>;
 
     /// Keeps the credential in `slot` alive: renews its material when it is
     /// due, in the order the contract lays down, and says when to ask again.

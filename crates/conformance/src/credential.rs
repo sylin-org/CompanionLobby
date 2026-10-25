@@ -213,6 +213,7 @@ fn signed_in(
         state: state.to_owned(),
         return_to: format!("http://127.0.0.1:1/signin/{kind}/return"),
         again: None,
+        permissions: Vec::new(),
     };
     fixture.approve_as(&fixture.account());
     let start = adapter.begin_sign_in(&request).expect("a sign-in starts");
@@ -232,6 +233,7 @@ pub fn run(adapter: &dyn CredentialAdapter, fixture: &dyn CredentialFixture) {
         state: "conformance-state-1".to_owned(),
         return_to: format!("http://127.0.0.1:1/signin/{kind}/return"),
         again: None,
+        permissions: Vec::new(),
     };
 
     // A sign-in records the account the provider authenticated.
@@ -290,7 +292,10 @@ pub fn run(adapter: &dyn CredentialAdapter, fixture: &dyn CredentialFixture) {
     for ask in fixture.unsupported_asks() {
         let slot = CountingSlot::new(Ok(signed.material.clone()));
         assert_eq!(
-            adapter.authorize(&slot, &ask).map(|_| ()),
+            adapter
+                .authorize(&slot, &ask)
+                .map(|_| ())
+                .map_err(|explained| explained.outcome),
             Err(Outcome::Unsupported),
             "{ask:?} is unsupported"
         );

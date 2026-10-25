@@ -34,6 +34,7 @@ fn request(hint: &str, state: &str) -> SignInRequest {
         state: state.to_owned(),
         return_to: RETURN_TO.to_owned(),
         again: None,
+        permissions: Vec::new(),
     }
 }
 
@@ -518,7 +519,10 @@ fn every_ask_is_refused_as_unsupported_before_the_material_is_read() {
         lifetime_secs: 60,
     };
     assert_eq!(
-        adapter.authorize(&Untouched, &ask).map(|_| ()),
+        adapter
+            .authorize(&Untouched, &ask)
+            .map(|_| ())
+            .map_err(|explained| explained.outcome),
         Err(Outcome::Unsupported)
     );
     assert!(world.server().requests().is_empty());

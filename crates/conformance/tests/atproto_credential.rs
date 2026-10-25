@@ -117,6 +117,7 @@ fn a_refresh_that_grants_more_than_the_session_held_is_never_kept() {
         state: "widened-state".to_owned(),
         return_to: "http://127.0.0.1:1/signin/atproto/return".to_owned(),
         again: None,
+        permissions: Vec::new(),
     };
     let start = adapter.begin_sign_in(&request).expect("a sign-in starts");
     let returned = SignInReturn {

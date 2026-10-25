@@ -16,10 +16,10 @@
 //!
 //! The two contracts are [`CredentialAdapter`] and [`ServiceAdapter`]. Both are
 //! synchronous and `Send + Sync`; the daemon runs them on blocking threads. The
-//! daemon implements [`MaterialSlot`] and [`Authority`], so adapters never
-//! touch the store directly: a service adapter asks the [`Authority`] for an
-//! [`Authorization`] in the shape it needs, and the credential adapter mints it
-//! from material only it decodes.
+//! daemon implements [`MaterialSlot`], [`IssuedSlot`] and [`Authority`], so
+//! adapters never touch the store directly: a service adapter asks the
+//! [`Authority`] for an [`Authorization`] in the shape it needs, and the
+//! credential adapter mints it from material only it decodes.
 //!
 //! A type enters this crate only when both synthetic adapters in the test kit
 //! need it in the same change.
@@ -46,9 +46,9 @@ pub use credential::{
     Freshness, ProviderKind, Revocation, SignInRequest, SignInReturn, SignInStart, SignedIn,
 };
 pub use journal::{Initiator, JournalEntry, JournalKind, JournalNames};
-pub use material::{MaterialSlot, MaterialUpdate, SealedIssued, SealedMaterial};
+pub use material::{IssuedSlot, MaterialSlot, MaterialUpdate, SealedIssued, SealedMaterial};
 pub use mind::{Attachment, AttachmentId};
-pub use outcome::{Outcome, Retry};
+pub use outcome::{Explained, Outcome, Retry};
 pub use service::{Authority, ServiceAdapter, ServiceDescription, ServiceName};
 pub use sponsor::Sponsor;
 pub use tool::{Effect, Passage, ToolArguments, ToolDescriptor, ToolName, ToolResult};
@@ -64,6 +64,7 @@ mod tests {
         shareable::<dyn CredentialAdapter>();
         shareable::<dyn ServiceAdapter>();
         shareable::<dyn MaterialSlot>();
+        shareable::<dyn IssuedSlot>();
         shareable::<dyn Authority>();
     }
 }

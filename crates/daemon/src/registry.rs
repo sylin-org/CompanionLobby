@@ -35,6 +35,7 @@ pub struct Registry {
     services: Vec<Arc<dyn ServiceAdapter>>,
     titles: Vec<(ProviderKind, String)>,
     hints: Vec<(ProviderKind, String)>,
+    service_titles: Vec<(ServiceName, String)>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -71,7 +72,46 @@ impl Registry {
             services,
             titles: Vec::new(),
             hints: Vec::new(),
+            service_titles: Vec::new(),
         }
+    }
+
+    /// The same registry, showing the service `name` to the sponsor and to
+    /// a mind as `title`, the name its own makers give it.
+    #[must_use]
+    pub fn service_titled(mut self, name: &str, title: &str) -> Self {
+        if let Some(name) = ServiceName::new(name) {
+            self.service_titles.retain(|(titled, _)| *titled != name);
+            self.service_titles.push((name, title.to_owned()));
+        }
+        self
+    }
+
+    /// The title of the service `name`: its own, or its capitalized name.
+    pub fn service_title(&self, name: &ServiceName) -> String {
+        self.service_titles
+            .iter()
+            .find(|(titled, _)| titled == name)
+            .map_or_else(|| capitalized(name.as_str()), |(_, title)| title.clone())
+    }
+
+    /// What the services that accept the provider kind `kind` need an
+    /// account of it granted, each once, in the order the services and
+    /// their declarations list them.
+    pub fn permissions(&self, kind: &ProviderKind) -> Vec<String> {
+        let mut permissions: Vec<String> = Vec::new();
+        for adapter in &self.services {
+            let description = adapter.describe();
+            if !description.accepts.contains(kind) {
+                continue;
+            }
+            for permission in description.permissions {
+                if !permissions.contains(&permission) {
+                    permissions.push(permission);
+                }
+            }
+        }
+        permissions
     }
 
     /// The same registry, showing the provider kind `kind` to the sponsor

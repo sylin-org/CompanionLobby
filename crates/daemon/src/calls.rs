@@ -12,8 +12,8 @@
 //! the connection it went through.
 
 use lobby_contracts::{
-    Address, ConnectionId, Effect, Outcome, ServiceAdapter, ServiceName, ToolDescriptor, ToolName,
-    ToolResult,
+    Address, ConnectionId, CredentialAdapter, CredentialId, Effect, Explained, Outcome,
+    ServiceAdapter, ServiceName, ToolDescriptor, ToolName, ToolResult,
 };
 use std::sync::Arc;
 
@@ -24,6 +24,8 @@ pub struct Ticket {
     pub connection: ConnectionId,
     /// The connection's revision when the call began.
     pub revision: u64,
+    /// The credential the connection was established with.
+    pub credential: CredentialId,
     /// Where the service is.
     pub address: Address,
     /// The service.
@@ -34,6 +36,9 @@ pub struct Ticket {
     pub effect: Effect,
     /// The service's adapter.
     pub adapter: Arc<dyn ServiceAdapter>,
+    /// The adapter of the connection's credential, which mints what the
+    /// service adapter asks for when it establishes the connection again.
+    pub credential_adapter: Arc<dyn CredentialAdapter>,
 }
 
 impl std::fmt::Debug for Ticket {
@@ -68,14 +73,17 @@ pub fn find_tool(
 pub fn settle(
     effect: Effect,
     still_pinned: bool,
-    result: Result<ToolResult, Outcome>,
-) -> Result<ToolResult, Outcome> {
+    result: Result<ToolResult, Explained>,
+) -> Result<ToolResult, Explained> {
     if still_pinned {
         return result;
     }
     match effect {
-        Effect::Read => Err(Outcome::Revoked),
-        Effect::Write { .. } => Err(Outcome::Unknown),
+        Effect::Read => Err(Outcome::Revoked.into()),
+        Effect::Write { .. } => Err(Explained::new(
+            Outcome::Unknown,
+            "The sponsor revoked this connection while the write was on its way, so the lobby cannot say whether the service carried it out. Read the target before deciding whether to write again; the connection is gone until the sponsor opens it again.",
+        )),
     }
 }
 
@@ -84,11 +92,15 @@ mod tests {
     use super::*;
     use lobby_contracts::{Passage, Retry};
 
-    fn done() -> Result<ToolResult, Outcome> {
+    fn done() -> Result<ToolResult, Explained> {
         Ok(ToolResult {
             text: vec![Passage::Authored("late".to_owned())],
             structured: None,
         })
+    }
+
+    fn outcome(answer: Result<ToolResult, Explained>) -> Result<ToolResult, Outcome> {
+        answer.map_err(|explained| explained.outcome)
     }
 
     #[test]
@@ -96,16 +108,21 @@ mod tests {
         let write = Effect::Write {
             retry: Retry::ReadFirst,
         };
-        assert_eq!(settle(Effect::Read, false, done()), Err(Outcome::Revoked));
-        assert_eq!(settle(write, false, done()), Err(Outcome::Unknown));
         assert_eq!(
-            settle(write, false, Err(Outcome::Refused)),
+            outcome(settle(Effect::Read, false, done())),
+            Err(Outcome::Revoked)
+        );
+        let late = settle(write, false, done()).expect_err("never a success");
+        assert_eq!(late.outcome, Outcome::Unknown);
+        assert!(late.sentence.contains("Read the target before"));
+        assert_eq!(
+            outcome(settle(write, false, Err(Outcome::Refused.into()))),
             Err(Outcome::Unknown),
             "a write the service may have carried out is never reported as refused"
         );
         assert_eq!(settle(Effect::Read, true, done()), done());
         assert_eq!(
-            settle(write, true, Err(Outcome::Refused)),
+            outcome(settle(write, true, Err(Outcome::Refused.into()))),
             Err(Outcome::Refused)
         );
     }

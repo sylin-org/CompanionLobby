@@ -36,8 +36,9 @@ pub trait Toolbox {
     fn reached(&self) -> Vec<Reached>;
 
     /// The connections of the attachment's companion that wait for the
-    /// sponsor to sign their account in again, by service and label.
-    fn waiting(&self) -> Vec<(ServiceName, Label)>;
+    /// sponsor to sign their account in again, by service, the service's
+    /// title and label.
+    fn waiting(&self) -> Vec<(ServiceName, String, Label)>;
 
     /// Calls the service tool `name`.
     fn call(&self, name: &str, arguments: Map<String, Value>) -> Result<ToolResult, CallRefusal>;
@@ -255,7 +256,7 @@ mod tests {
             Vec::new()
         }
 
-        fn waiting(&self) -> Vec<(ServiceName, Label)> {
+        fn waiting(&self) -> Vec<(ServiceName, String, Label)> {
             Vec::new()
         }
 

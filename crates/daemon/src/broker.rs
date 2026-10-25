@@ -1,7 +1,7 @@
 //! The daemon's side of the adapter contracts.
 //!
-//! A service adapter that establishes a connection asks the [`Broker`] for an
-//! authorization. The broker hands the ask to the credential adapter of the
+//! A service adapter that establishes a connection, or establishes it again
+//! during a tool call, asks the [`Broker`] for an authorization. The broker hands the ask to the credential adapter of the
 //! connection's credential, with a [`Slot`] through which that adapter reads
 //! its own material, and hands back exactly what the adapter minted. The
 //! slot re-checks with the lobby, at the moment of the read, that the
@@ -24,8 +24,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lobby_contracts::{
-    Authority, Authorization, AuthorizationAsk, CredentialAdapter, CredentialId, MaterialSlot,
-    MaterialUpdate, Outcome, SealedMaterial,
+    Authority, Authorization, AuthorizationAsk, CredentialAdapter, CredentialId, Explained,
+    MaterialSlot, MaterialUpdate, Outcome, SealedMaterial,
 };
 
 use crate::domain::Lobby;
@@ -65,9 +65,13 @@ impl<'a> Broker<'a> {
 }
 
 impl Authority for Broker<'_> {
-    fn authorize(&self, ask: &AuthorizationAsk) -> Result<Authorization, Outcome> {
+    fn authorize(&self, ask: &AuthorizationAsk) -> Result<Authorization, Explained> {
         let minted = self.adapter.authorize(&self.slot, ask);
-        if let Err(outcome @ (Outcome::NeedsSignIn | Outcome::Unknown)) = minted {
+        if let Err(Explained {
+            outcome: outcome @ (Outcome::NeedsSignIn | Outcome::Unknown),
+            ..
+        }) = minted
+        {
             *self.refused.lock().unwrap_or_else(PoisonError::into_inner) = Some(outcome);
         }
         minted

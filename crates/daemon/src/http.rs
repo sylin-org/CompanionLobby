@@ -1684,8 +1684,15 @@ impl mcp::Toolbox for Attached<'_> {
         self.lobby.reached(self.attachment.companion)
     }
 
-    fn waiting(&self) -> Vec<(lobby_contracts::ServiceName, lobby_contracts::Label)> {
-        self.lobby.waiting(self.attachment.companion)
+    fn waiting(&self) -> Vec<(lobby_contracts::ServiceName, String, lobby_contracts::Label)> {
+        self.lobby
+            .waiting(self.attachment.companion)
+            .into_iter()
+            .map(|(service, label)| {
+                let title = self.lobby.registry().service_title(&service);
+                (service, title, label)
+            })
+            .collect()
     }
 
     fn call(
