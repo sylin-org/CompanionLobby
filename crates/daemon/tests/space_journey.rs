@@ -472,6 +472,97 @@ fn a_write_that_finds_the_account_needs_a_sign_in_says_so_and_never_lands() {
     );
 }
 
+/// Ada connected and a call of `tool` on its way, its answer held at the
+/// Space; meanwhile a second mind attached as Ada calls, finds that the
+/// account needs a sign-in, and leaves the connection waiting for it. The
+/// first call then settles against a connection someone else changed, and
+/// answers `outcome` with `told`, never that the sponsor revoked anything.
+fn flipped_mid_call(
+    world: &World,
+    label: &str,
+    tool: &str,
+    arguments: Value,
+    route: &str,
+    expected: (&str, &str),
+) {
+    let (install, _, mut first) = connected(world, label);
+    let held = world.space.listener().hold_answers(route);
+    first.send(&json!({
+        "jsonrpc": "2.0", "id": 80, "method": "tools/call",
+        "params": { "name": tool, "arguments": arguments }
+    }));
+    world.space.listener().wait_for(route, 1);
+    world.space.end_tokens();
+    world.atproto.end_access_tokens();
+    world.atproto.refuse_refreshes();
+    let mut second = install.attach("ada");
+    initialize(&mut second);
+    let flipped = call(&mut second, 81, "tangent_arrive", json!({}));
+    assert_eq!(
+        flipped["result"]["structuredContent"]["outcome"], "needs_sign_in",
+        "{flipped}"
+    );
+    drop(held);
+    let late = first.answer(&json!(80));
+    assert_eq!(late["result"]["isError"], true, "{late}");
+    let structured = &late["result"]["structuredContent"];
+    let told = said(&late);
+    assert_eq!(structured["outcome"], expected.0, "{late}");
+    assert_eq!(told, expected.1);
+    assert!(!told.contains("revoked"), "{told}");
+    assert_eq!(structured["message"], told.as_str());
+    let settled: Vec<String> = install
+        .journal()
+        .iter()
+        .filter(|entry| entry["kind"] == "settled")
+        .map(|entry| entry["outcome"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(settled, ["needs_sign_in", expected.0]);
+    install.stop();
+}
+
+#[test]
+fn a_read_whose_account_another_call_found_needs_a_sign_in_says_so_and_shows_nothing() {
+    let world = world();
+    let topic = world.welcome.clone();
+    flipped_mid_call(
+        &world,
+        "space-flipped-read",
+        "tangent_read_topic",
+        json!({ "topic": topic }),
+        "/api/v1/experience/topics/welcome",
+        (
+            "needs_sign_in",
+            "The account behind Tangent Space at main needs the sponsor to sign it in again on the manager page; this read's answer is not shown, and its tools come back once they do.",
+        ),
+    );
+}
+
+#[test]
+fn a_write_whose_account_another_call_found_needs_a_sign_in_is_unknown_and_says_why() {
+    let world = world();
+    let topic = world.welcome.clone();
+    flipped_mid_call(
+        &world,
+        "space-flipped-write",
+        "tangent_post",
+        json!({ "topic": topic, "text": "Held at the door.", "request_id": "held-1" }),
+        "/api/v1/experience/topics/welcome/posts",
+        (
+            "outcome_unknown",
+            "The account behind Tangent Space at main needed signing in again while this write was on its way, so the lobby cannot say whether the service carried it out. Once the sponsor signs it in again, read the target before writing again.",
+        ),
+    );
+    assert!(
+        world
+            .space
+            .posts()
+            .iter()
+            .any(|post| post.text == "Held at the door."),
+        "the Post did land: unknown is the honest answer"
+    );
+}
+
 #[test]
 fn a_post_of_a_mebibyte_reaches_the_mind_cut_short_and_quoted_in_text_and_structure() {
     let world = world();

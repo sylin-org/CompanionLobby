@@ -2198,9 +2198,6 @@ impl Lobby {
         self.settle_renewal(broker.slot(), refused.map_or(Ok(None), Err));
         let answer = self.run(|core| {
             let now = core.store.state().connection(ticket.connection);
-            let still_pinned = now.is_some_and(|connection| {
-                connection.state == ConnectionState::Ready && connection.revision == ticket.revision
-            });
             // This call's own minting found that the account needs signing
             // in again, and left the connection waiting for that: the
             // sponsor revoked nothing, and the service did nothing, since
@@ -2211,6 +2208,28 @@ impl Lobby {
                     connection.state == ConnectionState::NeedsSignIn
                         && connection.revision == ticket.revision + 1
                 });
+            // Otherwise the connection is where something else left it
+            // while the call ran: a renewal on another thread, the sponsor,
+            // or a sign-in again; the answer says which.
+            let standing = match now {
+                Some(connection)
+                    if connection.state == ConnectionState::Ready
+                        && connection.revision == ticket.revision =>
+                {
+                    calls::Standing::Pinned
+                }
+                Some(connection) if connection.state == ConnectionState::NeedsSignIn => {
+                    calls::Standing::NeedsSignIn {
+                        place: format!("{title} at {}", connection.label),
+                    }
+                }
+                Some(connection) if connection.state == ConnectionState::Ready => {
+                    calls::Standing::SignedInAgain {
+                        place: format!("{title} at {}", connection.label),
+                    }
+                }
+                _ => calls::Standing::Revoked,
+            };
             let answer = match now {
                 Some(connection) if waits_on_this_call => Err(Refusal::new(
                     Outcome::NeedsSignIn,
@@ -2219,8 +2238,8 @@ impl Lobby {
                         label = connection.label
                     ),
                 )),
-                _ => calls::settle(ticket.effect, still_pinned, result)
-                    .map_err(|explained| Refusal::new(explained.outcome, explained.sentence)),
+                _ => calls::settle(ticket.effect, &standing, result)
+                    .map_err(|(outcome, sentence)| Refusal::new(outcome, sentence)),
             };
             let outcome = answer
                 .as_ref()
