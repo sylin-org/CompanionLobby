@@ -96,12 +96,13 @@ pub fn claude_code() -> Recording {
 /// you can go, read what is new, and reply to the newest conversation in
 /// one friendly sentence.
 ///
-/// The mind calls `reach`, asks the Space what is new, reads the Topic of
-/// the newest Post and replies to it with a request id of its own choosing,
-/// with
-/// no refused call and no guessed name or argument. The Space's origin in
-/// the frames is the one that walk ran against; a replay puts its own in
-/// its place.
+/// The mind calls `reach`, asks the Space what is new and learns who wrote
+/// each Post by name, reads the Topic of the newest Post, lists the
+/// Tangent's Topics to see where it can post, replies to Bea with a request
+/// id of its own choosing and marks the Topic read, with no refused call
+/// and no guessed name or argument. Its host showed it each result's
+/// structured content. The Space's origin in the frames is the one that
+/// walk ran against; a replay puts its own in its place.
 pub fn claude_code_in_a_space() -> Recording {
     parse(
         "claude-code 2.1.303",
@@ -155,7 +156,9 @@ mod tests {
                 "reach",
                 "tangent_updates",
                 "tangent_read_topic",
-                "tangent_post"
+                "tangent_topics",
+                "tangent_post",
+                "tangent_mark_read"
             ]
         );
         for frame in recording
@@ -171,5 +174,15 @@ mod tests {
             .expect("the reply");
         let arguments = &post["params"]["arguments"];
         assert!(arguments["reply_to"].is_string() && arguments["request_id"].is_string());
+        let updates = recording
+            .sent()
+            .find(|frame| frame["params"]["name"] == "tangent_updates")
+            .and_then(|frame| recording.answer_to(&frame["id"]))
+            .expect("what is new");
+        assert_eq!(
+            updates["result"]["structuredContent"]["attention"]["items"][0]["quoted"]["actorName"],
+            "Bea",
+            "the mind read who wrote the newest Post by name"
+        );
     }
 }

@@ -228,14 +228,25 @@ pub const STRUCTURED_BUDGET: usize = ToolResult::RENDERED_BUDGET;
 /// [`STRUCTURED_BUDGET`], which is then left out.
 pub const STRUCTURED_LEFT_OUT: &str = " [Companion Lobby left out this result's structured form, which was over its output budget; this text holds the whole answer.]";
 
+/// What ends the text of a result that was cut short and whose structured
+/// content was over [`STRUCTURED_BUDGET`] too, which is then left out.
+pub const CUT_AND_LEFT_OUT: &str = " [Companion Lobby also left out this result's structured form, which was over its output budget; ask for less at once, such as a smaller page, to read the whole answer.]";
+
 /// The MCP result of a tool's answer: its rendered text, and its structured
-/// content when it has one and it fits within [`STRUCTURED_BUDGET`].
+/// content when it has one and it fits within [`STRUCTURED_BUDGET`]. A text
+/// that holds the whole answer says so when the structured form is left
+/// out; one that was cut short says that the answer is not whole.
 fn result_json(answer: &ToolResult, is_error: bool) -> Value {
     let mut text = answer.rendered();
+    let cut = text.ends_with(ToolResult::CUT_SHORT);
     let structured = answer.structured.as_ref().filter(|structured| {
         let fits = structured.to_string().len() <= STRUCTURED_BUDGET;
         if !fits {
-            text.push_str(STRUCTURED_LEFT_OUT);
+            text.push_str(if cut {
+                CUT_AND_LEFT_OUT
+            } else {
+                STRUCTURED_LEFT_OUT
+            });
         }
         fits
     });
@@ -397,6 +408,21 @@ mod tests {
         let text = left["content"][0]["text"].as_str().expect("text");
         assert_eq!(text, format!("Read.{STRUCTURED_LEFT_OUT}"));
         assert!(left.to_string().len() < 2 * 1024);
+
+        let both = ToolResult {
+            text: vec![lobby_contracts::Passage::Authored(
+                "x".repeat(ToolResult::RENDERED_BUDGET + 1),
+            )],
+            structured: Some(json!({ "posts": ["x".repeat(STRUCTURED_BUDGET)] })),
+        };
+        let cut = result_json(&both, false);
+        assert!(cut.get("structuredContent").is_none(), "{cut}");
+        let text = cut["content"][0]["text"].as_str().expect("text");
+        assert!(
+            text.ends_with(&format!("{}{CUT_AND_LEFT_OUT}", ToolResult::CUT_SHORT)),
+            "a cut text never claims to hold the whole answer"
+        );
+        assert!(!text.contains(STRUCTURED_LEFT_OUT));
     }
 
     #[test]

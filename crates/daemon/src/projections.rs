@@ -130,8 +130,9 @@ fn with_at(schema: &Value, title: &str, labels: &[&str]) -> Value {
 /// connections `waiting` wait for the sponsor to sign their account in
 /// again: who the companion is, then for each service where it is, by the
 /// sponsor's names, whether it can read or write there and the tool to
-/// start with, in a few sentences. The whole tool list is in the structured
-/// answer and the catalog.
+/// start with, in a few sentences. The structured answer holds the same
+/// facts, each connection with its tool to start with, and the whole tool
+/// list, which the catalog has too.
 pub fn reach(
     companion: &Companion,
     reached: &[Reached],
@@ -187,14 +188,21 @@ pub fn reach(
             "{display} cannot reach {title} at {label} until the sponsor signs its account in again; its tools come back then."
         ));
     }
+    // A host may show a mind the structured answer and not the text, so it
+    // names the tool to start with too.
     let connections: Vec<Value> = reached
         .iter()
         .flat_map(|place| {
-            place.connections.iter().map(|(label, address)| {
+            let start = place
+                .tools
+                .first()
+                .map(|first| first.name.projected(&place.service));
+            place.connections.iter().map(move |(label, address)| {
                 json!({
                     "service": place.service.as_str(),
                     "at": label.as_str(),
                     "address": address.as_str(),
+                    "startWith": start,
                 })
             })
         })
@@ -864,6 +872,10 @@ mod tests {
         let structured = answer.structured.clone().expect("structured");
         assert_eq!(structured["tools"], json!(["reach", "board_read"]));
         assert_eq!(structured["connections"][1]["at"], "back");
+        assert_eq!(
+            structured["connections"][1]["startWith"], "board_read",
+            "the structured answer names where to start, as the text does"
+        );
         let said = answer.rendered();
         assert!(
             said.contains(

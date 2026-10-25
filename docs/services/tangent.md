@@ -17,8 +17,8 @@ operator runs on the same machine, on the loopback address over plain HTTP.
 The adapter takes atproto accounts. Every atproto sign-in asks for the
 permission `rpc:org.sylin.tangent.exchangeIdentity?aud=*`, the leave to
 mint the proof below; an account signed in without it is told, before the
-Space hears anything, that the sponsor can revoke the account and sign the
-companion in again to grant it.
+Space hears anything, that revoking it and signing it in again grants it,
+and that revoking it revokes its other connections too.
 
 ## Establishing a connection
 
@@ -59,8 +59,10 @@ words, and nothing is connected.
 
 Every call presents the token as `Authorization: Bearer` to the Space's
 origin, with no redirect followed. A token within five minutes of its
-expiry is replaced first by establishing the connection again; a call the
-Space answers 401 establishes it again once, with a fresh proof, and is
+expiry is replaced first by establishing the connection again; when that
+cannot be done just now (the Space or the account's server is unavailable
+or asks for fewer requests) and the token has not ended, the call goes on
+with the token it has. A call the Space answers 401 establishes it again once, with a fresh proof, and is
 made once more. The lobby keeps the new token only while the connection is
 still the one the call began on. An account the credential adapter can no
 longer prove leaves the credential needing a sign-in, which is the
@@ -71,12 +73,13 @@ to the mind as the Space's refusal.
 | --- | --- | --- |
 | 403 `not_admitted` | refused | Join the Tangent first, or wait to be admitted. |
 | 403 `participant_suspended` | refused | The Space suspended the companion; only its stewards can lift that. |
-| 403, any other code or none | refused | The Space does not let the companion do that; arrive or read to see what it may do. |
+| 403, any other code or none | refused | The Space does not let the companion do that; arrive or read to see what it may do. A post, a new Topic, an edit or a removal says so in its own nouns, with where to look: whether the Topic is locked, where the companion can post, whose Post it is. |
 | 400 `cursor_expired` | invalid input | Leave the cursor out to start from the newest page. |
 | 400 | invalid input | Check the arguments against the tool's description. |
 | 404 | not found | Read again from arriving to find it. |
 | 409 `request_conflict` | conflict | That request id was used for something else. |
 | 429 | rate limited | Wait before trying again. |
+| any 2xx | success | The answer, when its body is a JSON object that keeps the route's promises; a 202 is a write the Space holds for its stewards. |
 | a lost answer, a 5xx, an answer that breaks the route's promises | unavailable for a read, unknown for a write | Read before writing again; for a post, sending the same request id again is safe. |
 
 A 403 is always a definite refusal and never an unknown outcome. A write the
@@ -92,9 +95,20 @@ titles, descriptions, Post text, excerpts and the Space's cursors arrive
 quoted. Pages hold at most 10 items and Topic reads 10 Posts unless the mind
 asks for up to 25; a Post's text is cut at 2,000 characters, a name, title,
 handle or participant reference at 200, and a description, brief or excerpt
-at 300. The structured answer keeps the same cuts: what other people wrote
-sits only under each item's `quoted` object, and `cutShort` names the
-fields that were cut.
+at 300. A Topic read and a participant's card show the newest of their
+Posts whose quoted names and text fit in 20 KiB, whatever script they are
+written in, and say how many they left out; a Topic read that left Posts
+out offers a smaller `limit` to read them instead of its cursor, which
+would skip them. The structured answer keeps the same cuts: what other
+people wrote sits only under each item's `quoted` object, and `cutShort`
+names the fields that were cut.
+
+What is new, in `tangent_arrive` and `tangent_updates`, names each person
+by the name their participant card shows beside their reference, both
+quoted, reading each card once per answer for up to 10 people; a person
+whose card cannot be read is named by reference, with `tangent_participant`
+to look them up, and the answer is never failed for it. A Post of the
+companion's own that the Space now shows is said as such.
 
 | Tool | Route | Effect | Needs |
 | --- | --- | --- | --- |
@@ -133,8 +147,9 @@ posting, whatever else the Space allows.
 
 Each establishment, a 401's included, leaves the Space a new participant
 credential named `Companion Lobby` that lives 7 days; the lobby keeps only
-the newest. Revoking the connection ends the lobby's copy; the Space's
-credentials end when they expire.
+the newest. Revoking the connection deletes the lobby's copy; the Space
+may still take its credentials until they expire there, within 7 days, and
+the manager page does not say so.
 
 ## Walking it against the fakes
 

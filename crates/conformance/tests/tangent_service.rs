@@ -14,7 +14,7 @@ use lobby_contracts::{
 use lobby_credential_atproto::{Atproto, World};
 use lobby_service_tangent::{self as tangent, Tangent};
 use lobby_testkit::atproto::AtprotoWorld;
-use lobby_testkit::space::{Profile, SpaceServer};
+use lobby_testkit::space::{EXCHANGE_PATH, Profile, SpaceServer};
 use lobby_testkit::{percent_decode, secrets_in};
 use serde_json::{Map, Value, json};
 
@@ -402,13 +402,11 @@ fn a_forbidden_write_is_refused_in_the_spaces_words_and_never_unknown() {
         .expect_err("refused");
     assert_eq!(
         refused,
-        Explained::new(
-            Outcome::Refused,
-            lobby_service_tangent::wire::PERMISSION_DENIED
-        )
+        Explained::new(Outcome::Refused, lobby_service_tangent::tools::POST_DENIED),
+        "in the post's own nouns"
     );
     assert!(
-        refused.sentence.contains("tangent_arrive"),
+        refused.sentence.contains("tangent_read_topic"),
         "with the next step"
     );
 }
@@ -473,6 +471,32 @@ fn a_token_about_to_expire_is_replaced_before_the_call() {
         .filter(|request| request.route().starts_with("/api/v1/experience/topics/"))
         .count();
     assert_eq!(reads, 1, "and the read went once, with the new token");
+}
+
+#[test]
+fn a_token_about_to_expire_still_serves_the_call_when_it_cannot_be_replaced_just_now() {
+    let fixture = Fixture::start();
+    fixture.space.issue_for(60);
+    let adapter = tangent_adapter();
+    let address = fixture.address();
+    let slot = HeldIssued::new(
+        adapter
+            .establish(&address, &fixture.minting)
+            .expect("established"),
+        &fixture.minting,
+    );
+    fixture.space.fail_exchanges(true);
+    let exchanges = fixture.space.listener().count(EXCHANGE_PATH);
+    let (read, read_arguments) = fixture.read();
+    adapter
+        .call(&read, &read_arguments, &address, &slot)
+        .expect("read with the token it has");
+    assert_eq!(
+        fixture.space.listener().count(EXCHANGE_PATH),
+        exchanges + 1,
+        "a replacement was tried"
+    );
+    assert!(slot.reissued().is_empty(), "and nothing new was kept");
 }
 
 #[test]

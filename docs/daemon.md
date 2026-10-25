@@ -628,14 +628,18 @@ connections, and the live tool set, so a mind can rely on it even when its
 host ignores tool list changes. Its text says who the companion is, then for
 each service where it is, by the sponsor's names, whether the companion
 can read or write there and the tool to start with, the service's first;
-the whole tool list is its structured `tools`. `initialize` declares `listChanged: true`,
+its structured answer gives each connection's `startWith` too, since a host
+may show a mind the structured form alone, and the whole tool list is its
+structured `tools`. `initialize` declares `listChanged: true`,
 and the shim relays a `notifications/tools/list_changed` each time the
 companion's connections change.
 
 A tool call answers the tool's result, whose text marks third-party passages
 as quoted strings, with its structured content when that serializes within
 the same 32 KiB budget as the text; a result whose structured content is
-larger leaves it out and says so at the end of its text. Or it answers an
+larger leaves it out and says so at the end of its text: that the text holds
+the whole answer, or, when the text was cut short too, that it does not and
+to ask for less at once. Or it answers an
 error result (`isError: true`) whose text is the
 adapter's or the lobby's own sentence for the outcome and whose
 `structuredContent` is `{"outcome": "<code>"}`.

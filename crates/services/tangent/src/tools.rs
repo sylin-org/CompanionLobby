@@ -16,9 +16,13 @@
 //! the adapter's own sentences are authored. Pages stay well below the
 //! Space's own maximum and every Post's text is cut at [`POST_SHOWN`]
 //! characters, names at [`NAME_SHOWN`] and descriptions at
-//! [`ABOUT_SHOWN`], so a result fits its reading budget. The structured
+//! [`ABOUT_SHOWN`], and a page shows the newest Posts whose quoted text fits
+//! in [`POSTS_BUDGET`] bytes, saying how many it left out, so a result fits
+//! its reading budget whatever script it is written in. The structured
 //! answer keeps the same cuts and holds what other people wrote only under
-//! each item's `quoted` object, naming in `cutShort` the fields it cut.
+//! each item's `quoted` object, naming in `cutShort` the fields it cut. A
+//! host may show a mind either form, so each carries the same facts: what
+//! is new names each person by their card's name beside their reference.
 //!
 //! Reads, and joining, leaving, watching, the read position and reports,
 //! need the `read` grant; posting, starting a Topic, editing and removing
@@ -61,6 +65,11 @@ pub const TITLE_MOST: usize = 200;
 pub const REQUEST_ID_MOST: usize = 128;
 /// The most items one page holds.
 const PAGE_MOST: usize = 10;
+/// The most bytes the Posts of one answer take once cut and quoted, so the
+/// whole answer, as text or structured, stays within its reading budget
+/// whatever script the Posts are written in. A page whose Posts take more
+/// shows its newest Posts that fit and says how many it left out.
+pub const POSTS_BUDGET: usize = 20 * 1024;
 
 /// Which grant a tool needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -689,11 +698,32 @@ pub fn perform(
     performed.map_err(|failed| in_its_words(tool, failed))
 }
 
-/// `failed`, with an unknown outcome said in `tool`'s own nouns.
+/// What a mind reads when the Space refuses a post, giving no reason the
+/// adapter knows.
+pub const POST_DENIED: &str = "The Space does not let this companion post in this Topic. Read it with tangent_read_topic to see whether it is locked, or post in another Topic.";
+/// What a mind reads when the Space refuses a new Topic.
+pub const START_DENIED: &str = "The Space does not let this companion start a Topic in this Tangent. List its Topics with tangent_topics to see where it can post.";
+/// What a mind reads when the Space refuses an edit or a removal.
+pub const CHANGE_DENIED: &str = "The Space does not let this companion change that Post. Only a Post's author can, and its Topic may be locked; read the Topic with tangent_read_topic to see which.";
+
+/// `failed`, with an unknown outcome and a refusal that gives no reason
+/// the adapter knows said in `tool`'s own nouns.
 fn in_its_words(tool: &Tool, failed: Failed) -> Failed {
     match (failed, tool.unknown) {
         (Failed::Ended(explained), Some(sentence)) if explained.outcome == Outcome::Unknown => {
             Explained::new(Outcome::Unknown, sentence).into()
+        }
+        (Failed::Ended(explained), _)
+            if explained.outcome == Outcome::Refused
+                && explained.sentence == wire::PERMISSION_DENIED =>
+        {
+            let sentence = match tool.name {
+                "post" => POST_DENIED,
+                "start_topic" => START_DENIED,
+                "edit_post" | "remove_post" => CHANGE_DENIED,
+                _ => wire::PERMISSION_DENIED,
+            };
+            Explained::new(Outcome::Refused, sentence).into()
         }
         (failed, _) => failed,
     }
@@ -726,6 +756,35 @@ fn scope_argument<'a>(
         INVALID,
         "scope is a Tangent's or a Topic's reference, as tangent_arrive gives them.",
     ))
+}
+
+/// The names the Space shows for `actors`, each read once from its
+/// participant card, for at most [`PAGE_MOST`] of them. An actor whose card
+/// cannot be read, or whose card names another participant, goes unnamed:
+/// a name is a courtesy, and its absence never fails the answer.
+fn names_of<'a>(
+    through: &Through<'_>,
+    actors: impl Iterator<Item = &'a str>,
+) -> Vec<(String, String)> {
+    let mut distinct: Vec<&str> = Vec::new();
+    for actor in actors {
+        if participant_shaped(actor) && actor.len() <= 512 && !distinct.contains(&actor) {
+            distinct.push(actor);
+        }
+    }
+    distinct
+        .into_iter()
+        .take(PAGE_MOST)
+        .filter_map(|actor| {
+            let card = through
+                .get(&format!("{ROOT}/participants/{}", encode(actor)))
+                .ok()?;
+            let profile = &card["profile"];
+            let name = string(profile, "displayName").filter(|name| !name.trim().is_empty())?;
+            (string(profile, "participantRef") == Some(actor))
+                .then(|| (actor.to_owned(), name.to_owned()))
+        })
+        .collect()
 }
 
 /// The attention items of an answer, checked and said.
@@ -762,34 +821,59 @@ fn say_attention(
             }
         ));
     }
-    let mut kept = Vec::new();
     for item in items {
-        let source = string(item, "sourceRef");
-        let scope = string(item, "scopeRef");
-        if !through.is(source, Kind::Post) || !through.is(scope, Kind::Topic) {
+        if !through.is(string(item, "sourceRef"), Kind::Post)
+            || !through.is(string(item, "scopeRef"), Kind::Topic)
+        {
             return Err(untrusted(effect));
         }
+    }
+    let names = names_of(
+        through,
+        items.iter().filter_map(|item| string(item, "actorRef")),
+    );
+    let mut kept = Vec::new();
+    for item in items {
+        let source = string(item, "sourceRef").unwrap_or_default();
+        let scope = string(item, "scopeRef").unwrap_or_default();
+        let excerpt = string(item, "excerpt");
+        let actor = string(item, "actorRef").unwrap_or_default();
+        let name = names
+            .iter()
+            .find(|(reference, _)| reference == actor)
+            .map(|(_, name)| name.as_str());
         let (kind, said) = match string(item, "kind") {
             Some(kind @ "direct_reply") => (kind, "A reply to you"),
             Some(kind @ "direct_mention") => (kind, "A mention of you"),
             Some(kind @ "watched_activity") => (kind, "A new Post"),
-            Some(kind @ "write_settlement") => (kind, "Your write settled"),
+            Some(kind @ "write_settlement") => (kind, ""),
             _ => ("other", "Something new"),
         };
-        let actor = string(item, "actorRef").unwrap_or_default();
-        text.say(format!("\n- {said} by participant "))
-            .quote_cut(actor, NAME_SHOWN)
-            .say(format!(
-                " in Topic {}: Post {}, which begins ",
-                scope.unwrap_or_default(),
-                source.unwrap_or_default()
+        if kind == "write_settlement" {
+            text.say(format!(
+                "\n- Your Post {source} is now shown in Topic {scope}; it begins "
             ));
-        let excerpt = string(item, "excerpt");
+        } else {
+            text.say(format!("\n- {said} by "));
+            match name {
+                Some(name) => text
+                    .quote_cut(name, NAME_SHOWN)
+                    .say(" (participant ")
+                    .quote_cut(actor, NAME_SHOWN)
+                    .say(")"),
+                None => text
+                    .say("participant ")
+                    .quote_cut(actor, NAME_SHOWN)
+                    .say(" (tangent_participant names them)"),
+            };
+            text.say(format!(" in Topic {scope}: Post {source}, which begins "));
+        }
         text.quote_cut(excerpt.unwrap_or_default(), ABOUT_SHOWN);
         kept.push(with_quoted(
             json!({ "kind": kind, "topic": scope, "post": source }),
             &[
                 ("actor", Some(actor), NAME_SHOWN),
+                ("actorName", name, NAME_SHOWN),
                 ("excerpt", excerpt, ABOUT_SHOWN),
             ],
         ));
@@ -863,10 +947,9 @@ fn arrive(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolR
     let mut text = Text::default();
     text.say("You are ")
         .quote_cut(name.unwrap_or_default(), NAME_SHOWN)
-        .say(format!(
-            " here, participant {}, in the Space ",
-            through.issued.participant
-        ))
+        .say(" here, participant ")
+        .quote_cut(&through.issued.participant, NAME_SHOWN)
+        .say(", in the Space ")
         .quote_cut(
             string(&body["place"], "label").unwrap_or_default(),
             NAME_SHOWN,
@@ -899,8 +982,12 @@ fn arrive(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolR
     text.say("\n\nRead a Topic with tangent_read_topic, list a Tangent's Topics with tangent_topics, and post with tangent_post.");
     Ok(text.done(json!({
         "you": with_quoted(
-            json!({ "participant": through.issued.participant }),
-            &[("displayName", name, NAME_SHOWN), ("handle", handle, NAME_SHOWN)],
+            json!({}),
+            &[
+                ("participant", Some(through.issued.participant.as_str()), NAME_SHOWN),
+                ("displayName", name, NAME_SHOWN),
+                ("handle", handle, NAME_SHOWN),
+            ],
         ),
         "may": may,
         "attention": attention,
@@ -1005,6 +1092,41 @@ fn topics(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolR
     Ok(text.done(json!({ "tangent": tangent, "topics": kept, "cursor": next })))
 }
 
+/// The bytes `post`'s author name and text take in a result, cut and quoted.
+fn shown_bytes(post: &Value) -> usize {
+    let text = if post["removed"] == true {
+        ""
+    } else {
+        string(post, "text").unwrap_or_default()
+    };
+    let quoted = |text: &str, most: usize| Value::String(cut_to(text, most).0).to_string().len();
+    quoted(text, POST_SHOWN) + quoted(string(post, "authorName").unwrap_or_default(), NAME_SHOWN)
+}
+
+/// How many of `posts`, in the order given, fit within [`POSTS_BUDGET`]
+/// once cut and quoted; the first always does.
+fn fitting<'a>(posts: impl Iterator<Item = &'a Value>) -> usize {
+    let mut used = 0;
+    let mut count = 0;
+    for post in posts {
+        used += shown_bytes(post);
+        if count > 0 && used > POSTS_BUDGET {
+            break;
+        }
+        count += 1;
+    }
+    count
+}
+
+/// The cursor `body` gives in `field`, when it gives one the Space may.
+fn cursor_of(body: &Value, field: &str) -> Result<Option<String>, Failed> {
+    match body.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(cursor)) if cursor_shaped(cursor) => Ok(Some(cursor.clone())),
+        Some(_) => Err(untrusted(Effect::Read)),
+    }
+}
+
 /// One Post of an answer, checked and said; `topic` is the Topic it must
 /// belong to, when the read was of one.
 fn say_post(
@@ -1043,7 +1165,7 @@ fn say_post(
     let removed = post["removed"] == true;
     let body = if removed { None } else { string(post, "text") };
     if removed {
-        text.say(": removed by its author.");
+        text.say(": removed.");
     } else {
         text.say(": ");
         text.quote_cut(body.unwrap_or_default(), POST_SHOWN);
@@ -1092,6 +1214,10 @@ fn read_topic(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<T
     }
     let writable = body["canWrite"] == true;
     let (title, brief) = (string(&body, "title"), string(&body, "brief"));
+    let shown = fitting(posts.iter().rev());
+    let left = posts.len() - shown;
+    let older = cursor_of(&body, "historyOlderCursor")?;
+    let read_cursor = cursor_of(&body, "readCursor")?;
     let mut text = Text::default();
     text.say(format!("Topic {topic}: "))
         .quote_cut(title.unwrap_or_default(), NAME_SHOWN)
@@ -1099,7 +1225,7 @@ fn read_topic(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<T
         .quote_cut(brief.unwrap_or_default(), ABOUT_SHOWN)
         .say(format!(
             ". {}, oldest first. {}",
-            plural(posts.len(), "Post", "Posts"),
+            plural(shown, "Post", "Posts"),
             if writable {
                 "You can post here."
             } else if body["isLocked"] == true {
@@ -1108,8 +1234,41 @@ fn read_topic(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<T
                 "You cannot post here."
             }
         ));
+    // The cursor of a page whose oldest Posts were left out would skip
+    // them, so a smaller page is offered instead.
+    let older = if left > 0 {
+        text.say(format!(
+            "\nThe {} of this page {} left out to keep this answer within its reading budget; read with limit {shown} and follow its cursor to read further back.",
+            plural(left, "oldest Post", "oldest Posts"),
+            if left == 1 { "is" } else { "are" },
+        ));
+        None
+    } else {
+        if let Some(next) = &older {
+            text.say("\nThere is more: pass cursor ")
+                .quote(next)
+                .say(" to read further back.");
+        }
+        older
+    };
+    if let Some(cursor) = &read_cursor {
+        text.say("\nTo mark these read, call tangent_mark_read with read_cursor ")
+            .quote(cursor)
+            .say(".");
+    }
     let mut kept = Vec::new();
-    for post in posts {
+    for (index, post) in posts.iter().enumerate() {
+        if index < left {
+            // Checked as every Post is, though not shown.
+            say_post(
+                through,
+                &mut Text::default(),
+                post,
+                Some(topic),
+                Effect::Read,
+            )?;
+            continue;
+        }
         kept.push(say_post(
             through,
             &mut text,
@@ -1118,23 +1277,6 @@ fn read_topic(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<T
             Effect::Read,
         )?);
     }
-    let older = say_next(
-        &mut text,
-        &body,
-        "historyOlderCursor",
-        "cursor",
-        Effect::Read,
-    )?;
-    let read_cursor = match body.get("readCursor") {
-        Some(Value::String(cursor)) if cursor_shaped(cursor) => {
-            text.say("\nTo mark these read, call tangent_mark_read with read_cursor ")
-                .quote(cursor)
-                .say(".");
-            Some(cursor.clone())
-        }
-        None | Some(Value::Null) => None,
-        Some(_) => return Err(untrusted(Effect::Read)),
-    };
     if writable {
         text.say(format!(
             "\nTo reply, call tangent_post with topic {topic} and reply_to the reference of the Post you answer."
@@ -1460,13 +1602,24 @@ fn participant(
         text.say(", who says ")
             .quote_cut(description, PROFILE_SHOWN);
     }
+    let shown = fitting(posts.iter());
     text.say(format!(
         ". {}:",
-        plural(posts.len(), "recent Post", "recent Posts")
+        plural(shown, "recent Post", "recent Posts")
     ));
     let mut kept = Vec::new();
-    for post in posts {
-        kept.push(say_post(through, &mut text, post, None, Effect::Read)?);
+    for (index, post) in posts.iter().enumerate() {
+        if index < shown {
+            kept.push(say_post(through, &mut text, post, None, Effect::Read)?);
+        } else {
+            say_post(through, &mut Text::default(), post, None, Effect::Read)?;
+        }
+    }
+    if shown < posts.len() {
+        text.say(format!(
+            "\n{} more left out to keep this answer within its reading budget; read them in their Topics.",
+            plural(posts.len() - shown, "recent Post is", "recent Posts are")
+        ));
     }
     Ok(text.done(with_quoted(
         json!({ "posts": kept }),
@@ -1581,6 +1734,24 @@ mod tests {
         assert!(!explained.sentence.contains("post"));
         let refused = Explained::new(Outcome::Refused, wire::PERMISSION_DENIED);
         assert_eq!(in_its_words(join, refused.into()), Failed::Ended(refused));
+        for (name, sentence) in [
+            ("post", POST_DENIED),
+            ("start_topic", START_DENIED),
+            ("edit_post", CHANGE_DENIED),
+            ("remove_post", CHANGE_DENIED),
+        ] {
+            assert_eq!(
+                in_its_words(tool(name).expect("tool"), refused.into()),
+                Failed::Ended(Explained::new(Outcome::Refused, sentence)),
+                "{name} says a refusal in its own nouns"
+            );
+        }
+        let suspended = Explained::new(Outcome::Refused, wire::SUSPENDED);
+        assert_eq!(
+            in_its_words(tool("post").expect("post"), suspended.into()),
+            Failed::Ended(suspended),
+            "a refusal with its own reason keeps it"
+        );
     }
 
     #[test]

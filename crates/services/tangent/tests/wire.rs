@@ -169,3 +169,86 @@ fn a_write_answered_with_another_request_id_is_never_a_success() {
         Some("application/json")
     );
 }
+
+#[test]
+fn what_is_new_names_each_person_from_their_card_and_goes_on_without_one() {
+    let listener = Listener::start(|request| {
+        let origin = format!("http://{}", request.header("host").unwrap_or_default());
+        let topic = format!("{origin}::home::welcome");
+        let item = |actor: &str, post: &str| {
+            json!({
+                "ref": format!("att_{post}"), "kind": "watched_activity", "actorRef": actor,
+                "scopeRef": topic, "sourceRef": format!("{topic}::{post}"),
+                "excerpt": "Hello there", "state": "new",
+            })
+        };
+        let card = |reference: &str, name: &str| {
+            Reply::json(
+                200,
+                &json!({
+                    "profile": { "participantRef": reference, "displayName": name },
+                    "recentPosts": [], "morePosts": false,
+                }),
+            )
+        };
+        match request.route() {
+            "/api/v1/experience/updates" => Reply::json(
+                200,
+                &json!({
+                    "scopeRef": origin,
+                    "attention": {
+                        "waitingCount": { "value": 0 }, "newActivityCount": { "value": 4 },
+                        "items": [item("prt_2", "p1"), item("prt_3", "p2"), item("prt_4", "p3"), item("prt_2", "p4")],
+                        "more": false,
+                    },
+                    "activityCheckpoint": "cp_1",
+                }),
+            ),
+            "/api/v1/experience/participants/prt_2" => card("prt_2", "Bea"),
+            // A card that names someone else names nobody.
+            "/api/v1/experience/participants/prt_4" => card("prt_9", "Mallory"),
+            _ => Reply::json(404, &json!({ "code": "not_found" })),
+        }
+    });
+    let address =
+        Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
+    let said = perform(&address, "updates", json!({})).expect("what is new");
+    assert!(
+        said.contains("A new Post by \"Bea\" (participant \"prt_2\")"),
+        "{said}"
+    );
+    assert!(
+        said.contains("by participant \"prt_3\" (tangent_participant names them)"),
+        "{said}"
+    );
+    assert!(
+        said.contains("by participant \"prt_4\" (tangent_participant names them)"),
+        "{said}"
+    );
+    assert!(!said.contains("Mallory"), "{said}");
+    assert_eq!(
+        listener.count("/api/v1/experience/participants/prt_2"),
+        1,
+        "each card is read once"
+    );
+}
+
+#[test]
+fn a_post_the_space_answers_201_is_a_success() {
+    let listener = Listener::start(|request| {
+        let origin = format!("http://{}", request.header("host").unwrap_or_default());
+        Reply::json(
+            201,
+            &json!({ "postRef": format!("{origin}::home::welcome::p9"), "requestId": "r-201" }),
+        )
+    });
+    let address =
+        Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
+    let said = perform(
+        &address,
+        "post",
+        json!({ "topic": format!("{address}::home::welcome"), "text": "hi", "request_id": "r-201" }),
+    )
+    .expect("posted");
+    assert!(said.starts_with("Posted in Topic"), "{said}");
+}

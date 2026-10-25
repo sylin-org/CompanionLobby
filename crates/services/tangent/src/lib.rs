@@ -24,7 +24,8 @@
 //!
 //! A call presents the token as `Bearer`. A token within
 //! [`RENEW_BEFORE_SECS`] of its expiry is replaced first, by establishing
-//! the connection again; a call the Space answers 401 establishes it again
+//! the connection again, unless that cannot be done just now and the token
+//! has not ended yet, when the call goes on with it; a call the Space answers 401 establishes it again
 //! once, with a fresh proof, and is made once more. What each answer means
 //! is decided once, in [`wire`]; the tools themselves are in [`tools`].
 //!
@@ -83,8 +84,10 @@ pub const EXCHANGE_BROKE: &str =
     "The Space's answer did not keep to Tangent's exchange, so nothing was connected.";
 /// The exchange refused the request itself.
 pub const EXCHANGE_REFUSED: &str = "The Space refused the request to connect.";
-/// A tool the connection's grants do not cover.
-pub const NOT_GRANTED: &str = "This connection's credential does not grant that. The sponsor can open the connection again to ask the Space for it.";
+/// A writing tool the connection's grants do not cover.
+pub const NOT_GRANTED: &str = "The Space did not grant this connection leave to post here; only the Space's operator changes what it grants. Reading still works.";
+/// A reading tool the connection's grants do not cover.
+pub const READ_NOT_GRANTED: &str = "The Space did not grant this connection leave to read here; only the Space's operator changes what it grants.";
 
 /// The Tangent service adapter.
 #[derive(Debug)]
@@ -265,10 +268,27 @@ impl ServiceAdapter for Tangent {
         }
         let mut issued = Issued::decode(&slot.read()?).ok_or(Outcome::Internal)?;
         if !issued.grants(found.needs.grant()) {
-            return Err(Explained::new(Outcome::NeedsPermission, NOT_GRANTED));
+            let sentence = match found.needs {
+                tools::Needs::Post => NOT_GRANTED,
+                tools::Needs::Read => READ_NOT_GRANTED,
+            };
+            return Err(Explained::new(Outcome::NeedsPermission, sentence));
         }
-        if issued.expires_at - now_secs() < RENEW_BEFORE_SECS {
-            issued = self.again(address, slot)?;
+        let left = issued.expires_at - now_secs();
+        if left < RENEW_BEFORE_SECS {
+            // Renewing early is a courtesy while the token still works: a
+            // Space or a server that cannot answer just now leaves the call
+            // to the token it has, and only a token that has ended fails.
+            match self.again(address, slot) {
+                Ok(fresh) => issued = fresh,
+                Err(explained)
+                    if left > 0
+                        && matches!(
+                            explained.outcome,
+                            Outcome::TemporarilyUnavailable | Outcome::RateLimited
+                        ) => {}
+                Err(explained) => return Err(explained),
+            }
         }
         let perform = |issued: &Issued| {
             tools::perform(

@@ -17,6 +17,8 @@
 //! * 400 `cursor_expired` is a cursor to leave out, any other 400 the
 //!   arguments; 404 is missing; 409 `request_conflict` is a request id
 //!   already used for something else; 429 asks for fewer requests;
+//! * any 2xx is a success when its body is a JSON object the route's
+//!   checks accept; a 202 says the Space holds a write for its stewards;
 //! * anything else, an answer the adapter does not trust, or an answer
 //!   that never arrived, is the Space being unavailable for a read; for a
 //!   write it is an unknown outcome, which says to read before writing
@@ -159,9 +161,10 @@ pub fn send(outbound: &Outbound, address: &Address, call: &Call<'_>) -> Result<R
         })
 }
 
-/// The JSON body of a 200 answer, or what the answer means.
+/// The JSON body of a success, any 2xx answer, or what the answer means.
+/// A success whose body is not a JSON object is not trusted.
 pub fn answered(response: &Response, effect: Effect) -> Result<Value, Failed> {
-    if response.status != 200 && response.status != 202 {
+    if !(200..=299).contains(&response.status) {
         return Err(refusal(response, effect));
     }
     let body: Value = serde_json::from_slice(&response.body).map_err(|_| lost(effect))?;

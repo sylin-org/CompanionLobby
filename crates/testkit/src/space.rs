@@ -31,7 +31,8 @@
 //!   `WWW-Authenticate: Bearer`; a refusal is 403 with the problem shape
 //!   `{code, message, field, retryable}`.
 //!
-//! Knobs change the profile it publishes, refuse proofs, suspend an
+//! Knobs change the profile it publishes, refuse proofs, fail exchanges
+//! for a while, suspend an
 //! account, end every token it issued, issue tokens that expire soon,
 //! refuse writes in a Topic, and grant fewer grants than asked. The
 //! listener records every request and can hold a route, or its answer,
@@ -138,6 +139,7 @@ struct Floor {
     proofs: Proofs,
     claimed: HashSet<String>,
     rejecting_proofs: bool,
+    failing_exchanges: bool,
     suspended: HashSet<String>,
     lifetime_secs: Option<i64>,
     granting: Option<Vec<String>>,
@@ -366,6 +368,12 @@ impl SpaceServer {
         locked(&self.floor).rejecting_proofs = rejecting;
     }
 
+    /// Answers every exchange 500 while `failing`, issuing nothing, as a
+    /// Space that cannot answer just now.
+    pub fn fail_exchanges(&self, failing: bool) {
+        locked(&self.floor).failing_exchanges = failing;
+    }
+
     /// Suspends the account `did`: its exchanges are refused and its
     /// tokens are not taken.
     pub fn suspend(&self, did: &str) {
@@ -512,6 +520,9 @@ fn profile(floor: &Floor) -> Reply {
 }
 
 fn exchange(floor: &mut Floor, request: &Received) -> Reply {
+    if floor.failing_exchanges {
+        return exchange_error(500, "internal_error");
+    }
     let presented = request.header("authorization").unwrap_or_default();
     let Some(token) = presented
         .strip_prefix("Bearer ")

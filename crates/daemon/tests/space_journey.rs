@@ -15,7 +15,7 @@ use std::path::Path;
 
 use lobby_conformance::host::{Install, body, call, initialize, names, text, tools};
 use lobby_daemon::mcp::LIST_CHANGED;
-use lobby_service_tangent::wire::PERMISSION_DENIED;
+use lobby_service_tangent::tools::POST_DENIED;
 use lobby_testkit::atproto::AtprotoWorld;
 use lobby_testkit::hosts;
 use lobby_testkit::secrets_in;
@@ -162,6 +162,18 @@ fn a_companion_connects_through_the_proof_exchange_reads_what_is_new_and_replies
         "{news}"
     );
     assert!(news.contains(&world.opening), "{news}");
+    // Who wrote it is named, in the text and in the structured answer a
+    // host may show instead, beside the reference to look them up by.
+    assert!(
+        news.contains("A new Post by \"Bea\" (participant \""),
+        "{news}"
+    );
+    let item = &arrived["result"]["structuredContent"]["attention"]["items"][0];
+    assert_eq!(item["quoted"]["actorName"], "Bea", "{item}");
+    assert_eq!(
+        reach["result"]["structuredContent"]["connections"][0]["startWith"], "tangent_arrive",
+        "the structured reach names where to start, as its text does"
+    );
     let read = call(
         &mut peer,
         4,
@@ -322,7 +334,7 @@ fn a_space_that_refuses_reads_as_its_reason_with_a_next_step_and_a_suspension_to
     );
     assert_eq!(refused["result"]["isError"], true, "{refused}");
     assert_eq!(refused["result"]["structuredContent"]["outcome"], "refused");
-    assert_eq!(said(&refused), PERMISSION_DENIED);
+    assert_eq!(said(&refused), POST_DENIED);
 
     // A Space that stops taking the token is given a fresh proof once; one
     // that suspended the account says so, and nothing loops.
@@ -423,6 +435,65 @@ fn a_post_of_a_mebibyte_reaches_the_mind_cut_short_and_quoted_in_text_and_struct
             "what other people wrote sits only under quoted: {post}"
         );
     }
+    install.stop();
+}
+
+#[test]
+fn a_page_of_long_posts_in_another_script_fits_its_budget_and_says_what_it_left_out() {
+    let world = world();
+    let mallory = world
+        .space
+        .add_participant("Mallory", "mallory.example.test");
+    let long = "\u{4e2d}".repeat(lobby_service_tangent::tools::POST_SHOWN);
+    let mut planted = Vec::new();
+    for _ in 0..10 {
+        let post = world.space.add_post("welcome", &mallory, &long, None);
+        planted.push(world.space.post_ref(&post));
+    }
+    let (install, _, mut peer) = connected(&world, "space-script");
+    let read = call(
+        &mut peer,
+        50,
+        "tangent_read_topic",
+        json!({ "topic": world.welcome }),
+    );
+    assert_eq!(read["result"]["isError"], false, "{read}");
+    let text = said(&read);
+    assert!(
+        text.len() <= lobby_contracts::ToolResult::RENDERED_BUDGET,
+        "{} bytes of text",
+        text.len()
+    );
+    assert!(
+        !text.contains("cut this result short"),
+        "the page fits whole: {text}"
+    );
+    assert!(
+        text.contains("left out to keep this answer within its reading budget; read with limit"),
+        "{text}"
+    );
+    assert!(
+        text.contains("To mark these read, call tangent_mark_read"),
+        "{text}"
+    );
+    let structured = &read["result"]["structuredContent"];
+    assert!(structured.is_object(), "the structured answer fits too");
+    let posts = structured["posts"].as_array().expect("posts");
+    assert!(
+        !posts.is_empty() && posts.len() < 10,
+        "{} Posts",
+        posts.len()
+    );
+    assert_eq!(
+        posts.last().expect("the newest")["post"],
+        planted.last().expect("planted").as_str(),
+        "the newest Posts are the ones shown"
+    );
+    assert!(
+        structured["cursor"].is_null(),
+        "no cursor that would skip the Posts left out"
+    );
+    assert!(structured["readCursor"].is_string());
     install.stop();
 }
 
