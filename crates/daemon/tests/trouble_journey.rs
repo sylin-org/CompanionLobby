@@ -279,6 +279,12 @@ fn a_refused_renewal_shrinks_the_catalog_in_one_notice_and_signing_in_again_rest
     // Another account cannot take its place while it waits.
     let other = install.sign_in(&ada, &authority, "holder-other");
     assert_eq!(other.status, 409, "{}", text(&other));
+    assert!(
+        text(&other).contains("another account than holder-ada, which waits for ada")
+            && !text(&other).contains("another companion"),
+        "the page names the one conflict it met: {}",
+        text(&other)
+    );
     assert_eq!(
         credential_of(&install, &ada, "passbook")["state"],
         "needs_sign_in"

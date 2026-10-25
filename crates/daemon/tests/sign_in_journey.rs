@@ -282,6 +282,12 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
     let taken = sign_in(&install, &world, &bea, "");
     assert_eq!(taken.status, 409, "{}", text(&taken));
     assert!(!text(&taken).contains(ADA));
+    assert!(
+        text(&taken).contains("that account is signed in for another companion")
+            && !text(&taken).contains("already holds"),
+        "the page names the one conflict it met: {}",
+        text(&taken)
+    );
     assert_eq!(credentials(&install).len(), 1);
 
     // Revoked, the credential stays as history and the account stays

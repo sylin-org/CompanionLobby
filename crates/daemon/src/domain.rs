@@ -174,6 +174,39 @@ pub struct SignInView {
     pub expires_at: u64,
 }
 
+/// Which conflict stopped a sign-in the provider completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignInConflict {
+    /// The account is signed in for another companion.
+    AnotherCompanion,
+    /// The companion already holds a ready account of the kind.
+    AlreadyHeld,
+    /// The companion waits for another account of the kind to sign in again.
+    AnotherWaits,
+}
+
+impl SignInConflict {
+    /// The stable wire name.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::AnotherCompanion => "another_companion",
+            Self::AlreadyHeld => "already_held",
+            Self::AnotherWaits => "another_waits",
+        }
+    }
+
+    /// The conflict whose wire name is `code`.
+    pub fn from_code(code: &str) -> Option<Self> {
+        [
+            Self::AnotherCompanion,
+            Self::AlreadyHeld,
+            Self::AnotherWaits,
+        ]
+        .into_iter()
+        .find(|conflict| conflict.code() == code)
+    }
+}
+
 /// Why a command was refused, with the lobby's own words for the sponsor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
@@ -181,6 +214,8 @@ pub struct Refusal {
     pub outcome: Outcome,
     /// What went wrong, written by the lobby; never text from outside it.
     pub message: String,
+    /// For a sign-in refused as a conflict, which one.
+    pub conflict: Option<SignInConflict>,
 }
 
 impl Refusal {
@@ -188,7 +223,14 @@ impl Refusal {
         Self {
             outcome,
             message: message.into(),
+            conflict: None,
         }
+    }
+
+    /// The same refusal, saying which sign-in conflict it is.
+    fn because(mut self, conflict: SignInConflict) -> Self {
+        self.conflict = Some(conflict);
+        self
     }
 
     /// The refusal of an adapter that answered `outcome`, in the lobby's words.
@@ -1279,7 +1321,8 @@ impl Lobby {
             Err(Refusal::new(
                 Outcome::Conflict,
                 "That account is signed in for another companion; an account belongs to one companion.",
-            ))
+            )
+            .because(SignInConflict::AnotherCompanion))
         } else if let Some(waiting) = waiting
             .as_ref()
             .filter(|waiting| waiting.account != signed.account)
@@ -1290,9 +1333,11 @@ impl Lobby {
                     "That is another account than {}, which waits to be signed in again; sign in as it, or revoke it first.",
                     waiting.label
                 ),
-            ))
+            )
+            .because(SignInConflict::AnotherWaits))
         } else {
             core.no_ready_credential(awaited.companion, &awaited.kind)
+                .map_err(|refusal| refusal.because(SignInConflict::AlreadyHeld))
         };
         checked.inspect_err(|refusal| core.settle_as(&subject, refusal.outcome))?;
         let credential = Credential {

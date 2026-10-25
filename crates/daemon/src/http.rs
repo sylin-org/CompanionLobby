@@ -64,8 +64,8 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use lobby_contracts::{
-    Attachment, AttachmentId, Companion, CompanionId, ConnectionId, CredentialId, Outcome,
-    ProviderKind, ToolResult,
+    Attachment, AttachmentId, Companion, CompanionId, ConnectionId, CredentialId, CredentialState,
+    Outcome, ProviderKind, ToolResult,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -73,7 +73,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{Notify, Semaphore, broadcast, mpsc, watch};
 
 use crate::discovery::{DISCOVERY_PATH, Discovery};
-use crate::domain::{CallRefusal, Grant, Lobby, Refusal, Rename, Snapshot};
+use crate::domain::{CallRefusal, Grant, Lobby, Refusal, Rename, SignInConflict, Snapshot};
 use crate::home;
 use crate::journal::{PAGE_DEFAULT, PageProblem};
 use crate::keyring::{AttachSecret, AttachmentToken};
@@ -1180,9 +1180,17 @@ fn complete_sign_in(lobby: &Lobby, kind: &str, pairs: Vec<(String, String)>) -> 
     let companion = completed
         .companion
         .map_or_else(String::new, |id| format!("&companion={id}"));
+    let conflict = completed
+        .result
+        .as_ref()
+        .err()
+        .and_then(|refusal| refusal.conflict)
+        .map_or_else(String::new, |conflict| {
+            format!("&conflict={}", conflict.code())
+        });
     let mut reply = empty_reply(StatusCode::SEE_OTHER);
     if let Ok(value) = HeaderValue::from_str(&format!(
-        "{SIGN_IN_DONE}?outcome={}{companion}",
+        "{SIGN_IN_DONE}?outcome={}{companion}{conflict}",
         outcome.code()
     )) {
         reply.headers_mut().insert(header::LOCATION, value);
@@ -1211,6 +1219,9 @@ fn sign_in_done(lobby: &Lobby, query: &str) -> Reply {
                 .find(|view| view.record.companion.id == id)
         })
         .map(|view| view.record.companion);
+    let conflict = value("conflict").and_then(|code| SignInConflict::from_code(&code));
+    let conflict_said =
+        conflict.map(|conflict| conflict_sentence(lobby, companion.as_ref(), conflict));
     let (status, said) = match value("outcome").as_deref() {
         Some("done") => (
             StatusCode::OK,
@@ -1222,7 +1233,9 @@ fn sign_in_done(lobby: &Lobby, query: &str) -> Reply {
         ),
         Some("conflict") => (
             StatusCode::CONFLICT,
-            "Nothing was signed in: that account is signed in for another companion, this companion already holds an account of this kind, or it waits for another account to sign in again.",
+            conflict_said.as_deref().unwrap_or(
+                "Nothing was signed in: the account met a conflict in the lobby. The companion's page shows what is signed in.",
+            ),
         ),
         Some("temporarily_unavailable" | "rate_limited") => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1263,6 +1276,46 @@ fn sign_in_done(lobby: &Lobby, query: &str) -> Reply {
         ),
     );
     reply
+}
+
+/// The sentence for a sign-in that met `conflict`, naming the companion and
+/// the account that waits when the lobby knows them.
+fn conflict_sentence(
+    lobby: &Lobby,
+    companion: Option<&Companion>,
+    conflict: SignInConflict,
+) -> String {
+    let name = companion.map_or_else(
+        || "This companion".to_owned(),
+        |companion| companion.display_name.to_string(),
+    );
+    match conflict {
+        SignInConflict::AnotherCompanion => "Nothing was signed in: that account is signed in for another companion, and an account belongs to one companion. Revoke it there first, or sign in with another account.".to_owned(),
+        SignInConflict::AlreadyHeld => format!(
+            "Nothing was signed in: {name} already holds an account of this kind. Revoke it on the companion's page first to sign in another."
+        ),
+        SignInConflict::AnotherWaits => {
+            let waiting = companion.and_then(|companion| {
+                lobby
+                    .snapshot()
+                    .credentials
+                    .into_iter()
+                    .find(|credential| {
+                        credential.companion == companion.id
+                            && credential.state == CredentialState::NeedsSignIn
+                    })
+            });
+            match waiting {
+                Some(credential) => format!(
+                    "Nothing was signed in: that is another account than {label}, which waits for {name} to sign it in again. Sign in as {label} instead, or revoke it first.",
+                    label = credential.label
+                ),
+                None => format!(
+                    "Nothing was signed in: that is another account than the one that waits for {name} to sign it in again. Sign in as that account instead, or revoke it first."
+                ),
+            }
+        }
+    }
 }
 
 /// The pairs of a query string, percent-decoded, `+` read as a space.
