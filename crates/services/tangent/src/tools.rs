@@ -412,7 +412,7 @@ pub const TOOLS: &[Tool] = &[
         schema: || {
             object(
                 json!({
-                    "participant": { "type": "string", "minLength": 1, "maxLength": 512, "description": "The participant, by the reference a Post or an update gave (its authorRef or actorRef), or by their handle." },
+                    "participant": { "type": "string", "minLength": 1, "maxLength": 512, "description": "The participant, by the reference a Post or an update gave beside their name (author or actor), or by their handle." },
                 }),
                 &["participant"],
             )
