@@ -97,7 +97,7 @@ use lobby_contracts::{
     Explained, Freshness, Initiator, IssuedSlot, JournalEntry, JournalKind, JournalNames, Label,
     MaterialSlot, MaterialUpdate, Moniker, NameProblem, Outcome, ProviderKind, Revocation,
     SealedIssued, SealedMaterial, ServiceAdapter, ServiceName, SignInRequest, SignInReturn,
-    SignInStart, SignedIn, Sponsor, ToolArguments, ToolResult,
+    SignInStart, SignedIn, Sponsor, ToolArguments, ToolName, ToolResult,
 };
 use serde_json::{Map, Value};
 use tokio::sync::watch;
@@ -2551,18 +2551,21 @@ impl Core {
             subject.companion,
             subject.connection,
             subject.service.as_ref(),
+            None,
         );
         subject
     }
 
-    /// Fills the names `names` lacks for `companion`, `connection` and
-    /// `service` from the state as it is now.
+    /// Fills the names `names` lacks for `companion`, `connection`,
+    /// `service` and its `tool` from the state and the registry as they are
+    /// now.
     fn fill(
         &self,
         names: &mut JournalNames,
         companion: Option<CompanionId>,
         connection: Option<ConnectionId>,
         service: Option<&ServiceName>,
+        tool: Option<&ToolName>,
     ) {
         let state = self.store.state();
         if names.companion.is_none() {
@@ -2578,6 +2581,17 @@ impl Core {
             names.connection = connection
                 .and_then(|id| state.connection(id))
                 .map(|connection| connection.label.clone());
+        }
+        if names.tool.is_none()
+            && let (Some(service), Some(tool)) = (service, tool)
+        {
+            names.tool = self.registry.service(service).and_then(|adapter| {
+                adapter
+                    .catalog()
+                    .into_iter()
+                    .find(|descriptor| descriptor.name == *tool)
+                    .and_then(|descriptor| DisplayName::new(&descriptor.title).ok())
+            });
         }
     }
 
@@ -2905,9 +2919,19 @@ impl Core {
 
     /// Writes one journal entry, emitting it.
     fn record(&mut self, mut note: Note) -> io::Result<JournalEntry> {
-        let (companion, connection, service) =
-            (note.companion, note.connection, note.service.clone());
-        self.fill(&mut note.names, companion, connection, service.as_ref());
+        let (companion, connection, service, tool) = (
+            note.companion,
+            note.connection,
+            note.service.clone(),
+            note.tool.clone(),
+        );
+        self.fill(
+            &mut note.names,
+            companion,
+            connection,
+            service.as_ref(),
+            tool.as_ref(),
+        );
         let what = match note.kind {
             JournalKind::Command { name } => name,
             JournalKind::Invoked => "an invoked call",

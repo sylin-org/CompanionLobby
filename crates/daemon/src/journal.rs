@@ -530,6 +530,7 @@ pub fn encode(store_id: &str, entry: &JournalEntry) -> Value {
             "serviceTitle",
             names.service.as_ref().map(|name| name.as_str()),
         ),
+        ("toolTitle", names.tool.as_ref().map(|name| name.as_str())),
         (
             "connectionLabel",
             names.connection.as_ref().map(|name| name.as_str()),

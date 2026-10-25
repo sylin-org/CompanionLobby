@@ -161,9 +161,10 @@ synchronously: an append returns once its line is on the disk. An entry
 holds no content and no secrets; every field is an identifier, a validated
 name, a fixed lobby word or an outcome code. Beside the identifiers an entry
 keeps the names the sponsor read when it was written (`companionName`,
-`kindTitle`, `accountLabel`, `serviceTitle`, `connectionLabel`), so its
-sentence reads the same after a rename and a removed companion keeps its
-history by name:
+`kindTitle`, `accountLabel`, `serviceTitle`, `toolTitle`, `connectionLabel`),
+so its sentence reads the same after a rename, a removed companion keeps its
+history by name, and a call reads by its tool's title rather than its
+name:
 
 ```json
 {"id":"<storeId>:7","seq":7,"at":1767225600000,"initiator":"mind","attachment":"<32 hex digits>","companion":"<32 hex digits>","kind":"command","command":"attach","outcome":"done","companionName":"Ada"}
@@ -181,7 +182,7 @@ arguments or the answer. Commands on a connection name it and its service
 too. Fields that do not apply are absent:
 
 ```json
-{"id":"<storeId>:9","seq":9,"at":1767225600000,"initiator":"mind","attachment":"<32 hex digits>","companion":"<32 hex digits>","connection":"<32 hex digits>","service":"board","tool":"post","kind":"settled","outcome":"done","companionName":"Ada","serviceTitle":"Board","connectionLabel":"front"}
+{"id":"<storeId>:9","seq":9,"at":1767225600000,"initiator":"mind","attachment":"<32 hex digits>","companion":"<32 hex digits>","connection":"<32 hex digits>","service":"board","tool":"post","kind":"settled","outcome":"done","companionName":"Ada","serviceTitle":"Board","toolTitle":"Post on the board","connectionLabel":"front"}
 ```
 
 - **Numbers.** `seq` only grows: a daemon that opens the journal continues

@@ -298,7 +298,7 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
         "You signed Ada Lovelace in with Atmosphere as ada.example.test.",
         "You signed Ada Lovelace in with Passbook as ada.",
         "You opened a connection for Ada Lovelace to Board at front.",
-        "A mind as Ada Lovelace called read on Board at front.",
+        "A mind as Ada Lovelace used Read the board on Board at front.",
         "You revoked the connection of Ada Lovelace to Board at front.",
     ] {
         assert!(said.contains(&expected), "{expected} in {said:#?}");

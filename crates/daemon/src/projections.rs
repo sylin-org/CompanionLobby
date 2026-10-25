@@ -436,13 +436,19 @@ pub fn sentence(entry: &Value, names: &Names) -> String {
     }
     // What happened, said once as done and once as attempted.
     let (done, attempt) = match (text("kind"), command) {
-        ("invoked" | "settled", _) => {
-            let tool = text("tool");
-            (
-                format!("called {tool} on {service}{at}"),
-                format!("call {tool} on {service}{at}"),
-            )
-        }
+        ("invoked" | "settled", _) => match kept("toolTitle") {
+            Some(title) => (
+                format!("used {title} on {service}{at}"),
+                format!("use {title} on {service}{at}"),
+            ),
+            None => {
+                let tool = text("tool");
+                (
+                    format!("called {tool} on {service}{at}"),
+                    format!("call {tool} on {service}{at}"),
+                )
+            }
+        },
         (_, "create_companion") => (
             format!("created {companion}"),
             format!("create {companion}"),
@@ -940,6 +946,10 @@ mod tests {
             (
                 json!({ "initiator": "mind", "attachment": mind, "companion": ada, "connection": front, "service": "board", "tool": "read", "kind": "settled", "outcome": "done" }),
                 "A mind as Ada called read on Board at front.",
+            ),
+            (
+                json!({ "initiator": "mind", "attachment": mind, "companion": ada, "connection": front, "service": "board", "serviceTitle": "Board", "tool": "read", "toolTitle": "Read the board", "kind": "settled", "outcome": "done" }),
+                "A mind as Ada used Read the board on Board at front.",
             ),
             (
                 json!({ "initiator": "sponsor", "companion": ada, "connection": front, "service": "board", "kind": "command", "command": "revoke_connection", "outcome": "done" }),

@@ -58,6 +58,8 @@ pub struct JournalNames {
     pub account: Option<AccountLabel>,
     /// The service's title.
     pub service: Option<DisplayName>,
+    /// The title the service's adapter gives the tool called.
+    pub tool: Option<DisplayName>,
     /// The sponsor's label for the connection.
     pub connection: Option<Label>,
 }
