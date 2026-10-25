@@ -1328,11 +1328,18 @@ function entryLine(entry) {
   return line;
 }
 
-function journalQuery(scope, before) {
+function journalQuery(state, before) {
   const query = ["finished=1"];
-  if (scope) query.push("companion=" + encodeURIComponent(scope));
+  if (state.scope) query.push("companion=" + encodeURIComponent(state.scope));
+  if (!state.routine) query.push("routine=0");
   if (before) query.push("before=" + encodeURIComponent(before));
   return "/api/journal?" + query.join("&");
+}
+
+// A renewal that kept an account signed in as it should: kept in the
+// journal, and shown on a companion's page only when the sponsor asks.
+function routineEntry(entry) {
+  return entry.command === "renew_credential" && entry.outcome === "done";
 }
 
 function journalArrived(entry) {
@@ -1340,6 +1347,7 @@ function journalArrived(entry) {
   const shown = journalView;
   if (!shown || !shown.live || entry.outcome === "pending") return;
   if (shown.scope && entry.companion !== shown.scope) return;
+  if (!shown.routine && routineEntry(entry)) return;
   if (shown.entries.some(held => held.seq === entry.seq)) return;
   shown.entries.unshift(entry);
   if (shown.list && shown.list.isConnected) {
@@ -1363,7 +1371,7 @@ function journalBlock(state) {
     older.dataset.key = "older";
     older.addEventListener("click", async () => {
       older.disabled = true;
-      const result = await call(journalQuery(state.scope, state.next));
+      const result = await call(journalQuery(state, state.next));
       if (journalView !== state) return;
       older.disabled = false;
       if (!result.ok) {
@@ -1385,7 +1393,7 @@ function journalBlock(state) {
 }
 
 async function loadJournal(state) {
-  const result = await call(journalQuery(state.scope, null));
+  const result = await call(journalQuery(state, null));
   if (journalView !== state) return;
   if (!result.ok) { state.failed = sentence(result); state.loaded = true; state.redraw(); return; }
   // Entries that arrived while the page loaded and lie above it stay on top.
@@ -1403,12 +1411,28 @@ function journalSection(companion) {
   title.id = "journal-title";
   const holder = element("div");
   if (!journalView || journalView.scope !== companion.id) {
-    journalView = { scope: companion.id, entries: [], next: null, live: true, list: null, loaded: false, failed: null, started: false };
+    journalView = { scope: companion.id, routine: false, entries: [], next: null, live: true, list: null, loaded: false, failed: null, started: false };
   }
   const state = journalView;
   state.redraw = () => { if (holder.isConnected) holder.replaceChildren(journalBlock(state)); };
   holder.append(journalBlock(state));
-  section.append(title, element("p", "hint", "What happened with " + companion.displayName + ", newest first. The journal holds no content and no secrets."), holder);
+  const toggle = button(state.routine ? "Hide routine entries" : "Show routine entries", "quiet");
+  toggle.dataset.key = "routine-" + companion.id;
+  toggle.setAttribute("aria-pressed", state.routine ? "true" : "false");
+  toggle.addEventListener("click", () => {
+    state.routine = !state.routine;
+    toggle.textContent = state.routine ? "Hide routine entries" : "Show routine entries";
+    toggle.setAttribute("aria-pressed", state.routine ? "true" : "false");
+    state.entries = [];
+    state.next = null;
+    state.loaded = false;
+    state.failed = null;
+    state.redraw();
+    loadJournal(state);
+  });
+  const toggleBox = element("div", "actions");
+  toggleBox.append(toggle);
+  section.append(title, element("p", "hint", "What happened with " + companion.displayName + ", newest first. Renewals that kept an account signed in are routine and wait behind Show routine entries. The journal holds no content and no secrets."), toggleBox, holder);
   return section;
 }
 
@@ -1419,7 +1443,7 @@ function loadCompanionJournal() {
 
 function renderJournalPage() {
   if (!journalView || journalView.scope !== null) {
-    journalView = { scope: null, entries: [], next: null, live: true, list: null, loaded: false, failed: null, started: false };
+    journalView = { scope: null, routine: true, entries: [], next: null, live: true, list: null, loaded: false, failed: null, started: false };
   }
   const state = journalView;
   const holder = element("div");

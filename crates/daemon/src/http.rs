@@ -1402,10 +1402,12 @@ fn journal_reply(lobby: &Lobby, query: &str) -> Reply {
     let mut limit = PAGE_DEFAULT;
     let mut companion = None;
     let mut finished = false;
+    let mut routine = true;
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         match pair.split_once('=') {
             Some(("before", cursor)) if !cursor.is_empty() => before = Some(cursor.to_owned()),
             Some(("finished", "1")) => finished = true,
+            Some(("routine", "0")) => routine = false,
             Some(("companion", id)) => match CompanionId::parse(id) {
                 Some(id) => companion = Some(id),
                 None => {
@@ -1430,12 +1432,12 @@ fn journal_reply(lobby: &Lobby, query: &str) -> Reply {
                 return problem(
                     StatusCode::BAD_REQUEST,
                     Outcome::InvalidInput,
-                    "The journal takes before, limit, companion and finished, nothing else.",
+                    "The journal takes before, limit, companion, finished and routine, nothing else.",
                 );
             }
         }
     }
-    match lobby.journal_page(before.as_deref(), limit, companion, finished) {
+    match lobby.journal_page(before.as_deref(), limit, companion, finished, routine) {
         Ok(page) => json_reply(
             StatusCode::OK,
             json!({ "entries": page.entries, "upper": page.upper, "next": page.next }),

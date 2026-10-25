@@ -454,6 +454,13 @@ pub struct Completed {
     pub result: Result<Credential, Refusal>,
 }
 
+/// Whether `entry` is routine: a renewal that kept an account signed in, or
+/// the pending entry written before one.
+pub fn is_routine(entry: &Value) -> bool {
+    entry["command"] == RENEW_CREDENTIAL
+        && matches!(entry["outcome"].as_str(), Some("done" | "pending"))
+}
+
 /// The fixed names commands carry in the journal.
 const CREATE_COMPANION: &str = "create_companion";
 const RENAME_COMPANION: &str = "rename_companion";
@@ -2188,7 +2195,9 @@ impl Lobby {
     /// A page of the journal; see [`crate::journal::Reader::page`]. With
     /// `companion`, only the entries about that companion; with `finished`,
     /// only the entries that say how something ended, leaving out the
-    /// pending entry written before it. Each entry carries its sentence,
+    /// pending entry written before it; without `routine`, none of the
+    /// renewals that kept an account signed in as they should, which the
+    /// journal keeps all the same. Each entry carries its sentence,
     /// told with the names the lobby holds when the page is read. The lobby
     /// is held only while the reader and the names are taken, never while
     /// the files are read.
@@ -2198,6 +2207,7 @@ impl Lobby {
         limit: usize,
         companion: Option<CompanionId>,
         finished: bool,
+        routine: bool,
     ) -> Result<Page, PageProblem> {
         let (reader, names) = {
             let core = self.core();
@@ -2212,6 +2222,7 @@ impl Lobby {
                 .as_ref()
                 .is_none_or(|id| entry["companion"].as_str() == Some(id.as_str()))
                 && !(finished && entry["outcome"] == "pending")
+                && (routine || !is_routine(entry))
         };
         let mut page = reader.page_where(before, limit, &keep)?;
         for entry in &mut page.entries {

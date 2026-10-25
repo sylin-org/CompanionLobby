@@ -155,6 +155,30 @@ fn an_expired_key_and_an_expired_access_token_are_renewed_without_the_mind_notic
             .contains(&"The lobby kept holder-ada signed in for ada with Passbook.".to_owned()),
         "the journal says the lobby kept it signed in"
     );
+    // The companion's page leaves the routine renewals out unless asked;
+    // the journal keeps them all the same.
+    let quiet = install.json(&format!(
+        "/api/journal?companion={ada}&finished=1&routine=0&limit=100"
+    ));
+    let quiet = quiet["entries"].as_array().expect("entries");
+    assert!(!quiet.is_empty());
+    assert!(
+        quiet
+            .iter()
+            .all(|entry| entry["command"] != "renew_credential"),
+        "routine renewals are left out: {quiet:#?}"
+    );
+    let whole = install.json(&format!(
+        "/api/journal?companion={ada}&finished=1&limit=100"
+    ));
+    assert!(
+        whole["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .any(|entry| entry["command"] == "renew_credential"),
+        "and kept in the journal"
+    );
 
     // An atproto access token that lives a second is refreshed with the
     // client id the sign-in was granted under, and the next refresh presents

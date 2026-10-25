@@ -80,7 +80,10 @@ nothing.
 what, through which connection, and how it ended, in the names the sponsor
 gave. It shows no ids, codes, secrets or content, leaves out the entries
 written before an outcome was known, and pages back with *Older entries*.
-New entries arrive as they are written.
+New entries arrive as they are written. On a companion's page the renewals
+that kept an account signed in are routine: the journal keeps them, and
+the page shows them only after *Show routine entries*, which *Hide routine
+entries* undoes. The whole journal at `/journal` shows them all.
 
 **Trouble.** When a provider refuses to renew an account, or the lobby
 cannot tell whether a renewal landed, the account says *Sign in needed* on
