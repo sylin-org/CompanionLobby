@@ -58,7 +58,8 @@ permissions than the credential holds; a renewal that ends with its mark in
 place leaves the credential needing sign-in, and its old secret is never
 offered again. The contracts grow as the slices that need more arrive:
 portraits read from a provider, the tools a connection's authority allows,
-and pushed events each join with their first user. The nouns themselves are
+what a service needs an account granted, and pushed events each join with
+their first user. The nouns themselves are
 declared with the crate: `Companion` with its moniker and display name,
 `Attachment`, `JournalEntry` with its kinds, its initiator, the
 `ConnectionId` it went through and the names of what it concerns as of the
