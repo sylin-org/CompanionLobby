@@ -23,3 +23,4 @@ crates/daemon/src/registry.rs	provider-atproto	The registry is the one place the
 crates/daemon/src/bin/synthetic.rs	provider-atproto	The test-only command composes the credential adapter against the test kit's fake world.
 crates/daemon/tests/sign_in_journey.rs	provider-atproto	The journey signs companions in with the atproto adapter through the real daemon against the test kit's fake.
 crates/daemon/tests/manager_journey.rs	provider-atproto	The journey walks the sponsor's moments against the test kit's fake world, signing in with the atproto adapter.
+crates/daemon/tests/trouble_journey.rs	provider-atproto	The journey keeps an atproto credential alive and revokes it through the real daemon against the test kit's fake.

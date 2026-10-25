@@ -125,7 +125,7 @@ struct Shared {
     requests: Mutex<Vec<Received>>,
     arrived: Condvar,
     held: Mutex<Vec<String>>,
-    held_answers: Mutex<Vec<String>>,
+    held_answers: Mutex<Vec<AnswerHold>>,
     released: Condvar,
     stopped: AtomicBool,
 }
@@ -140,24 +140,48 @@ pub struct Listener {
     shared: Arc<Shared>,
 }
 
+/// Which answers an answer hold keeps back: those to a route starting with
+/// `prefix`, and, when `field` names one, whose form field has that value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AnswerHold {
+    prefix: String,
+    field: Option<(String, String)>,
+}
+
+impl AnswerHold {
+    fn holds(&self, request: &Received) -> bool {
+        request.route().starts_with(self.prefix.as_str())
+            && self
+                .field
+                .as_ref()
+                .is_none_or(|(name, value)| request.field(name).as_deref() == Some(value.as_str()))
+    }
+}
+
 /// A hold on one route: requests to it, or their answers, wait until this
 /// is dropped.
 pub struct Hold<'a> {
     listener: &'a Listener,
     prefix: String,
-    answers: bool,
+    answers: Option<AnswerHold>,
 }
 
 impl Drop for Hold<'_> {
     fn drop(&mut self) {
         let shared = &self.listener.shared;
-        let mut held = locked(if self.answers {
-            &shared.held_answers
-        } else {
-            &shared.held
-        });
-        if let Some(index) = held.iter().position(|prefix| *prefix == self.prefix) {
-            held.remove(index);
+        match &self.answers {
+            Some(answers) => {
+                let mut held = locked(&shared.held_answers);
+                if let Some(index) = held.iter().position(|hold| hold == answers) {
+                    held.remove(index);
+                }
+            }
+            None => {
+                let mut held = locked(&shared.held);
+                if let Some(index) = held.iter().position(|prefix| *prefix == self.prefix) {
+                    held.remove(index);
+                }
+            }
         }
         shared.released.notify_all();
     }
@@ -221,7 +245,7 @@ impl Listener {
         Hold {
             listener: self,
             prefix: prefix.to_owned(),
-            answers: false,
+            answers: None,
         }
     }
 
@@ -229,11 +253,27 @@ impl Listener {
     /// holds its answer until the returned hold is dropped: what the
     /// handler did has happened, and the client has not heard of it.
     pub fn hold_answers(&self, prefix: &str) -> Hold<'_> {
-        locked(&self.shared.held_answers).push(prefix.to_owned());
+        self.hold_answers_like(AnswerHold {
+            prefix: prefix.to_owned(),
+            field: None,
+        })
+    }
+
+    /// [`Listener::hold_answers`], for the requests to `prefix` whose form
+    /// field `field` is `value` only.
+    pub fn hold_answers_to(&self, prefix: &str, field: &str, value: &str) -> Hold<'_> {
+        self.hold_answers_like(AnswerHold {
+            prefix: prefix.to_owned(),
+            field: Some((field.to_owned(), value.to_owned())),
+        })
+    }
+
+    fn hold_answers_like(&self, hold: AnswerHold) -> Hold<'_> {
+        locked(&self.shared.held_answers).push(hold.clone());
         Hold {
             listener: self,
-            prefix: prefix.to_owned(),
-            answers: true,
+            prefix: hold.prefix.clone(),
+            answers: Some(hold),
         }
     }
 
@@ -294,10 +334,7 @@ fn serve(stream: TcpStream, shared: &Shared) {
     let reply = (shared.handler)(&request);
     {
         let mut held = locked(&shared.held_answers);
-        while held
-            .iter()
-            .any(|prefix| request.route().starts_with(prefix.as_str()))
-        {
+        while held.iter().any(|hold| hold.holds(&request)) {
             held = shared
                 .released
                 .wait(held)

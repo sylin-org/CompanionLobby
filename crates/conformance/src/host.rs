@@ -109,6 +109,53 @@ impl Install {
         matches!(contact::probe(self.port), Probe::Lobby(_))
     }
 
+    /// Kills the running daemon outright, with no chance to finish anything,
+    /// and waits until its lock is free.
+    pub fn kill(&self) {
+        let Probe::Lobby(document) = contact::probe(self.port) else {
+            panic!("no daemon answers on port {}", self.port);
+        };
+        let pid = document.lock_holder_pid.to_string();
+        let killed = if cfg!(windows) {
+            Command::new("taskkill")
+                .args(["/F", "/PID", &pid])
+                .stdout(Stdio::null())
+                .status()
+        } else {
+            Command::new("kill").args(["-KILL", &pid]).status()
+        };
+        assert!(killed.expect("kill the daemon").success());
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while lobby_daemon::lock::is_held(&self.dir()).expect("probe the lock") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the killed daemon let go of its lock"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Signs `companion` in again with the provider `kind`, from the
+    /// credential that waits for it: the sponsor types nothing, `approve`
+    /// plays the provider's page for the URL the lobby sends the browser
+    /// to and answers where it sends the browser back, and this answers the
+    /// page the browser lands on.
+    pub fn sign_in_again(
+        &self,
+        companion: &str,
+        kind: &str,
+        approve: impl FnOnce(&str) -> String,
+    ) -> Answer {
+        let started = self.operator(
+            "POST",
+            "/api/sign-ins",
+            &json!({ "companion": companion, "kind": kind, "hint": "" }),
+        );
+        assert_eq!(started.status, 201, "{}", text(&started));
+        let url = body(&started)["url"].as_str().expect("url").to_owned();
+        self.arrive(&approve(&url))
+    }
+
     /// Attaches a mind as `companion` through the attach shim.
     pub fn attach(&self, companion: &str) -> Peer {
         let environment = self.environment();
@@ -310,6 +357,18 @@ impl Drop for Install {
     }
 }
 
+/// Follows the sponsor's browser from `url` on a passbook authority, which
+/// approves as whichever holder it was told, and answers where it sends the
+/// browser back.
+pub fn approve_at_authority(url: &str) -> String {
+    let (origin, target) = split_url(url);
+    let approved = Outbound::new(AddressPolicy::LoopbackAllowed)
+        .send(&origin, Request::new("GET", &target))
+        .expect("the authority answers");
+    assert_eq!(approved.status, 302, "the authority sends the browser back");
+    approved.header("location").expect("a location").to_owned()
+}
+
 /// An answer's body as JSON, or `null`.
 pub fn body(answer: &Answer) -> Value {
     serde_json::from_slice(&answer.body).unwrap_or(Value::Null)
@@ -337,7 +396,9 @@ pub fn split_url(url: &str) -> (Address, String) {
     (origin, target.to_owned())
 }
 
-fn initialize(peer: &mut Peer) {
+/// Initializes `peer` as a host does, and checks the lobby says its tool
+/// list changes.
+pub fn initialize(peer: &mut Peer) {
     let answer = peer.ask(&json!({
         "jsonrpc": "2.0", "id": 0, "method": "initialize",
         "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "conformance", "version": "1" } }
@@ -349,12 +410,14 @@ fn initialize(peer: &mut Peer) {
     peer.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
 }
 
-fn tools(peer: &mut Peer, id: i64) -> Vec<Value> {
+/// The tools `peer` lists, asked as request `id`.
+pub fn tools(peer: &mut Peer, id: i64) -> Vec<Value> {
     let answer = peer.ask(&json!({ "jsonrpc": "2.0", "id": id, "method": "tools/list" }));
     answer["result"]["tools"].as_array().expect("tools").clone()
 }
 
-fn names(tools: &[Value]) -> Vec<String> {
+/// The names of `tools`, sorted.
+pub fn names(tools: &[Value]) -> Vec<String> {
     let mut names: Vec<String> = tools
         .iter()
         .map(|tool| tool["name"].as_str().expect("name").to_owned())
@@ -363,7 +426,8 @@ fn names(tools: &[Value]) -> Vec<String> {
     names
 }
 
-fn call(peer: &mut Peer, id: i64, name: &str, arguments: Value) -> Value {
+/// Calls the tool `name` through `peer` as request `id`.
+pub fn call(peer: &mut Peer, id: i64, name: &str, arguments: Value) -> Value {
     peer.ask(&call_frame(id, name, arguments))
 }
 
@@ -372,7 +436,7 @@ fn call_frame(id: i64, name: &str, arguments: Value) -> Value {
 }
 
 /// The `at` values a tool takes.
-fn at_of(tools: &[Value], name: &str) -> Value {
+pub fn at_of(tools: &[Value], name: &str) -> Value {
     tools
         .iter()
         .find(|tool| tool["name"] == name)
