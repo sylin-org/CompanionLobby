@@ -1838,26 +1838,41 @@ impl Lobby {
     /// that says nothing about when to renew next. A renewal that ended with
     /// its mark still in place, or that the provider refused, leaves the
     /// credential needing signing in again with its connections; one that
-    /// could not finish, and changed nothing, is tried again later.
-    pub fn settle_renewal(&self, slot: &Slot<'_>, answered: Result<Option<Freshness>, Outcome>) {
+    /// could not finish, and changed nothing, is tried again later. Answers
+    /// whether this settling is what left the credential needing a sign-in.
+    pub fn settle_renewal(
+        &self,
+        slot: &Slot<'_>,
+        answered: Result<Option<Freshness>, Outcome>,
+    ) -> bool {
         let id = slot.credential();
         let handed = slot.handed();
         let marked = slot.marked();
-        let result: Result<(), Refusal> = self.run(|core| {
+        let result: Result<bool, Refusal> = self.run(|core| {
             let subject = core.credential_subject(Initiator::Lobby, id, RENEW_CREDENTIAL);
-            let ready = core
+            let standing = core
                 .store
                 .state()
                 .credential(id)
-                .is_some_and(|credential| credential.state == CredentialState::Ready);
-            if !ready {
-                core.due.remove(&id);
-                if marked {
-                    core.settle_as(&subject, Outcome::Revoked);
-                }
-                return Ok(());
-            }
+                .map(|credential| credential.state);
             let still_marked = self.dir.join(keyring::rotating_file(id)).exists();
+            if standing != Some(CredentialState::Ready) {
+                core.due.remove(&id);
+                // Someone else changed the credential while this renewal
+                // ran: it is settled as what it did, a renewal that kept
+                // its new material having kept the account signed in.
+                if marked {
+                    let outcome = match standing {
+                        Some(CredentialState::NeedsSignIn) if answered.is_ok() && !still_marked => {
+                            Outcome::Done
+                        }
+                        Some(CredentialState::NeedsSignIn) => Outcome::NeedsSignIn,
+                        _ => Outcome::Revoked,
+                    };
+                    core.settle_as(&subject, outcome);
+                }
+                return Ok(false);
+            }
             let unchanged = || {
                 handed.as_ref().is_some_and(|handed| {
                     keyring::read_material(&self.dir, id).is_ok_and(|current| current == *handed)
@@ -1876,7 +1891,7 @@ impl Lobby {
                     trace::line(&format!(
                         "credential {id} ended a renewal with its mark in place; it needs signing in again"
                     ));
-                    core.needs_sign_in(id, &subject, outcome)
+                    core.needs_sign_in(id, &subject, outcome).map(|()| true)
                 }
                 Ok(freshness) => {
                     if marked {
@@ -1890,7 +1905,7 @@ impl Lobby {
                     } else if marked {
                         core.due.remove(&id);
                     }
-                    Ok(())
+                    Ok(false)
                 }
                 Err(outcome @ (Outcome::NeedsSignIn | Outcome::Refused)) if unchanged() => {
                     if !marked {
@@ -1900,7 +1915,7 @@ impl Lobby {
                         "credential {id} could not be renewed ({}); it needs signing in again",
                         outcome.code()
                     ));
-                    core.needs_sign_in(id, &subject, outcome)
+                    core.needs_sign_in(id, &subject, outcome).map(|()| true)
                 }
                 Err(outcome) => {
                     if marked {
@@ -1911,16 +1926,17 @@ impl Lobby {
                         outcome.code()
                     ));
                     core.due.insert(id, Instant::now() + RENEWAL_RETRY);
-                    Ok(())
+                    Ok(false)
                 }
             }
         });
-        if let Err(refusal) = result {
+        result.unwrap_or_else(|refusal| {
             trace::line(&format!(
                 "the end of a renewal of credential {id} could not be recorded: {}",
                 refusal.message
             ));
-        }
+            false
+        })
     }
 
     /// Keeps every ready credential alive: asks each one's adapter, when it
@@ -2193,16 +2209,19 @@ impl Lobby {
             &ticket.address,
             &slot,
         );
-        let refused = broker.refused();
-        let renewed_here = refused.is_some() || broker.slot().marked();
-        self.settle_renewal(broker.slot(), refused.map_or(Ok(None), Err));
+        // Only a renewal this call's own minting ended, refused or with its
+        // mark in place, is what left the account needing a sign-in; one
+        // that renewed cleanly says nothing about a change someone else
+        // made meanwhile.
+        let signed_out_here =
+            self.settle_renewal(broker.slot(), broker.refused().map_or(Ok(None), Err));
         let answer = self.run(|core| {
             let now = core.store.state().connection(ticket.connection);
             // This call's own minting found that the account needs signing
             // in again, and left the connection waiting for that: the
             // sponsor revoked nothing, and the service did nothing, since
             // the call could not be made without a fresh proof.
-            let waits_on_this_call = renewed_here
+            let waits_on_this_call = signed_out_here
                 && result.is_err()
                 && now.is_some_and(|connection| {
                     connection.state == ConnectionState::NeedsSignIn

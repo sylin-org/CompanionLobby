@@ -655,6 +655,11 @@ establishment of the connection found that the account needs signing in
 again answers `needs_sign_in` with the lobby's sentence naming the service
 and the connection, never as a revoke: the connection then waits for the
 sign-in, and the service did nothing, since the call could not be made.
+Only a renewal that call ended, refused or with its mark in place, says
+so: a call whose own renewal succeeded while another call found the
+account needs signing in again settles against the connection as that
+left it, so a read's answer is not shown and a write's outcome is
+unknown, and its renewal is journaled as done.
 
 ## Stopping and rebuilding
 

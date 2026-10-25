@@ -566,6 +566,76 @@ fn a_write_whose_account_another_call_found_needs_a_sign_in_is_unknown_and_says_
 }
 
 #[test]
+fn a_write_whose_own_renewal_succeeded_while_another_call_found_the_account_signed_out_is_unknown()
+{
+    let world = world();
+    // Every token the Space issues is near its expiry, so every call
+    // establishes its connection again before it is made.
+    world.space.issue_for(60);
+    let (install, _, mut first) = connected(&world, "space-renewed-then-flipped");
+    // The first call's proof is minted only after its account is renewed
+    // at its server, which succeeds; the Space then refuses the Post, and
+    // that answer is held while a second mind finds the account signed out.
+    world.space.refuse_writes_in("welcome");
+    world.atproto.end_access_tokens();
+    let route = "/api/v1/experience/topics/welcome/posts";
+    let held = world.space.listener().hold_answers(route);
+    first.send(&json!({
+        "jsonrpc": "2.0", "id": 90, "method": "tools/call",
+        "params": { "name": "tangent_post", "arguments": { "topic": world.welcome, "text": "Renewed first.", "request_id": "renewed-1" } }
+    }));
+    world.space.listener().wait_for_handled(route, 1);
+    assert_eq!(
+        world.space.listener().count(EXCHANGE),
+        2,
+        "the first call established its connection again"
+    );
+    world.atproto.end_access_tokens();
+    world.atproto.refuse_refreshes();
+    let mut second = install.attach("ada");
+    initialize(&mut second);
+    let flipped = call(&mut second, 91, "tangent_arrive", json!({}));
+    assert_eq!(
+        flipped["result"]["structuredContent"]["outcome"], "needs_sign_in",
+        "{flipped}"
+    );
+    drop(held);
+    let late = first.answer(&json!(90));
+    assert_eq!(late["result"]["isError"], true, "{late}");
+    let told = said(&late);
+    assert_eq!(
+        late["result"]["structuredContent"]["outcome"], "outcome_unknown",
+        "a write someone else's change cut off is never said to have done nothing: {told}"
+    );
+    assert_eq!(
+        told,
+        "The account behind Tangent Space at main needed signing in again while this write was on its way, so the lobby cannot say whether the service carried it out. Once the sponsor signs it in again, read the target before writing again."
+    );
+    assert!(!told.contains("nothing was done"), "{told}");
+    // The journal says the same: the first call's renewal kept the account
+    // signed in, the second call's found it needs a sign-in, and nothing
+    // was revoked.
+    let journal = install.journal();
+    let ended = |command: &str| -> Vec<String> {
+        journal
+            .iter()
+            .filter(|entry| entry["command"] == command && entry["outcome"] != "pending")
+            .map(|entry| entry["outcome"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    };
+    let mut renewals = ended("renew_credential");
+    renewals.sort();
+    assert_eq!(renewals, ["done", "needs_sign_in"]);
+    let settled: Vec<&str> = journal
+        .iter()
+        .filter(|entry| entry["kind"] == "settled")
+        .filter_map(|entry| entry["outcome"].as_str())
+        .collect();
+    assert_eq!(settled, ["needs_sign_in", "outcome_unknown"]);
+    install.stop();
+}
+
+#[test]
 fn a_post_of_a_mebibyte_reaches_the_mind_cut_short_and_quoted_in_text_and_structure() {
     let world = world();
     let mallory = world
