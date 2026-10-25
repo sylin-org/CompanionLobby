@@ -36,3 +36,6 @@ crates/daemon/tests/manager_journey.rs	provider-tangent	The journey checks the s
 crates/daemon/tests/sign_in_journey.rs	provider-tangent	The journey checks the product offers the Tangent adapter for atproto accounts.
 crates/testkit/src/world.rs	provider-tangent	The whole fake world seeds the fake Space in its own nouns: Tangents, Topics and Posts.
 crates/testkit/tests/lobby_world.rs	provider-tangent	The test probes the fake Space at its own well-known path.
+crates/daemon/tests/space_journey.rs	provider-tangent	The journey connects a companion to the test kit's fake Space through the real daemon and the Tangent adapter.
+crates/daemon/tests/space_journey.rs	provider-atproto	The journey signs the companion in with the atproto adapter against the test kit's fake world.
+crates/daemon/tests/space_journey.rs	provider-atproto-wire	The journey checks the proof the fake PDS minted.
