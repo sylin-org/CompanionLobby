@@ -10,8 +10,9 @@
 //!   address that was checked and nothing can point the name elsewhere in between;
 //! * no redirect is followed and no proxy is taken from the environment;
 //! * a connection has 10 seconds to open and every read and write 30, and
-//!   the whole request, from resolving the name to the last byte of the
-//!   body, has [`DEADLINE`] unless the request names a shorter one;
+//!   the whole request, from opening the connection to the last byte of the
+//!   body, has [`DEADLINE`] unless the request names a shorter one; resolving
+//!   a name is left to the system resolver and is not counted against it;
 //! * a body is read up to a limit the request names
 //!   ([`DEFAULT_LIMIT`] unless a route needs more), and a longer one is
 //!   refused rather than cut;
@@ -34,8 +35,8 @@ use lobby_contracts::{Address, AddressPolicy};
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long any one read or write may take.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long a whole request may take, from resolving the name to reading the
-/// last byte of the body, when the request names no shorter deadline.
+/// How long a whole request may take, from opening the connection to reading
+/// the last byte of the body, when the request names no shorter deadline.
 pub const DEADLINE: Duration = Duration::from_secs(60);
 /// The longest body read when a request names no other limit.
 pub const DEFAULT_LIMIT: usize = 256 * 1024;
@@ -364,40 +365,44 @@ mod tests {
         server.join().expect("server");
     }
 
+    /// Reads one request head off `stream`, up to the blank line that ends it.
+    fn read_head(stream: &std::net::TcpStream) -> String {
+        let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+        let mut head = String::new();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                return head;
+            }
+            head.push_str(&line);
+        }
+    }
+
     #[test]
     fn a_body_that_trickles_past_the_deadline_is_refused() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("address").port();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
-            let mut line = String::new();
-            while reader.read_line(&mut line).unwrap_or(0) > 0
-                && line
-                    != "
-"
-            {
-                line.clear();
-            }
-            let _ = stream.write_all(
-                b"HTTP/1.1 200 OK
-Content-Length: 40
-Connection: close
-
-",
-            );
+            let head = read_head(&stream);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 40\r\nConnection: close\r\n\r\n")
+                .expect("the head");
             // Each byte arrives well within the read timeout; the whole body
             // takes far longer than the request's deadline.
+            let mut sent = 0;
             for _ in 0..40 {
                 if stream
                     .write_all(b"x")
                     .and_then(|()| stream.flush())
                     .is_err()
                 {
-                    return;
+                    break;
                 }
+                sent += 1;
                 std::thread::sleep(Duration::from_millis(100));
             }
+            (head, sent)
         });
         let started = std::time::Instant::now();
         let failure = Outbound::new(AddressPolicy::LoopbackAllowed)
@@ -406,13 +411,51 @@ Connection: close
                 Request::new("GET", "/").within(Duration::from_millis(500)),
             )
             .expect_err("past the deadline");
+        let took = started.elapsed();
         assert_eq!(failure, Failure::Interrupted);
         assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "the deadline ended the request: {:?}",
-            started.elapsed()
+            took >= Duration::from_millis(400) && took < Duration::from_secs(3),
+            "the deadline, not a malformed answer, ended the request: {took:?}"
         );
-        server.join().expect("server");
+        let (head, sent) = server.join().expect("server");
+        assert!(head.starts_with("GET / HTTP/1.1\r\n"), "{head}");
+        assert!(
+            (1..40).contains(&sent),
+            "the body had started and was cut short: {sent} bytes"
+        );
+    }
+
+    #[test]
+    fn an_answer_that_never_starts_ends_at_the_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let head = read_head(&stream);
+            // The request was read whole; no answer ever comes.
+            std::thread::sleep(Duration::from_secs(3));
+            drop(stream);
+            head
+        });
+        let started = std::time::Instant::now();
+        let failure = Outbound::new(AddressPolicy::LoopbackAllowed)
+            .send(
+                &loopback(port),
+                Request::new("GET", "/slow").within(Duration::from_millis(500)),
+            )
+            .expect_err("no answer within the deadline");
+        let took = started.elapsed();
+        assert_eq!(failure, Failure::Interrupted);
+        assert!(
+            took >= Duration::from_millis(400) && took < Duration::from_secs(2),
+            "the deadline ended the wait for the head: {took:?}"
+        );
+        assert!(
+            server
+                .join()
+                .expect("server")
+                .starts_with("GET /slow HTTP/1.1\r\n")
+        );
     }
 
     #[test]
@@ -461,12 +504,7 @@ Connection: close
             let (mut stream, _) = listener.accept().expect("accept");
             let mut first = [0u8; 1];
             stream.read_exact(&mut first).expect("a first byte");
-            let _ = stream.write_all(
-                b"HTTP/1.1 200 OK
-Content-Length: 0
-
-",
-            );
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
             first[0]
         });
         let address = Address::parse(
@@ -487,13 +525,8 @@ Content-Length: 0
 
     #[test]
     fn a_form_is_sent_encoded() {
-        let (address, server) = serve_once(
-            b"HTTP/1.1 201 Created
-Content-Length: 0
-Connection: close
-
-",
-        );
+        let (address, server) =
+            serve_once(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         let response = Outbound::new(AddressPolicy::LoopbackAllowed)
             .send(
                 &address,
