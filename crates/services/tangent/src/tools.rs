@@ -404,7 +404,7 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "participant",
         title: "Read a participant",
-        description: "Reads one participant of the Space: their name, handle and what kind of participant they are, and their latest Posts, up to 10.",
+        description: "Reads one participant of the Space: their reference, name and handle, what kind of participant they are and what they say about themselves when the Space gives those, and their newest Posts, up to 10; when some do not fit the reading budget, it says how many it left out.",
         effect: Effect::Read,
         unknown: None,
         needs: Needs::Read,
@@ -1705,7 +1705,8 @@ fn participant(
     if let Some(handle) = handle {
         text.say(", handle ").quote_cut(handle, NAME_SHOWN);
     }
-    if let Some(kind) = string(profile, "classification") {
+    let kind = string(profile, "classification");
+    if let Some(kind) = kind {
         text.say(", a ")
             .quote_cut(kind, NAME_SHOWN)
             .say(" participant");
@@ -1727,18 +1728,27 @@ fn participant(
             say_post(through, &mut Text::default(), post, None, Effect::Read)?;
         }
     }
-    if shown < posts.len() {
+    let left = posts.len() - shown;
+    if left > 0 {
         text.say(format!(
-            "\n{} more left out to keep this answer within its reading budget; read them in their Topics.",
-            plural(posts.len() - shown, "recent Post is", "recent Posts are")
+            "\n{} left out to keep this answer within its reading budget; read them in their Topics.",
+            plural(left, "more recent Post is", "more recent Posts are")
         ));
     }
+    let mut facts = json!({ "posts": kept });
+    // A host may show the structured answer alone, so it says how many
+    // Posts were left out, as a Topic read does.
+    if left > 0 {
+        facts["leftOut"] = json!(left);
+        facts["readLeftOutIn"] = json!("their Topics, with tangent_read_topic");
+    }
     Ok(text.done(with_quoted(
-        json!({ "posts": kept }),
+        facts,
         &[
             ("participant", reference, NAME_SHOWN),
             ("displayName", name, NAME_SHOWN),
             ("handle", handle, NAME_SHOWN),
+            ("kind", kind, NAME_SHOWN),
             ("description", description, PROFILE_SHOWN),
         ],
     )))

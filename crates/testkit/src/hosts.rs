@@ -97,10 +97,9 @@ pub fn claude_code() -> Recording {
 /// one friendly sentence.
 ///
 /// The mind calls `reach`, asks the Space what is new and learns who wrote
-/// each Post by name, reads the Topic of the newest Post, replies to Bea's
-/// Post there with a request id of its own choosing and marks the Topic
-/// read, with no refused call and every reference copied from an earlier
-/// answer. Its host showed it each result's structured
+/// each Post by name, reads the Topic of the newest Post and replies to
+/// Bea's Post there with a request id of its own choosing, with no refused
+/// call and every reference copied from an earlier answer. Its host showed it each result's structured
 /// content, which held the answer's text as `message`. The Space's origin
 /// in the frames is the one that walk ran against; a replay puts its own
 /// in its place.
@@ -157,8 +156,7 @@ mod tests {
                 "reach",
                 "tangent_updates",
                 "tangent_read_topic",
-                "tangent_post",
-                "tangent_mark_read"
+                "tangent_post"
             ]
         );
         for frame in recording

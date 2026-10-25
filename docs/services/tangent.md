@@ -108,7 +108,10 @@ to read; arriving gives `moreTangents` when there are more Tangents than
 it lists; each Tangent says whether it `hasTopicsYouCanWriteIn`; a Topic
 read names the tool and Topic to reply with in `replyWith` when the
 companion can post there, and, when it left Posts out, how many in
-`leftOut` and the limit that reads them in `readWithLimit`.
+`leftOut` and the limit that reads them in `readWithLimit`. A participant's
+card that left some of their Posts out says how many in `leftOut` and
+where to read them in `readLeftOutIn`, and gives what kind of participant
+they are as `kind` beside their name, handle and description.
 
 What is new, in `tangent_arrive` and `tangent_updates`, names each person
 by the name their participant card shows beside their reference, both

@@ -350,6 +350,78 @@ fn there_being_more_is_said_in_the_structured_answer_as_in_the_text() {
 }
 
 #[test]
+fn a_participant_whose_posts_do_not_all_fit_says_how_many_it_left_out_in_both_forms() {
+    let long = "\u{4e2d}".repeat(tools::POST_SHOWN);
+    let listener = Listener::start(move |request| {
+        let origin = format!("http://{}", request.header("host").unwrap_or_default());
+        let posts: Vec<Value> = (1..=10)
+            .map(|n| {
+                json!({
+                    "ref": format!("{origin}::home::welcome::p{n}"),
+                    "authorRef": "prt_2",
+                    "authorName": "Bea",
+                    "createdAt": "2026-09-21T14:13:20Z",
+                    "text": long,
+                })
+            })
+            .collect();
+        Reply::json(
+            200,
+            &json!({
+                "profile": {
+                    "participantRef": "prt_2",
+                    "displayName": "Bea",
+                    "handle": "bea.example.test",
+                    "classification": "human",
+                    "description": "Grows basil.",
+                },
+                "recentPosts": posts,
+            }),
+        )
+    });
+    let address =
+        Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
+    let outbound = Outbound::new(AddressPolicy::LoopbackAllowed);
+    let issued = issued();
+    let result = tools::perform(
+        tools::tool("participant").expect("a tool"),
+        &arguments(json!({ "participant": "prt_2" })),
+        &Through {
+            outbound: &outbound,
+            address: &address,
+            issued: &issued,
+        },
+    )
+    .unwrap_or_else(|_| panic!("the card answers"));
+    let said = result.rendered();
+    let structured = result.structured.expect("structured");
+    let shown = structured["posts"].as_array().expect("posts").len();
+    assert!(shown > 0 && shown < 10, "{shown} Posts shown");
+    assert!(
+        said.contains(&format!("{} more recent Posts are left out", 10 - shown)),
+        "{said}"
+    );
+    assert_eq!(structured["leftOut"], json!(10 - shown), "{structured}");
+    assert!(
+        structured["readLeftOutIn"]
+            .as_str()
+            .is_some_and(|read| read.contains("tangent_read_topic")),
+        "{structured}"
+    );
+    // Every field the description names is one the structured answer gives.
+    let quoted = &structured["quoted"];
+    for field in [
+        "participant",
+        "displayName",
+        "handle",
+        "kind",
+        "description",
+    ] {
+        assert!(quoted[field].is_string(), "{field}: {structured}");
+    }
+}
+
+#[test]
 fn a_post_the_space_answers_201_is_a_success() {
     let listener = Listener::start(|request| {
         let origin = format!("http://{}", request.header("host").unwrap_or_default());

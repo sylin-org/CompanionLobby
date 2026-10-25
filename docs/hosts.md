@@ -21,9 +21,8 @@ haiku model attached to a lobby whose only connection is `lobby-world`'s
 fake Space, asked to find out where it can go, read what is new and reply
 to the newest conversation in one sentence. It called `reach`, asked what
 is new and read who wrote each Post by name, read the Topic of the newest
-Post, replied to Bea's Post there with a request id of its own and marked
-the Topic read, copying every reference from an earlier answer, with no
-refused call; the replay moves the Space's origin to the fresh
+Post and replied to Bea's Post there with a request id of its own,
+copying every reference from an earlier answer, with no refused call; the replay moves the Space's origin to the fresh
 world's and checks that every tool description and schema and every answer
 reads as it did when it was recorded, and that one reply landed. A change to
 anything a mind reads there is recorded again on purpose, with a mind
