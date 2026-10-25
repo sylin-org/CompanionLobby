@@ -24,3 +24,9 @@ crates/daemon/src/bin/synthetic.rs	provider-atproto	The test-only command compos
 crates/daemon/tests/sign_in_journey.rs	provider-atproto	The journey signs companions in with the atproto adapter through the real daemon against the test kit's fake.
 crates/daemon/tests/manager_journey.rs	provider-atproto	The journey walks the sponsor's moments against the test kit's fake world, signing in with the atproto adapter.
 crates/daemon/tests/trouble_journey.rs	provider-atproto	The journey keeps an atproto credential alive and revokes it through the real daemon against the test kit's fake.
+crates/services/tangent/src/profile.rs	provider-atproto	A Space names itself by a did:web DID, which the adapter derives to check the audience the profile names; it is Tangent's own wire.
+crates/testkit/src/space.rs	provider-tangent	The test kit's fake of the Space the Tangent adapter speaks to, in that Space's own wire words.
+crates/conformance/Cargo.toml	provider-tangent	The conformance suite's tests hold the Tangent service adapter to its contract.
+crates/conformance/tests/tangent_service.rs	provider-tangent	The service suite runs against the Tangent adapter and the test kit's fake Space.
+crates/conformance/tests/tangent_service.rs	provider-atproto	The fake Space takes proofs the atproto adapter mints at the test kit's fake PDS.
+crates/conformance/tests/tangent_service.rs	provider-atproto-wire	The fake Space takes proofs the atproto adapter mints at the test kit's fake PDS.

@@ -10,6 +10,9 @@ repository.workspace = true
 [dependencies]
 lobby-contracts.workspace = true
 lobby-outbound.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 lobby-testkit.workspace = true
