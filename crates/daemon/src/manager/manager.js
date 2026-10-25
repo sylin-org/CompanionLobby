@@ -1142,6 +1142,14 @@ async function grant(companion, credential, service, address, label, form) {
   return connection;
 }
 
+// The address the sponsor typed, with its scheme: plain HTTP for one on
+// this machine when none was typed, HTTPS for any other.
+function withScheme(typed) {
+  if (!typed || typed.includes("://")) return typed;
+  const local = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/i.test(typed);
+  return (local ? "http://" : "https://") + typed;
+}
+
 // A name suggested for a connection: the first word of the address's host,
 // or the service's own name, made unique among the companion's.
 function labelFrom(companion, service, address) {
@@ -1173,7 +1181,7 @@ function grantPanel(companion, service, primary) {
   form.setAttribute("aria-label", "Open a connection for " + companion.displayName + " to " + service.title);
   const key = "grant:" + companion.id + ":" + service.name;
   const draft = drafts.read(key) || {};
-  const address = field("Address", draft.address, "Where this " + service.title + " is, such as " + service.name + ".example.");
+  const address = field("Address", draft.address, "Its address, such as https://" + service.name + ".example.test, or http://localhost:8080 for one on this machine.");
   const label = field("Name", draft.label, "What " + companion.displayName + " calls this " + service.title + " when it has more than one.");
   address.input.dataset.key = key + ":address";
   label.input.dataset.key = key + ":label";
@@ -1209,7 +1217,7 @@ function grantPanel(companion, service, primary) {
   form.addEventListener("submit", async event => {
     event.preventDefault();
     const typed = address.input.value.trim();
-    const where = typed && !typed.includes("://") ? "https://" + typed : typed;
+    const where = withScheme(typed);
     const name = label.input.value.trim() || (where ? labelFrom(companion, service.name, where) : "");
     if (!where) { formSays(form, "Type where this " + service.title + " is first."); return; }
     const same = connectionsOf(companion).find(connection => connection.service === service.name && connection.state !== "revoked" && placeText(connection.address).replace(/\/$/, "") === placeText(where.toLowerCase()).replace(/\/$/, ""));

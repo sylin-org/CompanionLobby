@@ -1,4 +1,4 @@
-recorded against manager.js sha256 e99cb8b690585052a953a540cc8ac06e30536217e24739a7e2abb38804d05dfe
+recorded against manager.js sha256 5169c256906f18cf4ede09daf68c1365738e6c26c56c8c793b65744940553c06
 Companions
 A
 Ada

@@ -70,7 +70,8 @@ word and one action:
 
 A revoked connection is shown only while nothing ready or newer holds its
 name. Below the list, each installed service has a form: the address (a
-bare host is read as `https://`), a name suggested from the address, and,
+bare host is read as `https://`, and a bare `localhost`, `127.0.0.1` or
+`[::1]`, with or without a port, as `http://`), a name suggested from the address, and,
 when the companion holds more than one account the service takes, which
 account. A service whose kind of account the companion does not hold says
 which kind it takes. A lobby with no service installed says so, and offers
