@@ -87,7 +87,7 @@ pub fn catalog(reached: &[Reached]) -> Vec<(String, ToolDescriptor)> {
             .collect();
         for tool in &place.tools {
             let mut descriptor = tool.clone();
-            descriptor.input_schema = with_at(&tool.input_schema, &place.service, &labels);
+            descriptor.input_schema = with_at(&tool.input_schema, &place.title, &labels);
             tools.push((tool.name.projected(&place.service), descriptor));
         }
     }
@@ -95,16 +95,16 @@ pub fn catalog(reached: &[Reached]) -> Vec<(String, ToolDescriptor)> {
 }
 
 /// `schema` with the `at` property: the labels as its only values, required
-/// when there is more than one.
-fn with_at(schema: &Value, service: &ServiceName, labels: &[&str]) -> Value {
+/// when there is more than one, described by the service's `title`.
+fn with_at(schema: &Value, title: &str, labels: &[&str]) -> Value {
     let mut schema = schema.clone();
     if !schema.is_object() {
         schema = json!({ "type": "object" });
     }
     let description = if labels.len() == 1 {
-        format!("Which {service} to act at, by the name the sponsor gave it; it may be left out.")
+        format!("Which {title} to act at, by the name the sponsor gave it; it may be left out.")
     } else {
-        format!("Which {service} to act at, by the name the sponsor gave it.")
+        format!("Which {title} to act at, by the name the sponsor gave it.")
     };
     let properties = schema
         .as_object_mut()
@@ -129,8 +129,9 @@ fn with_at(schema: &Value, service: &ServiceName, labels: &[&str]) -> Value {
 /// The answer to `reach` for `companion`, which reaches `reached` and whose
 /// connections `waiting` wait for the sponsor to sign their account in
 /// again: who the companion is, then for each service where it is, by the
-/// sponsor's names, the tool to start with and what else it may do there,
-/// in a few sentences.
+/// sponsor's names, whether it can read or write there and the tool to
+/// start with, in a few sentences. The whole tool list is in the structured
+/// answer and the catalog.
 pub fn reach(
     companion: &Companion,
     reached: &[Reached],
@@ -153,8 +154,7 @@ pub fn reach(
             .iter()
             .map(|(label, address)| format!("{label} ({address})"))
             .collect();
-        let projected = |tool: &ToolDescriptor| tool.name.projected(&place.service);
-        let Some((first, rest)) = place.tools.split_first() else {
+        let Some(first) = place.tools.first() else {
             sentences.push(format!(
                 "{display} reaches {title} at {places}, where nothing is open to it now.",
                 title = place.title,
@@ -162,33 +162,18 @@ pub fn reach(
             ));
             continue;
         };
-        let reads: Vec<String> = rest
-            .iter()
-            .filter(|tool| tool.read_only_hint())
-            .map(projected)
-            .collect();
-        let writes: Vec<String> = rest
-            .iter()
-            .filter(|tool| !tool.read_only_hint())
-            .map(projected)
-            .collect();
-        let mut can = Vec::new();
-        if !reads.is_empty() {
-            can.push(format!("read with {}", listed(&reads)));
-        }
-        if !writes.is_empty() {
-            can.push(format!("write with {}", listed(&writes)));
-        }
-        let then = if can.is_empty() {
-            String::new()
-        } else {
-            format!("; there it can also {}", can.join(" and "))
+        let reads = place.tools.iter().any(ToolDescriptor::read_only_hint);
+        let writes = place.tools.iter().any(|tool| !tool.read_only_hint());
+        let can = match (reads, writes) {
+            (true, true) => "read and write",
+            (false, true) => "write",
+            _ => "read",
         };
         sentences.push(format!(
-            "{display} reaches {title} at {places}: start with {first}{then}.",
+            "{display} reaches {title} at {places}, where it can {can}: start with {first}.",
             title = place.title,
             places = listed(&places),
-            first = projected(first),
+            first = first.name.projected(&place.service),
         ));
         if place.connections.len() > 1 {
             sentences.push(format!(
@@ -876,7 +861,7 @@ mod tests {
         let said = answer.rendered();
         assert!(
             said.contains(
-                "Ada reaches Board at front (http://127.0.0.1:5300) and back (http://127.0.0.1:5301): start with board_read."
+                "Ada reaches Board at front (http://127.0.0.1:5300) and back (http://127.0.0.1:5301), where it can read: start with board_read."
             ),
             "{said}"
         );
@@ -884,7 +869,22 @@ mod tests {
     }
 
     #[test]
-    fn reach_names_the_tool_to_start_with_and_what_else_reads_and_writes() {
+    fn at_is_described_by_the_service_title_never_its_tool_prefix() {
+        let mut place = board(&["front"]);
+        place.title = "Notice Board".to_owned();
+        let tools = catalog(&[place]);
+        let described = tools[1].1.input_schema["properties"]["at"]["description"]
+            .as_str()
+            .expect("described")
+            .to_owned();
+        assert_eq!(
+            described,
+            "Which Notice Board to act at, by the name the sponsor gave it; it may be left out."
+        );
+    }
+
+    #[test]
+    fn reach_says_what_the_companion_can_do_and_the_tool_to_start_with() {
         let mut place = board(&["front"]);
         let write = ToolDescriptor {
             name: ToolName::new("post").expect("tool"),
@@ -901,7 +901,7 @@ mod tests {
         let said = reach(&ada(), &[place], &[]).rendered();
         assert_eq!(
             said,
-            "You are Ada (moniker ada), attached through Companion Lobby. Ada reaches Board at front (http://127.0.0.1:5300): start with board_read; there it can also read with board_list and write with board_post."
+            "You are Ada (moniker ada), attached through Companion Lobby. Ada reaches Board at front (http://127.0.0.1:5300), where it can read and write: start with board_read."
         );
         assert_eq!(
             listed(&["a".to_owned(), "b".to_owned(), "c".to_owned()]),
