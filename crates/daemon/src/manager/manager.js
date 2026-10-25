@@ -526,7 +526,8 @@ function card(companion) {
 }
 
 // One account on a companion's card: Revoke while it is signed in; while it
-// waits for a sign-in, Sign in again and Revoke beside it.
+// waits for a sign-in, the way back (Sign in again, or Continue when that
+// sign-in already waits) and Revoke beside it.
 function cardAccount(companion, credential) {
   const line = element("li", "card-account");
   const ready = credential.state === "ready";
@@ -538,9 +539,16 @@ function cardAccount(companion, credential) {
     line.append(said, revoke);
     return line;
   }
-  const back = button("Sign in again");
-  back.dataset.key = "card-again-" + credential.id;
-  back.addEventListener("click", () => signInAgain(companion, credential, back));
+  const pending = waitingSignIn(companion, credential.kind);
+  let back;
+  if (pending) {
+    back = link(companionPath(companion, "/sign-in/" + encodeURIComponent(pending.id)), "button", "Continue sign-in");
+    back.dataset.key = "card-continue-" + pending.id;
+  } else {
+    back = button("Sign in again");
+    back.dataset.key = "card-again-" + credential.id;
+    back.addEventListener("click", () => signInAgain(companion, credential, back));
+  }
   const actions = element("span", "actions");
   actions.append(back, revoke);
   line.append(said, actions);
