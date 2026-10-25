@@ -126,6 +126,7 @@ struct Shared {
     arrived: Condvar,
     held: Mutex<Vec<String>>,
     held_answers: Mutex<Vec<AnswerHold>>,
+    handled: Mutex<Vec<String>>,
     released: Condvar,
     stopped: AtomicBool,
 }
@@ -198,6 +199,7 @@ impl Listener {
             arrived: Condvar::new(),
             held: Mutex::new(Vec::new()),
             held_answers: Mutex::new(Vec::new()),
+            handled: Mutex::new(Vec::new()),
             released: Condvar::new(),
             stopped: AtomicBool::new(false),
         });
@@ -297,6 +299,24 @@ impl Listener {
                 .0;
         }
     }
+
+    /// Waits until the handler answered `count` requests to `route` in
+    /// all, whether or not an answer hold keeps those answers back: what
+    /// the requests did at the fake is done.
+    pub fn wait_for_handled(&self, route: &str, count: usize) {
+        let deadline = Instant::now() + ARRIVAL_TIMEOUT;
+        let mut handled = locked(&self.shared.handled);
+        while handled.iter().filter(|handled| *handled == route).count() < count {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "no request {count} to {route} was handled");
+            handled = self
+                .shared
+                .arrived
+                .wait_timeout(handled, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
 }
 
 impl Drop for Listener {
@@ -332,6 +352,10 @@ fn serve(stream: TcpStream, shared: &Shared) {
         }
     }
     let reply = (shared.handler)(&request);
+    {
+        locked(&shared.handled).push(request.route().to_owned());
+        shared.arrived.notify_all();
+    }
     {
         let mut held = locked(&shared.held_answers);
         while held.iter().any(|hold| hold.holds(&request)) {

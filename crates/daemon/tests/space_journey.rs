@@ -491,7 +491,7 @@ fn flipped_mid_call(
         "jsonrpc": "2.0", "id": 80, "method": "tools/call",
         "params": { "name": tool, "arguments": arguments }
     }));
-    world.space.listener().wait_for(route, 1);
+    world.space.listener().wait_for_handled(route, 1);
     world.space.end_tokens();
     world.atproto.end_access_tokens();
     world.atproto.refuse_refreshes();
