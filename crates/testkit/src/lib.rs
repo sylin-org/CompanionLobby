@@ -25,6 +25,8 @@
 //!   provider or service;
 //! * [`atproto`], a fake atproto authorization server and PDS, for the
 //!   atproto credential adapter;
+//! * [`space`], a fake of the Space the first service adapter speaks to,
+//!   taking the proofs the fake PDS mints;
 //! * [`world::LobbyWorld`], all of these at once on loopback, which the
 //!   `lobby-world` command runs for walking the sponsor's journey by hand.
 //!
@@ -37,6 +39,7 @@ pub mod hosts;
 pub mod listener;
 pub mod passbook;
 mod peer;
+pub mod space;
 pub mod world;
 
 use std::path::{Path, PathBuf};
