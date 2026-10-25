@@ -76,7 +76,7 @@ pub enum Standing {
     /// Still ready at the ticket's revision: the answer reaches the mind.
     Pinned,
     /// Its account needs the sponsor to sign it in again. `place` names the
-    /// connection as the mind knows it, such as `Tangent Space at main`.
+    /// connection as the mind knows it, such as `Board at main`.
     NeedsSignIn { place: String },
     /// Ready again at a later revision: its account was signed in again
     /// while the call ran.
