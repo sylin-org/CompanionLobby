@@ -16,8 +16,9 @@ operator runs on the same machine, on the loopback address over plain HTTP.
 
 The adapter takes atproto accounts. Every atproto sign-in asks for the
 permission `rpc:org.sylin.tangent.exchangeIdentity?aud=*`, the leave to
-mint the proof below; an account signed in without it is told to sign in
-again before the Space hears anything.
+mint the proof below; an account signed in without it is told, before the
+Space hears anything, that the sponsor can revoke the account and sign the
+companion in again to grant it.
 
 ## Establishing a connection
 

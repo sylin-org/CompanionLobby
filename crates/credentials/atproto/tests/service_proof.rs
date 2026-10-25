@@ -9,7 +9,7 @@ use lobby_contracts::{
     AuthorizationAsk, CredentialAdapter, CredentialId, MaterialSlot, MaterialUpdate, Outcome,
     SealedMaterial, SignInRequest, SignInReturn,
 };
-use lobby_credential_atproto::proofs::{NOT_GRANTED, SERVICE_AUTH_PATH};
+use lobby_credential_atproto::proofs::{NOT_GRANTED, NOT_TAKEN, SERVICE_AUTH_PATH};
 use lobby_credential_atproto::{Atproto, World};
 use lobby_testkit::atproto::{AtprotoWorld, base64url_decode};
 use lobby_testkit::percent_decode;
@@ -265,6 +265,36 @@ fn a_bare_did_or_a_method_that_is_no_nsid_is_refused_before_the_material_is_read
     }
     assert_eq!(slot.reads(), 0, "the material was not read");
     assert!(mints(&world).is_empty());
+}
+
+#[test]
+fn an_access_token_the_pds_ends_early_is_renewed_once_and_the_proof_asked_again() {
+    let world = AtprotoWorld::start();
+    let adapter = adapter(&world);
+    let (material, _) = signed_in(&world, &adapter, &[granted()]);
+    world.end_access_tokens();
+    let slot = Held::new(material.clone());
+    let proof = adapter.authorize(&slot, &ask()).expect("a proof");
+    assert_eq!(
+        world.refresh_tokens_presented().len(),
+        1,
+        "renewed once though not due"
+    );
+    assert_eq!(
+        mints(&world).len(),
+        3,
+        "the ended token, then the renewed session with the PDS's nonce challenge answered"
+    );
+    assert_ne!(*slot.material.lock().expect("material"), material);
+    assert!(world.proofs().verify(proof.token.expose()).is_some());
+
+    // A session whose refresh is refused too needs signing in again.
+    world.end_access_tokens();
+    world.refuse_refreshes();
+    let ended = adapter.authorize(&slot, &ask()).expect_err("not taken");
+    assert_eq!(ended.outcome, Outcome::NeedsSignIn);
+    assert_eq!(ended.sentence, NOT_TAKEN);
+    assert_eq!(world.refresh_tokens_presented().len(), 2);
 }
 
 #[test]

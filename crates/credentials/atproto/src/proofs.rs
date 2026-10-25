@@ -32,8 +32,11 @@
 //! The proof expires at most [`PROOF_SECS`] after it is asked for, or
 //! sooner when the service asked for less. A 200 carrying a token is the
 //! proof, presented to the service under `Bearer`; a 403 is the PDS
-//! refusing the method, which only a new sign-in can widen; any other 401
-//! is a session the PDS does not take, which needs signing in again.
+//! refusing the method, which only a new sign-in can widen. Any other 401
+//! is an access token the PDS stopped taking, which may happen before it
+//! expires: the session is renewed once, due or not, and the proof asked
+//! for once more; only a renewal that says so, or a second such 401, is a
+//! session that needs signing in again.
 //!
 //! Nothing the PDS sends ever reaches a sentence: every refusal is one of
 //! this module's own.
@@ -61,10 +64,10 @@ const NONCE_LIMIT: usize = 1024;
 
 /// Why an account signed in without leave to prove itself to a service
 /// cannot give one, and what brings it.
-pub const NOT_GRANTED: &str = "The account was signed in without leave to prove itself to this service. Sign the companion in again on the manager page to grant it.";
+pub const NOT_GRANTED: &str = "The account was signed in before this service needed it, so it cannot prove itself here. The sponsor can revoke the account on the manager page and sign the companion in again to grant it.";
 
 /// What the PDS refusing the method says.
-pub const REFUSED_BY_PDS: &str = "The account's server refused to prove the account to this service. Sign the companion in again on the manager page to grant it.";
+pub const REFUSED_BY_PDS: &str = "The account's server refused to prove the account to this service. The sponsor can revoke the account on the manager page and sign the companion in again to grant it.";
 
 /// What a session the PDS does not take says.
 pub const NOT_TAKEN: &str = "The account's server does not take this sign-in any more. Sign the companion in again on the manager page.";
@@ -173,7 +176,52 @@ pub fn mint(
     if !granted(&material.permissions, audience, method) {
         return Err(Explained::new(Outcome::NeedsPermission, NOT_GRANTED));
     }
-    let exp = now_secs() + i64::from((*lifetime_secs).min(PROOF_SECS));
+    let lifetime = (*lifetime_secs).min(PROOF_SECS);
+    match ask_pds(outbound, nonces, &material, audience, method, lifetime) {
+        Err(Asked::NotTaken) => {}
+        Err(Asked::Ended(explained)) => return Err(explained),
+        Ok(proof) => return Ok(proof),
+    }
+    // The PDS stopped taking an access token before its time: renewing
+    // once, due or not, is the session's own remedy.
+    renewer
+        .renew_now_held(slot)
+        .map_err(|outcome| match outcome {
+            Outcome::NeedsSignIn => Explained::new(Outcome::NeedsSignIn, NOT_TAKEN),
+            other => other.into(),
+        })?;
+    let renewed = Material::decode(&slot.read()?, renewer.policy).ok_or(Outcome::NeedsSignIn)?;
+    ask_pds(outbound, nonces, &renewed, audience, method, lifetime).map_err(|asked| match asked {
+        Asked::NotTaken => Explained::new(Outcome::NeedsSignIn, NOT_TAKEN),
+        Asked::Ended(explained) => explained,
+    })
+}
+
+/// How asking the PDS for a proof failed.
+enum Asked {
+    /// The PDS did not take the session's access token.
+    NotTaken,
+    /// It ended otherwise.
+    Ended(Explained),
+}
+
+impl From<Outcome> for Asked {
+    fn from(outcome: Outcome) -> Self {
+        Self::Ended(outcome.into())
+    }
+}
+
+/// Asks the PDS of `material` for a proof for `audience` and `method`,
+/// living `lifetime` seconds, answering its nonce challenge once.
+fn ask_pds(
+    outbound: &Outbound,
+    nonces: &Nonces,
+    material: &Material,
+    audience: &str,
+    method: &str,
+    lifetime: u32,
+) -> Result<Authorization, Asked> {
+    let exp = now_secs() + i64::from(lifetime);
     let path = format!(
         "{SERVICE_AUTH_PATH}?aud={}&lxm={}&exp={exp}",
         percent_encode(audience),
@@ -228,8 +276,13 @@ pub fn mint(
                 }
                 return Err(Outcome::TemporarilyUnavailable.into());
             }
-            401 => return Err(Explained::new(Outcome::NeedsSignIn, NOT_TAKEN)),
-            403 => return Err(Explained::new(Outcome::NeedsPermission, REFUSED_BY_PDS)),
+            401 => return Err(Asked::NotTaken),
+            403 => {
+                return Err(Asked::Ended(Explained::new(
+                    Outcome::NeedsPermission,
+                    REFUSED_BY_PDS,
+                )));
+            }
             429 => return Err(Outcome::RateLimited.into()),
             400..=499 => return Err(Outcome::Refused.into()),
             _ => return Err(Outcome::TemporarilyUnavailable.into()),

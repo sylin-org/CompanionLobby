@@ -175,8 +175,9 @@ the audience it declared and an XRPC method. The adapter answers only:
   is read;
 - a method the credential was granted, as `rpc:<method>?aud=*` or for that
   very audience. Without it the answer is that the account was signed in
-  without leave to prove itself to the service and needs signing in again,
-  before the PDS hears anything.
+  before the service needed it, and that the sponsor can revoke the
+  account and sign the companion in again to grant it, before the PDS
+  hears anything.
 
 Holding the credential's lock, it renews the grant first when it is due,
 then asks the account's PDS:
@@ -188,9 +189,12 @@ with a fresh `DPoP-Nonce` that says `use_dpop_nonce`, in the body's
 `error` or in the `WWW-Authenticate` header, is answered once with the
 nonce; the nonce is kept per PDS origin and key for later proofs. The
 token of a 200 is the proof, which the service is presented under
-`Bearer`. A 403 is the PDS refusing the method (sign in again to grant
-it); any other 401 is a sign-in the PDS does not take, and the credential
-needs signing in again.
+`Bearer`. A 403 is the PDS refusing the method (revoke the account and
+sign in again to grant it). Any other 401 is an access token the PDS
+stopped taking, which can happen before it expires: the grant is renewed
+once, due or not, and the proof asked for once more. Only a renewal the
+authorization server refuses, or a second such 401, leaves the credential
+needing signing in again.
 
 ## Reaching the network
 

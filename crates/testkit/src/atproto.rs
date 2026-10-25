@@ -341,6 +341,15 @@ impl AtprotoWorld {
         locked(&self.book).access_lifetime = Some(secs);
     }
 
+    /// Stops taking every access token issued so far at the PDS, as a
+    /// server that ends access tokens early does; the refresh tokens still
+    /// work.
+    pub fn end_access_tokens(&self) {
+        for grant in &mut locked(&self.book).grants {
+            grant.access = unique_token("ended-access");
+        }
+    }
+
     /// Refuses every refresh from now on, as a grant the provider ended.
     pub fn refuse_refreshes(&self) {
         locked(&self.book).refusing_refreshes = true;

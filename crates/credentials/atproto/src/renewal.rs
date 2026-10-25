@@ -148,6 +148,26 @@ impl Renewer<'_> {
                 renew_in_secs: u64::try_from(left - MARGIN_SECS).unwrap_or(0),
             });
         }
+        self.refresh_held(slot, read, &material)
+    }
+
+    /// Renews the session in `slot` whether or not it is due, as when a
+    /// resource server stopped taking its access token early, with the
+    /// credential's lock already held by whoever asks.
+    pub(crate) fn renew_now_held(&self, slot: &dyn MaterialSlot) -> Result<Freshness, Outcome> {
+        let read = slot.read()?;
+        let material = Material::decode(&read, self.policy).ok_or(Outcome::Refused)?;
+        self.refresh_held(slot, read, &material)
+    }
+
+    /// Spends the session's refresh token for a new session, marking the
+    /// material rotating first and committing what the server answers.
+    fn refresh_held(
+        &self,
+        slot: &dyn MaterialSlot,
+        read: lobby_contracts::SealedMaterial,
+        material: &Material,
+    ) -> Result<Freshness, Outcome> {
         // Nothing is spent yet: a server that cannot be read now is asked
         // again later.
         let endpoints = server::endpoints(self.outbound, &material.authserver).map_err(
@@ -213,7 +233,7 @@ impl Renewer<'_> {
                 return Err(Outcome::TemporarilyUnavailable);
             }
             return match response.status {
-                200 => self.commit(slot, read, &material, &response),
+                200 => self.commit(slot, read, material, &response),
                 429 => {
                     slot.unmark_rotating();
                     Err(Outcome::RateLimited)
