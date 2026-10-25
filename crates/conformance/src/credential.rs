@@ -23,7 +23,11 @@
 //!   secret, presents it once, commits new material on top of exactly what
 //!   it read, which clears the mark, and the next renewal presents the
 //!   rotated secret, never the spent one;
-//! * two renewals racing on one credential present one secret;
+//! * the mark is on the material while the secret is in flight, before the
+//!   provider has read it;
+//! * two renewals racing on one credential present one secret: the second
+//!   waits for the first, which holds the credential's lock while the
+//!   provider holds its request, and then finds the new material fresh;
 //! * a provider that asks for fewer requests leaves the material as it was
 //!   and the mark cleared, and so does one that refuses, which answers that
 //!   the credential needs signing in again;
@@ -35,11 +39,17 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use lobby_contracts::{
     AuthorizationAsk, Credential, CredentialAdapter, CredentialId, MaterialSlot, MaterialUpdate,
     Outcome, Revocation, SealedMaterial, SignInRequest, SignInReturn, SignInStart, SignedIn,
 };
+use lobby_testkit::listener::Listener;
+
+/// How long the second of two racing renewals is given to reach the
+/// provider, were nothing holding it back.
+const RACE_WINDOW: Duration = Duration::from_millis(400);
 
 /// What the credential suite needs from a provider's fake.
 pub trait CredentialFixture {
@@ -64,6 +74,8 @@ pub trait CredentialFixture {
 pub trait RenewalFixture: CredentialFixture {
     /// Makes what the provider issues from now on live one second.
     fn issue_briefly(&self);
+    /// Makes what the provider issues from now on live an hour.
+    fn issue_lastingly(&self);
     /// Every secret presented to the provider to renew, oldest first.
     fn renewals_presented(&self) -> Vec<String>;
     /// The secret a renewal of what the provider granted last would
@@ -75,6 +87,9 @@ pub trait RenewalFixture: CredentialFixture {
     fn refuse(&self);
     /// Every secret the provider was asked to revoke, oldest first.
     fn revocations(&self) -> Vec<String>;
+    /// The provider's listener and the route a renewal is sent to, so the
+    /// suite can hold a renewal in flight.
+    fn renewals(&self) -> (&Listener, &'static str);
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -366,39 +381,56 @@ pub fn renewal(adapter: &dyn CredentialAdapter, fixture: &dyn RenewalFixture) {
     );
     assert_eq!(slot.steps(), ["mark", "commit", "mark", "commit"]);
 
-    // Two renewals racing on one credential present one secret: the second
-    // waits for the first and finds new material it has not seen due.
+    // Two renewals racing on one credential present one secret. The first
+    // is held at the provider before the provider reads it: the mark is
+    // already on the material. The second, given time to reach the
+    // provider too, waits for the first instead, and once the first
+    // committed it finds the new material fresh.
     let racing = CountingSlot::holding(slot.material(), signed.permissions.clone());
     let before = fixture.renewals_presented().len();
+    fixture.issue_lastingly();
+    let (listener, route) = fixture.renewals();
+    let arrived = listener.count(route);
     std::thread::scope(|scope| {
+        let hold = listener.hold(route);
         let one = scope.spawn(|| adapter.renew(&racing));
+        listener.wait_for(route, arrived + 1);
+        assert!(
+            racing.marked(),
+            "the material is marked while its secret is in flight"
+        );
+        assert_eq!(
+            fixture.renewals_presented().len(),
+            before,
+            "the provider has not read the secret yet"
+        );
         let two = scope.spawn(|| adapter.renew(&racing));
+        std::thread::sleep(RACE_WINDOW);
+        drop(hold);
         let answers = [one.join().expect("one"), two.join().expect("two")];
-        assert!(answers.iter().any(Result::is_ok), "{answers:?}");
+        assert!(
+            answers.iter().all(Result::is_ok),
+            "the second renewal waited for the first: {answers:?}"
+        );
     });
-    let presented = fixture.renewals_presented();
-    assert!(
-        presented.len() <= before + 2,
-        "each renewal presents at most once"
-    );
-    let mut seen = presented[before..].to_vec();
-    seen.sort();
-    seen.dedup();
     assert_eq!(
-        seen.len(),
-        presented.len() - before,
-        "no secret was presented twice: {presented:?}"
+        fixture.renewals_presented().len(),
+        before + 1,
+        "one secret was presented for two renewals"
     );
+    assert_eq!(racing.steps(), ["mark", "commit"]);
+    fixture.issue_briefly();
 
     // A provider that asks for fewer requests spends nothing.
-    let limited = CountingSlot::holding(racing.material(), signed.permissions.clone());
+    let signed = signed_in(adapter, fixture, "renewal-state-limited");
+    let limited = CountingSlot::holding(Ok(signed.material.clone()), signed.permissions.clone());
     fixture.rate_limit(true);
     assert_eq!(
         adapter.renew(&limited).map(|_| ()),
         Err(Outcome::RateLimited)
     );
     assert_eq!(limited.steps(), ["mark", "unmark"]);
-    assert_eq!(limited.material(), racing.material(), "nothing changed");
+    assert_eq!(limited.material(), Ok(signed.material), "nothing changed");
     fixture.rate_limit(false);
     adapter.renew(&limited).expect("renewed once allowed");
 

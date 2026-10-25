@@ -5,6 +5,7 @@ use lobby_conformance::credential::{self, CredentialFixture, RenewalFixture};
 use lobby_contracts::{AuthorizationAsk, SignInStart};
 use lobby_credential_atproto::{Atproto, World};
 use lobby_testkit::atproto::AtprotoWorld;
+use lobby_testkit::listener::Listener;
 use lobby_testkit::percent_decode;
 
 const HOLDER: &str = "did:plc:conformanceconformanceco";
@@ -59,6 +60,10 @@ impl RenewalFixture for AtprotoFixture {
         self.world.access_lifetime(1);
     }
 
+    fn issue_lastingly(&self) {
+        self.world.access_lifetime(3600);
+    }
+
     fn renewals_presented(&self) -> Vec<String> {
         self.world.refresh_tokens_presented()
     }
@@ -77,6 +82,10 @@ impl RenewalFixture for AtprotoFixture {
 
     fn revocations(&self) -> Vec<String> {
         self.world.revocations()
+    }
+
+    fn renewals(&self) -> (&Listener, &'static str) {
+        (self.world.server(), "/oauth/token")
     }
 }
 

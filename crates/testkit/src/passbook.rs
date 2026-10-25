@@ -81,6 +81,8 @@ struct Book {
     /// Every renewal issued, oldest first.
     issued: Vec<String>,
     minted: Vec<Minted>,
+    /// Every renewal the authority read, oldest first.
+    presented: Vec<String>,
     revoked: Vec<String>,
     key_secs: Option<u64>,
     refusing: bool,
@@ -182,15 +184,10 @@ impl PassbookAuthority {
         locked(&self.book).keys.keys().cloned().collect()
     }
 
-    /// Every renewal presented to the authority, oldest first, whether or
-    /// not it renewed anything.
+    /// Every renewal the authority read, oldest first, whether or not it
+    /// renewed anything; a request still held on its way in is not one yet.
     pub fn renewals_presented(&self) -> Vec<String> {
-        self.listener
-            .requests()
-            .iter()
-            .filter(|request| request.route() == "/renew")
-            .filter_map(|request| request.json()["renewal"].as_str().map(str::to_owned))
-            .collect()
+        locked(&self.book).presented.clone()
     }
 
     /// The renewal issued last, while it is live.
@@ -276,6 +273,9 @@ fn answer(book: &Mutex<Book>, request: &Received) -> Reply {
             Reply::json(200, &book.issue(&holder))
         }
         ("POST", "/renew") => {
+            if let Some(renewal) = request.json()["renewal"].as_str() {
+                book.presented.push(renewal.to_owned());
+            }
             if book.limiting {
                 return Reply::json(429, &json!({ "error": "renew less often" }));
             }

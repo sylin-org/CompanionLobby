@@ -9,6 +9,7 @@ use lobby_contracts::{
 };
 use lobby_outbound::{Outbound, Request};
 use lobby_testkit::board::{Board, BoardServer};
+use lobby_testkit::listener::Listener;
 use lobby_testkit::passbook::{Passbook, PassbookAuthority};
 use lobby_testkit::percent_decode;
 
@@ -80,6 +81,10 @@ impl RenewalFixture for PassbookFixture {
         self.authority.key_lifetime(1);
     }
 
+    fn issue_lastingly(&self) {
+        self.authority.key_lifetime(3600);
+    }
+
     fn renewals_presented(&self) -> Vec<String> {
         self.authority.renewals_presented()
     }
@@ -98,6 +103,10 @@ impl RenewalFixture for PassbookFixture {
 
     fn revocations(&self) -> Vec<String> {
         self.authority.revoked()
+    }
+
+    fn renewals(&self) -> (&Listener, &'static str) {
+        (self.authority.listener(), "/renew")
     }
 }
 
