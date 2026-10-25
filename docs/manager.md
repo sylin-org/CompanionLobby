@@ -101,9 +101,7 @@ with it, and the page says so before it happens; afterwards it says whether
 the provider confirmed the revocation, offers none, or could not be
 reached, that it cannot tell for an account that waited for a sign-in,
 whose last key a renewal may already have replaced, and that the provider
-was not asked when the lobby held no key for the account. Revoking a
-connection says that the lobby deleted what the service issued for it, and
-that the service may still take that until it expires there.
+was not asked when the lobby held no key for the account.
 
 ## The rules the page keeps
 
