@@ -667,6 +667,15 @@ fn a_page_of_long_posts_in_another_script_fits_its_budget_and_says_what_it_left_
         structured["cursor"].is_null(),
         "no cursor that would skip the Posts left out"
     );
+    // A host that shows the structured answer alone hears the same: how
+    // many were left out, the limit that reads them, and a message.
+    assert_eq!(
+        structured["leftOut"],
+        json!(10 - posts.len()),
+        "{structured}"
+    );
+    assert_eq!(structured["readWithLimit"], json!(posts.len()));
+    assert!(structured["message"].is_string(), "{structured}");
     assert!(structured["readCursor"].is_string());
     install.stop();
 }

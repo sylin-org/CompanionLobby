@@ -126,6 +126,7 @@ impl Tangent {
             token: Some(proof),
             body: Some(&body),
             effect: lobby_contracts::Effect::Read,
+            within: None,
         };
         let response =
             wire::send(&self.outbound, address, &call).map_err(|failed| match failed {
@@ -197,6 +198,7 @@ impl ServiceAdapter for Tangent {
             token: None,
             body: None,
             effect: lobby_contracts::Effect::Read,
+            within: None,
         };
         let response =
             wire::send(&self.outbound, address, &call).map_err(|failed| match failed {

@@ -36,6 +36,7 @@ use lobby_contracts::{
 use lobby_outbound::Outbound;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::time::{Duration, Instant};
 
 use crate::issued::{Issued, parse_rfc3339};
 use crate::references::{self, Kind, cursor_shaped, encode, key_of, keys, under};
@@ -630,6 +631,17 @@ impl Through<'_> {
         body: Option<&Value>,
         effect: Effect,
     ) -> Result<(u16, Value), Failed> {
+        self.send_within(method, path, body, effect, None)
+    }
+
+    fn send_within(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        effect: Effect,
+        within: Option<Duration>,
+    ) -> Result<(u16, Value), Failed> {
         let response = wire::send(
             self.outbound,
             self.address,
@@ -639,6 +651,7 @@ impl Through<'_> {
                 token: Some(self.issued.token.expose()),
                 body,
                 effect,
+                within,
             },
         )?;
         let status = response.status;
@@ -647,6 +660,12 @@ impl Through<'_> {
 
     fn get(&self, path: &str) -> Result<Value, Failed> {
         self.send("GET", path, None, Effect::Read)
+            .map(|(_, body)| body)
+    }
+
+    /// [`Through::get`], ended at `deadline` however the Space answers.
+    fn get_within(&self, path: &str, deadline: Duration) -> Result<Value, Failed> {
+        self.send_within("GET", path, None, Effect::Read, Some(deadline))
             .map(|(_, body)| body)
     }
 
@@ -758,10 +777,15 @@ fn scope_argument<'a>(
     ))
 }
 
+/// How long the participant cards that name what is new may take in all.
+const NAMES_WITHIN: Duration = Duration::from_secs(3);
+
 /// The names the Space shows for `actors`, each read once from its
-/// participant card, for at most [`PAGE_MOST`] of them. An actor whose card
-/// cannot be read, or whose card names another participant, goes unnamed:
-/// a name is a courtesy, and its absence never fails the answer.
+/// participant card, for at most [`PAGE_MOST`] of them and within
+/// [`NAMES_WITHIN`] in all. An actor whose card cannot be read, or names
+/// another participant, goes unnamed, and once the time runs out the rest
+/// go unnamed too: a name is a courtesy, and its absence never fails or
+/// stalls the answer.
 fn names_of<'a>(
     through: &Through<'_>,
     actors: impl Iterator<Item = &'a str>,
@@ -772,19 +796,25 @@ fn names_of<'a>(
             distinct.push(actor);
         }
     }
-    distinct
-        .into_iter()
-        .take(PAGE_MOST)
-        .filter_map(|actor| {
-            let card = through
-                .get(&format!("{ROOT}/participants/{}", encode(actor)))
-                .ok()?;
-            let profile = &card["profile"];
-            let name = string(profile, "displayName").filter(|name| !name.trim().is_empty())?;
-            (string(profile, "participantRef") == Some(actor))
-                .then(|| (actor.to_owned(), name.to_owned()))
-        })
-        .collect()
+    let until = Instant::now() + NAMES_WITHIN;
+    let mut names = Vec::new();
+    for actor in distinct.into_iter().take(PAGE_MOST) {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let Ok(card) = through.get_within(&format!("{ROOT}/participants/{}", encode(actor)), left)
+        else {
+            continue;
+        };
+        let profile = &card["profile"];
+        if let Some(name) = string(profile, "displayName").filter(|name| !name.trim().is_empty())
+            && string(profile, "participantRef") == Some(actor)
+        {
+            names.push((actor.to_owned(), name.to_owned()));
+        }
+    }
+    names
 }
 
 /// The attention items of an answer, checked and said.
@@ -878,15 +908,22 @@ fn say_attention(
             ],
         ));
     }
-    if attention["more"] == true {
+    let more = attention["more"] == true;
+    if more {
         text.say("\nThere is more; tangent_updates reads further.");
     }
-    Ok(json!({
+    let mut said = json!({
         "newActivity": new,
         "waiting": waiting,
         "order": "newest first",
         "items": kept,
-    }))
+    });
+    // A host may show the structured answer alone, so it says there is
+    // more as the text does.
+    if more {
+        said["more"] = json!({ "readWith": "tangent_updates" });
+    }
+    Ok(said)
 }
 
 fn say_tangents(
@@ -986,11 +1023,12 @@ fn arrive(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolR
     if tangents.is_empty() {
         text.say(" none yet.");
     }
-    if body["continuation"].is_string() {
+    let more_tangents = body["continuation"].is_string();
+    if more_tangents {
         text.say("\nThere are more Tangents; tangent_tangents lists them.");
     }
     text.say("\n\nRead a Topic with tangent_read_topic, list a Tangent's Topics with tangent_topics, and post with tangent_post.");
-    Ok(text.done(json!({
+    let mut facts = json!({
         "you": with_quoted(
             json!({}),
             &[
@@ -1002,7 +1040,13 @@ fn arrive(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<ToolR
         "may": may,
         "attention": attention,
         "tangents": kept,
-    })))
+    });
+    // A host may show the structured answer alone, so it says there are
+    // more Tangents as the text does.
+    if more_tangents {
+        facts["moreTangents"] = json!({ "readWith": "tangent_tangents" });
+    }
+    Ok(text.done(facts))
 }
 
 fn listed(items: &[&str]) -> String {
@@ -1295,15 +1339,22 @@ fn read_topic(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<T
     // A host may show the structured answer alone, so it names how to
     // reply too.
     let reply_with = writable.then(|| json!({ "tool": "tangent_post", "topic": topic }));
+    let mut facts = json!({
+        "topic": topic,
+        "canPost": writable,
+        "posts": kept,
+        "cursor": older,
+        "readCursor": read_cursor,
+        "replyWith": reply_with,
+    });
+    // The oldest Posts left out are named in the structured answer too,
+    // with the limit that reads them, since its cursor is withheld.
+    if left > 0 {
+        facts["leftOut"] = json!(left);
+        facts["readWithLimit"] = json!(shown);
+    }
     Ok(text.done(with_quoted(
-        json!({
-            "topic": topic,
-            "canPost": writable,
-            "posts": kept,
-            "cursor": older,
-            "readCursor": read_cursor,
-            "replyWith": reply_with,
-        }),
+        facts,
         &[("title", title, NAME_SHOWN), ("about", brief, ABOUT_SHOWN)],
     )))
 }

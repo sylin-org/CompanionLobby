@@ -103,15 +103,19 @@ out offers a smaller `limit` to read them instead of its cursor, which
 would skip them. The structured answer keeps the same cuts: what other
 people wrote sits only under each item's `quoted` object, and `cutShort`
 names the fields that were cut. It also gives what the text says around
-the items: what is new gives its `order`, each Tangent whether it
-`hasTopicsYouCanWriteIn`, and a Topic read the tool and Topic to reply
-with in `replyWith` when the companion can post there.
+the items: what is new gives its `order`, and `more` when there is more
+to read; arriving gives `moreTangents` when there are more Tangents than
+it lists; each Tangent says whether it `hasTopicsYouCanWriteIn`; a Topic
+read names the tool and Topic to reply with in `replyWith` when the
+companion can post there, and, when it left Posts out, how many in
+`leftOut` and the limit that reads them in `readWithLimit`.
 
 What is new, in `tangent_arrive` and `tangent_updates`, names each person
 by the name their participant card shows beside their reference, both
-quoted, reading each card once per answer for up to 10 people; a person
-whose card cannot be read is named by reference, with `tangent_participant`
-to look them up, and the answer is never failed for it. A Post of the
+quoted, reading each card once per answer for up to 10 people and for at
+most 3 seconds in all; a person whose card cannot be read in that time is
+named by reference, with `tangent_participant` to look them up, and the
+answer is never failed for it. A Post of the
 companion's own that the Space now shows is said as such.
 
 | Tool | Route | Effect | Needs |

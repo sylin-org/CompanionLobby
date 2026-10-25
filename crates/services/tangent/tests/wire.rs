@@ -234,6 +234,122 @@ fn what_is_new_names_each_person_from_their_card_and_goes_on_without_one() {
 }
 
 #[test]
+fn a_card_that_never_answers_leaves_names_out_within_a_few_seconds() {
+    let listener = Listener::start(|request| {
+        let origin = format!("http://{}", request.header("host").unwrap_or_default());
+        let topic = format!("{origin}::home::welcome");
+        let item = |actor: &str, post: &str| {
+            json!({
+                "ref": format!("att_{post}"), "kind": "watched_activity", "actorRef": actor,
+                "scopeRef": topic, "sourceRef": format!("{topic}::{post}"),
+                "excerpt": "Hello there", "state": "new",
+            })
+        };
+        match request.route() {
+            "/api/v1/experience/updates" => Reply::json(
+                200,
+                &json!({
+                    "scopeRef": origin,
+                    "attention": {
+                        "waitingCount": { "value": 0 }, "newActivityCount": { "value": 2 },
+                        "items": [item("prt_2", "p1"), item("prt_3", "p2")],
+                        "more": false,
+                    },
+                    "activityCheckpoint": "cp_1",
+                }),
+            ),
+            route => {
+                let reference = route.rsplit('/').next().unwrap_or_default();
+                Reply::json(
+                    200,
+                    &json!({
+                        "profile": { "participantRef": reference, "displayName": "Someone" },
+                        "recentPosts": [], "morePosts": false,
+                    }),
+                )
+            }
+        }
+    });
+    let stalled = listener.hold_answers("/api/v1/experience/participants/prt_2");
+    let address =
+        Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
+    let began = std::time::Instant::now();
+    let said = perform(&address, "updates", json!({})).expect("what is new");
+    let took = began.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(6),
+        "the names gave up in time: {took:?}"
+    );
+    for actor in ["prt_2", "prt_3"] {
+        assert!(
+            said.contains(&format!(
+                "by participant \"{actor}\" (tangent_participant names them)"
+            )),
+            "{said}"
+        );
+    }
+    assert_eq!(
+        listener.count("/api/v1/experience/participants/prt_3"),
+        0,
+        "no card is read once the time ran out"
+    );
+    drop(stalled);
+}
+
+#[test]
+fn there_being_more_is_said_in_the_structured_answer_as_in_the_text() {
+    let listener = Listener::start(|request| {
+        let origin = format!("http://{}", request.header("host").unwrap_or_default());
+        let attention = json!({
+            "waitingCount": { "value": 0 }, "newActivityCount": { "value": 0 },
+            "items": [], "more": true,
+        });
+        match request.route() {
+            "/api/v1/experience/updates" => Reply::json(
+                200,
+                &json!({ "scopeRef": origin, "attention": attention, "activityCheckpoint": "cp_1" }),
+            ),
+            _ => Reply::json(
+                200,
+                &json!({
+                    "identity": { "participantRef": "prt_1", "displayName": "Ada" },
+                    "authority": { "canPost": true },
+                    "place": { "label": "Home" },
+                    "attention": attention,
+                    "tangents": [],
+                    "continuation": "next-1",
+                }),
+            ),
+        }
+    });
+    let address =
+        Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
+    let outbound = Outbound::new(AddressPolicy::LoopbackAllowed);
+    let issued = issued();
+    let through = Through {
+        outbound: &outbound,
+        address: &address,
+        issued: &issued,
+    };
+    let structured = |name: &str| {
+        let result = tools::perform(
+            tools::tool(name).expect("a tool"),
+            &arguments(json!({})),
+            &through,
+        )
+        .unwrap_or_else(|_| panic!("{name} answers"));
+        (result.rendered(), result.structured.expect("structured"))
+    };
+    let (said, updates) = structured("updates");
+    assert!(said.contains("There is more"), "{said}");
+    assert_eq!(updates["attention"]["more"]["readWith"], "tangent_updates");
+    let (said, arrived) = structured("arrive");
+    assert!(said.contains("There are more Tangents"), "{said}");
+    assert_eq!(arrived["moreTangents"]["readWith"], "tangent_tangents");
+    assert_eq!(arrived["attention"]["more"]["readWith"], "tangent_updates");
+}
+
+#[test]
 fn a_post_the_space_answers_201_is_a_success() {
     let listener = Listener::start(|request| {
         let origin = format!("http://{}", request.header("host").unwrap_or_default());

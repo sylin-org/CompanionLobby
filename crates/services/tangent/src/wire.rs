@@ -27,6 +27,7 @@
 use lobby_contracts::{Address, Effect, Explained, Outcome, Retry};
 use lobby_outbound::{Failure, Outbound, Request, Response};
 use serde_json::Value;
+use std::time::Duration;
 
 /// The longest answer read, in bytes: two Topic windows' worth.
 pub const READ_LIMIT: usize = 2 * 1024 * 1024;
@@ -134,11 +135,17 @@ pub struct Call<'a> {
     pub token: Option<&'a str>,
     pub body: Option<&'a Value>,
     pub effect: Effect,
+    /// The whole request's deadline, when it needs one shorter than the
+    /// outbound agent's.
+    pub within: Option<Duration>,
 }
 
 /// Sends `call` and answers the response, or what its loss means.
 pub fn send(outbound: &Outbound, address: &Address, call: &Call<'_>) -> Result<Response, Failed> {
     let mut request = Request::new(call.method, call.path).limit(READ_LIMIT);
+    if let Some(deadline) = call.within {
+        request = request.within(deadline);
+    }
     if let Some(token) = call.token {
         request = request.header("Authorization", format!("Bearer {token}"));
     }

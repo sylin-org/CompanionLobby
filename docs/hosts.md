@@ -30,7 +30,8 @@ walking it again.
 
 Claude Code 2.1.303 shows the mind a result's structured content, and not
 its text, whenever a result has one. So every structured answer carries
-the text itself as `message` whenever the two fit the budget together, and
+the text itself as `message` whenever the two fit the budget together, a
+short `message` saying only the facts are given when they do not, and
 the facts and next steps its text gives in any case: `reach` names each
 connection's service `title`, what it `can` do there and its tool to start
 with as `startWith`; a refusal gives its sentence beside its `outcome`;
