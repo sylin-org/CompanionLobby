@@ -1166,7 +1166,7 @@ function grantPanel(companion, service, primary) {
   }
   if (usable.length === 0) {
     const titles = service.accepts.map(kindTitle).join(" or ");
-    panel.append(element("p", "muted", service.title + " takes " + (titles ? "a " + titles + " account" : "an account this lobby cannot sign in") + ". Sign " + companion.displayName + " in above first."));
+    panel.append(element("p", "muted", service.title + " takes " + (titles ? titles + " accounts" : "accounts this lobby cannot sign in") + ". Sign " + companion.displayName + " in above first."));
     return panel;
   }
   const form = element("form", "fields");
