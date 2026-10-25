@@ -265,7 +265,11 @@ host configuration that names the old moniker reaches nothing afterwards.
 The daemon runs with the adapters its registry lists, and nothing else: a
 credential or connection whose adapter is not installed stays in the state
 file, unused, and reaches no catalog. `companion-lobby` runs with the
-product's adapters. The test build also makes `companion-lobby-synthetic`,
+product's adapters: one credential adapter and one service adapter that
+takes its accounts, each documented on a page of its own under
+`docs/credentials` and `docs/services`. A sign-in of a provider kind
+asks the provider for what every installed service that takes that kind
+declares it needs. The test build also makes `companion-lobby-synthetic`,
 the same command whose registry holds the test kit's passbook credential
 adapter and board service adapter, through the `synthetic` feature that only
 the daemon's own dev-dependency turns on, so the host is proven through
@@ -364,7 +368,27 @@ beside it with every test feature on, carries no passbook material tag.
   connections wait for a sign-in: calling it is an error result with the
   outcome `needs_sign_in` and a sentence saying the tool comes back once the
   sponsor signs the account in again. `reach` names the connections that
-  wait.
+  wait, and `at` naming one of them is told that one waits.
+- **Establishing again during a call.** A service adapter may find that the
+  service stopped taking what it issued for the connection, or is about to. It reads what was issued through the call's slot, and through the
+  slot's authority, a broker for the connection's credential, it
+  establishes the connection again with a fresh proof; the slot keeps what
+  the service issued anew only while the connection is still ready at the
+  revision the call pinned. A minting that renewed the credential, or found
+  it needs signing in again, settles that before the call does, so an
+  account the provider stopped proving leaves the credential needing a
+  sign-in and its connections waiting.
+- **Refusals in the service's words.** An adapter answers a definite refusal
+  as an explained outcome: the outcome, and a sentence its author wrote,
+  compiled into the adapter, stating the service's fact and the next step.
+  The mind reads that sentence, and the sponsor reads it when a grant is
+  refused; an adapter with nothing to add leaves the lobby's own sentence.
+  A write whose connection was revoked while it was on its way says that it
+  may have landed and to read the target first.
+- **What a connection offers.** A service adapter may say which of its
+  tools what the service issued for one connection allows; a companion's
+  catalog holds the tools any of its ready connections allows, and each
+  service is named by the title the registry gives it.
 
 ## The manager page and the live feed
 
@@ -600,14 +624,16 @@ sponsor's labels, never text a service sent. A tool that the companion
 cannot use is absent, not present and refusing. `reach` reports the
 companion, each service it reaches with the labels and addresses of its
 connections, and the live tool set, so a mind can rely on it even when its
-host ignores tool list changes. `initialize` declares `listChanged: true`,
+host ignores tool list changes. Its text says who the companion is, then for
+each service where it is, by the sponsor's names, the tool to start with,
+the service's first, and what else it reads and writes there. `initialize` declares `listChanged: true`,
 and the shim relays a `notifications/tools/list_changed` each time the
 companion's connections change.
 
 A tool call answers the tool's result, whose text marks third-party passages
 as quoted strings, or an error result (`isError: true`) whose text is the
-lobby's own sentence for the outcome and whose `structuredContent` is
-`{"outcome": "<code>"}`.
+adapter's or the lobby's own sentence for the outcome and whose
+`structuredContent` is `{"outcome": "<code>"}`.
 
 ## Stopping and rebuilding
 

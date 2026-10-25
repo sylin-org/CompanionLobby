@@ -14,8 +14,15 @@ your build.
 | Claude Desktop, Windows | Not yet: it needs its window | Installed as a packaged (MSIX) app. To be recorded with the configuration below. |
 | Codex, Windows | Not yet: not installed on the recording machine | To be recorded with the configuration below. |
 
-The Claude Code conversation is a test fixture (`hosts::claude_code` in the
-test kit) and is replayed against the shim on every test run.
+The Claude Code conversations are test fixtures in the test kit, replayed
+against the shim on every test run: `hosts::claude_code`, which calls
+`reach` once, and `hosts::claude_code_in_a_space`, a headless mind on the
+haiku model attached to a lobby whose only connection is `lobby-world`'s
+fake Space, asked to find out where it can go, read what is new and reply
+to the newest conversation in one sentence. It called `reach`, arrived, read
+the newest Post's Topic and replied with a request id of its own, with no
+refused call; the replay moves the Space's origin to the fresh world's and
+checks each answer's substance and that one reply landed.
 
 So far a mind is shown to list and call `reach` through the shim from Claude
 Code on Windows only. Claude Desktop and Codex stay open until each is

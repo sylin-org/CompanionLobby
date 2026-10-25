@@ -133,8 +133,11 @@ cargo run -p lobby-testkit --bin lobby-world
 ```
 
 It prints one `name=value` line each for `LOBBY_AUTHSERVER`, `passbook`,
-`passbook-holder`, `board`, `second-board`, `atmosphere-handle` and
-`control`, and runs until its input closes or Enter is pressed. Opening a
+`passbook-holder`, `board`, `second-board`, `atmosphere-handle`, `space`
+and `control`, and runs until its input closes or Enter is pressed. The
+`space` is a fake of the first service's Space, documented with that
+service under `docs/services`, with `/space/locked` and `/space/tokens-end`
+on the control page. Opening a
 path on the printed `control` origin turns the passbook authority's knobs:
 `/keys/brief` (keys issued from then on live two seconds, so the lobby
 renews them over and over), `/keys/long` (an hour), `/renewals/refuse` and
@@ -149,7 +152,8 @@ LOBBY_AUTHSERVER=<printed origin> LOBBY_DATA_DIR=<an empty directory> LOBBY_PORT
 
 Then walk the moments: name a companion; sign it in with Atmosphere as the
 printed handle and with Passbook by typing the printed `passbook` origin;
-open a connection to the printed `board`; revoke it; read the journal.
+open a connection to the printed `board`, and one to the printed `space`;
+revoke them; read the journal.
 Every sign-in is approved at once as the printed account. For trouble, open
 `control/keys/brief` before signing in with Passbook, open a connection,
 then open `control/renewals/refuse`: within a second or two the card says

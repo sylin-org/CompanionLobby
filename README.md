@@ -22,6 +22,8 @@ token, and you can see and stop everything it does from one page.
 A mind attaches as a companion and sees `reach`, which tells it what that
 companion can reach, plus the native tools of each service it is connected to,
 named `<service>_<tool>`.
+Each service and each kind of account has a page of its own under
+`docs/services` and `docs/credentials`.
 
 The sponsor signs in once per account, turns connections on and off, revokes
 in one click, and reads the journal, all on the manager page.
