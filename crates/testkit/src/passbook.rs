@@ -10,6 +10,14 @@
 //! audience and method, which a service checks with the authority. The
 //! authority never mints a plain stamp that any service would take.
 //!
+//! Every sign-in grants [`PERMISSION`], and a stamp allowing a method needs
+//! `stamp:<method>` granted besides (see [`stamp_permission`]). A sign-in
+//! asks the authority for what the lobby's services need, and the authority
+//! grants what it was asked unless a test has it withhold a permission. The
+//! adapter refuses a stamp for a method the material was not granted before
+//! anything reaches the authority, and the authority refuses one too; a
+//! renewal keeps what the key was granted and never widens it.
+//!
 //! A key is renewed before it expires: the adapter presents the renewal and
 //! gets a new key and a new renewal, the old ones ending at once, in the
 //! order the credential contract lays down, marking the material rotating
@@ -46,8 +54,18 @@ pub const TITLE: &str = "Passbook";
 /// passbook sign-in starts from the authority's address and nothing else.
 pub const HINT: &str = "The address of the Passbook authority to sign in at.";
 
-/// What every passbook sign-in grants: stamps for any audience.
+/// What every passbook sign-in grants: the holder's stamp, which names the
+/// holder and allows no method by itself.
 pub const PERMISSION: &str = "stamp";
+
+/// What a passbook account must be granted to be stamped for `method`.
+pub fn stamp_permission(method: &str) -> String {
+    format!("{PERMISSION}:{method}")
+}
+
+/// What the adapter says when an account was not granted a stamp a service
+/// asks for.
+pub const NOT_GRANTED: &str = "This Passbook account was signed in without leave to be stamped for this service. Revoking it on the manager page and signing it in again grants that; revoking it revokes its other connections too.";
 
 /// How long a key lives when a test says nothing else, in seconds.
 pub const KEY_SECS: u64 = 3600;
@@ -74,8 +92,13 @@ pub struct Minted {
 #[derive(Debug, Default)]
 struct Book {
     approving: Option<String>,
-    codes: HashMap<String, String>,
-    keys: HashMap<String, String>,
+    /// Each one-use code, with the holder it approves and what it grants.
+    codes: HashMap<String, (String, Vec<String>)>,
+    /// Each live key, with its holder and what it was granted.
+    keys: HashMap<String, (String, Vec<String>)>,
+    /// What each sign-in asked to be granted, oldest first.
+    asked: Vec<Vec<String>>,
+    withholding: Vec<String>,
     /// Each live renewal, with the holder and the key it renews.
     renewals: HashMap<String, (String, String)>,
     /// Every renewal issued, oldest first.
@@ -90,11 +113,13 @@ struct Book {
 }
 
 impl Book {
-    /// A fresh key and renewal for `holder`, as the authority answers them.
-    fn issue(&mut self, holder: &str) -> Value {
+    /// A fresh key and renewal for `holder`, granting `granted`, as the
+    /// authority answers them.
+    fn issue(&mut self, holder: &str, granted: Vec<String>) -> Value {
         let key = unique_token("key");
         let renewal = unique_token("renewal");
-        self.keys.insert(key.clone(), holder.to_owned());
+        self.keys
+            .insert(key.clone(), (holder.to_owned(), granted.clone()));
         self.renewals
             .insert(renewal.clone(), (holder.to_owned(), key.clone()));
         self.issued.push(renewal.clone());
@@ -103,6 +128,7 @@ impl Book {
             "key": key,
             "renewal": renewal,
             "expiresIn": self.key_secs.unwrap_or(KEY_SECS),
+            "granted": granted,
         })
     }
 }
@@ -161,6 +187,16 @@ impl PassbookAuthority {
     /// Answers every renewal with 429 while `limiting`, renewing nothing.
     pub fn rate_limit_renewals(&self, limiting: bool) {
         locked(&self.book).limiting = limiting;
+    }
+
+    /// Grants no sign-in `permission` from now on, whatever it asks.
+    pub fn withhold(&self, permission: &str) {
+        locked(&self.book).withholding.push(permission.to_owned());
+    }
+
+    /// What each sign-in asked to be granted, oldest first.
+    pub fn asked(&self) -> Vec<Vec<String>> {
+        locked(&self.book).asked.clone()
     }
 
     /// Every stamp minted so far, oldest first.
@@ -254,8 +290,22 @@ fn answer(book: &Mutex<Book>, request: &Received) -> Reply {
             let Some(holder) = book.approving.clone() else {
                 return Reply::json(403, &json!({ "error": "no holder approves" }));
             };
+            let asked: Vec<String> = request
+                .query("permissions")
+                .unwrap_or_default()
+                .split(' ')
+                .filter(|permission| !permission.is_empty())
+                .map(str::to_owned)
+                .collect();
+            let mut granted = vec![PERMISSION.to_owned()];
+            for permission in &asked {
+                if !book.withholding.contains(permission) && !granted.contains(permission) {
+                    granted.push(permission.clone());
+                }
+            }
+            book.asked.push(asked);
             let code = unique_token("code");
-            book.codes.insert(code.clone(), holder);
+            book.codes.insert(code.clone(), (holder, granted));
             Reply::redirect(&format!(
                 "{return_to}?state={}&code={}",
                 percent_encode(&state),
@@ -264,13 +314,13 @@ fn answer(book: &Mutex<Book>, request: &Received) -> Reply {
         }
         ("POST", "/exchange") => {
             let body = request.json();
-            let Some(holder) = body["code"]
+            let Some((holder, granted)) = body["code"]
                 .as_str()
                 .and_then(|code| book.codes.remove(code))
             else {
                 return Reply::json(400, &json!({ "error": "unknown or used code" }));
             };
-            Reply::json(200, &book.issue(&holder))
+            Reply::json(200, &book.issue(&holder, granted))
         }
         ("POST", "/renew") => {
             if let Some(renewal) = request.json()["renewal"].as_str() {
@@ -289,8 +339,12 @@ fn answer(book: &Mutex<Book>, request: &Received) -> Reply {
             else {
                 return Reply::json(400, &json!({ "error": "unknown or used renewal" }));
             };
-            book.keys.remove(&key);
-            Reply::json(200, &book.issue(&holder))
+            let granted = book
+                .keys
+                .remove(&key)
+                .map(|(_, granted)| granted)
+                .unwrap_or_default();
+            Reply::json(200, &book.issue(&holder, granted))
         }
         ("POST", "/revoke") => {
             let body = request.json();
@@ -303,7 +357,7 @@ fn answer(book: &Mutex<Book>, request: &Received) -> Reply {
         }
         ("POST", "/stamp") => {
             let body = request.json();
-            let Some(holder) = body["key"]
+            let Some((holder, granted)) = body["key"]
                 .as_str()
                 .and_then(|key| book.keys.get(key))
                 .cloned()
@@ -318,6 +372,9 @@ fn answer(book: &Mutex<Book>, request: &Received) -> Reply {
                     &json!({ "error": "a stamp names an audience and a method" }),
                 );
             };
+            if !granted.contains(&stamp_permission(method)) {
+                return Reply::json(403, &json!({ "error": "not granted" }));
+            }
             let minted = Minted {
                 stamp: unique_token("stamp"),
                 holder,
@@ -383,7 +440,8 @@ impl Passbook {
             200 if response.is_json() => {
                 serde_json::from_slice(&response.body).map_err(|_| Outcome::TemporarilyUnavailable)
             }
-            401 | 403 => Err(Outcome::NeedsSignIn),
+            401 => Err(Outcome::NeedsSignIn),
+            403 => Err(Outcome::NeedsPermission),
             429 => Err(Outcome::RateLimited),
             500..=599 | 200 => Err(Outcome::TemporarilyUnavailable),
             _ => Err(Outcome::Refused),
@@ -434,8 +492,8 @@ impl Passbook {
         let update = MaterialUpdate::new(
             read,
             renewed.encode(),
-            vec![PERMISSION.to_owned()],
-            &[PERMISSION.to_owned()],
+            renewed.granted.clone(),
+            &material.granted,
         )
         .ok_or(Outcome::Unknown)?;
         slot.commit(update).map_err(|_| Outcome::Unknown)?;
@@ -446,12 +504,26 @@ impl Passbook {
 }
 
 /// Passbook material: the authority that issued the key, the key, its
-/// renewal and when the key expires.
+/// renewal, when the key expires and what it was granted.
 struct Material {
     authority: Address,
     key: Secret,
     renewal: Secret,
     expires_at: i64,
+    granted: Vec<String>,
+}
+
+/// What an answer or material says was granted, when it follows the
+/// credential's rule and holds the holder's stamp.
+fn granted_in(value: &Value) -> Option<Vec<String>> {
+    let granted = value
+        .as_array()?
+        .iter()
+        .map(|permission| permission.as_str().map(str::to_owned))
+        .collect::<Option<Vec<String>>>()?;
+    (lobby_contracts::Credential::permissions_are_valid(&granted)
+        && granted.iter().any(|permission| permission == PERMISSION))
+    .then_some(granted)
 }
 
 impl Material {
@@ -469,6 +541,7 @@ impl Material {
             key: token("key")?,
             renewal: token("renewal")?,
             expires_at: now_secs().saturating_add(i64::try_from(lives).ok()?),
+            granted: granted_in(&answer["granted"])?,
         })
     }
 
@@ -479,6 +552,7 @@ impl Material {
             "key": self.key.expose(),
             "renewal": self.renewal.expose(),
             "expiresAt": self.expires_at,
+            "granted": self.granted,
         });
         SealedMaterial::new(body.to_string().into_bytes())
     }
@@ -502,6 +576,7 @@ impl Material {
             key: secret("key")?,
             renewal: secret("renewal")?,
             expires_at: body["expiresAt"].as_i64()?,
+            granted: granted_in(&body["granted"])?,
         })
     }
 }
@@ -519,9 +594,10 @@ impl CredentialAdapter for Passbook {
                 .ok_or(Outcome::InvalidInput)?,
         };
         let url = authority.url(&format!(
-            "/approve?state={}&return_to={}",
+            "/approve?state={}&return_to={}&permissions={}",
             percent_encode(&request.state),
-            percent_encode(&request.return_to)
+            percent_encode(&request.return_to),
+            percent_encode(&request.permissions.join(" "))
         ));
         locked(&self.parked).insert(request.state.clone(), authority);
         Ok(SignInStart { url })
@@ -554,7 +630,7 @@ impl CredentialAdapter for Passbook {
         Ok(SignedIn {
             account,
             label,
-            permissions: vec![PERMISSION.to_owned()],
+            permissions: material.granted.clone(),
             material: material.encode(),
         })
     }
@@ -573,6 +649,12 @@ impl CredentialAdapter for Passbook {
         } = ask;
         let lock = self.lock_of(slot.credential());
         let _held = locked(&lock);
+        // A stamp the account was not granted is refused before anything
+        // reaches the authority; a renewal never widens what it holds.
+        let held = Material::decode(&slot.read()?).ok_or(Outcome::NeedsSignIn)?;
+        if !held.granted.contains(&stamp_permission(method)) {
+            return Err(Explained::new(Outcome::NeedsPermission, NOT_GRANTED));
+        }
         // A key that is due is renewed before it mints anything.
         self.renew_held(slot)?;
         let material = Material::decode(&slot.read()?).ok_or(Outcome::NeedsSignIn)?;

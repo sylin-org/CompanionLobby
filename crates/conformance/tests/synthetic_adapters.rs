@@ -5,12 +5,13 @@ use lobby_conformance::credential::{self, CountingSlot, CredentialFixture, Renew
 use lobby_conformance::service::{self, ServiceFixture};
 use lobby_contracts::{
     Address, AddressPolicy, Authority, Authorization, AuthorizationAsk, CredentialAdapter,
-    Explained, SealedMaterial, SignInRequest, SignInReturn, SignInStart, ToolArguments, ToolName,
+    Explained, Outcome, SealedMaterial, ServiceAdapter, SignInRequest, SignInReturn, SignInStart,
+    ToolArguments, ToolName,
 };
 use lobby_outbound::{Outbound, Request};
-use lobby_testkit::board::{Board, BoardServer};
+use lobby_testkit::board::{ADMIT_METHOD, Board, BoardServer};
 use lobby_testkit::listener::Listener;
-use lobby_testkit::passbook::{Passbook, PassbookAuthority};
+use lobby_testkit::passbook::{self, Passbook, PassbookAuthority, stamp_permission};
 use lobby_testkit::percent_decode;
 
 /// Follows the browser from `url` to wherever the authority sends it back,
@@ -73,6 +74,10 @@ impl CredentialFixture for PassbookFixture {
 
     fn unsupported_asks(&self) -> Vec<AuthorizationAsk> {
         Vec::new()
+    }
+
+    fn permissions(&self) -> Vec<String> {
+        vec![stamp_permission("conformance.method")]
     }
 }
 
@@ -143,7 +148,7 @@ fn two_authorizations_racing_a_due_key_renew_it_once() {
         state: "racing-state".to_owned(),
         return_to: "http://127.0.0.1:1/signin/passbook/return".to_owned(),
         again: None,
-        permissions: Vec::new(),
+        permissions: vec![stamp_permission("racing.method")],
     };
     let start = adapter.begin_sign_in(&request).expect("start");
     let signed = adapter
@@ -209,7 +214,7 @@ impl BoardFixture {
             state: "board-state".to_owned(),
             return_to: "http://127.0.0.1:1/signin/passbook/return".to_owned(),
             again: None,
-            permissions: Vec::new(),
+            permissions: Board::new().describe().permissions,
         };
         let start = adapter.begin_sign_in(&request).expect("start");
         let returned = SignInReturn {
@@ -269,4 +274,57 @@ impl ServiceFixture for BoardFixture {
 #[test]
 fn the_board_holds_to_the_service_contract() {
     service::run(&Board::new(), &BoardFixture::start());
+}
+
+#[test]
+fn the_board_needs_a_stamp_the_passbook_is_asked_for_and_refuses_without_it() {
+    let board = Board::new().describe();
+    assert_eq!(board.permissions, [stamp_permission(ADMIT_METHOD)]);
+    let authority = PassbookAuthority::start();
+    authority.sign_in_as("withheld-member");
+    authority.withhold(&stamp_permission(ADMIT_METHOD));
+    let adapter = Passbook::new();
+    let request = SignInRequest {
+        hint: authority.origin(),
+        state: "withheld-state".to_owned(),
+        return_to: "http://127.0.0.1:1/signin/passbook/return".to_owned(),
+        again: None,
+        permissions: board.permissions.clone(),
+    };
+    let start = adapter.begin_sign_in(&request).expect("start");
+    let signed = adapter
+        .complete_sign_in(
+            &request,
+            &SignInReturn {
+                query: browse(&start.url),
+            },
+        )
+        .expect("signed in");
+    assert_eq!(
+        authority.asked(),
+        std::slice::from_ref(&board.permissions),
+        "the sign-in asked for what the board needs"
+    );
+    assert_eq!(signed.permissions, [passbook::PERMISSION]);
+    let before = authority.listener().requests().len();
+    let refused = adapter
+        .authorize(
+            &CountingSlot::holding(Ok(signed.material), signed.permissions),
+            &AuthorizationAsk::ServiceProof {
+                audience: "a-board".to_owned(),
+                method: ADMIT_METHOD.to_owned(),
+                lifetime_secs: 60,
+            },
+        )
+        .expect_err("not granted");
+    assert_eq!(
+        refused,
+        Explained::new(Outcome::NeedsPermission, passbook::NOT_GRANTED)
+    );
+    assert_eq!(
+        authority.listener().requests().len(),
+        before,
+        "refused before anything reached the authority"
+    );
+    assert!(authority.minted().is_empty());
 }

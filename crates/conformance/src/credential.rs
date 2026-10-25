@@ -4,8 +4,9 @@
 //! process, through every promise of the contract:
 //!
 //! * a sign-in records the account the provider authenticated, whatever the
-//!   sponsor typed, with permissions that follow the credential's rule, and
-//!   a return carrying another `state` is refused;
+//!   sponsor typed, with permissions that follow the credential's rule and
+//!   hold what the lobby's services need, which it asked the provider for,
+//!   and a return carrying another `state` is refused;
 //! * every ask the adapter supports is answered from the material in the
 //!   slot, and the authorization never prints its token;
 //! * an ask the adapter does not support is refused as unsupported before
@@ -277,6 +278,13 @@ pub fn run(adapter: &dyn CredentialAdapter, fixture: &dyn CredentialFixture) {
         "{:?} follow the rule",
         signed.permissions
     );
+    for needed in fixture.permissions() {
+        assert!(
+            signed.permissions.contains(&needed),
+            "the sign-in asked for {needed}, which the lobby's services need, and holds it: {:?}",
+            signed.permissions
+        );
+    }
 
     // Every supported ask is answered from the slot's material.
     for ask in fixture.supported_asks() {

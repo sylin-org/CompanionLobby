@@ -5,9 +5,11 @@
 //! the newest posts and posts one. Each board names on its about page the
 //! audience a stamp it takes must be for.
 //!
-//! The adapter speaks the board in the board's own words: it establishes a
-//! connection by asking the lobby's authority for the stamp the board wants
-//! and trading it for a badge, which is all the connection keeps, and it
+//! The adapter speaks the board in the board's own words: it declares that
+//! a passbook account must be granted stamps for [`ADMIT_METHOD`], which the
+//! lobby asks for whenever it signs one in, establishes a connection by
+//! asking the lobby's authority for the stamp the board wants and trading
+//! it for a badge, which is all the connection keeps, and it
 //! offers two tools, `read` and `post`. Posts are written by other members,
 //! so their text and authors reach a mind only as quoted passages. A board
 //! that stops taking a badge is asked to admit the member again, once, with
@@ -27,7 +29,7 @@ use lobby_outbound::{Failure, Outbound, Request};
 use serde_json::{Value, json};
 
 use crate::listener::{Listener, Received, Reply};
-use crate::passbook::{KIND, PassbookAuthority};
+use crate::passbook::{KIND, PassbookAuthority, stamp_permission};
 use crate::unique_token;
 
 /// The board's service name.
@@ -403,7 +405,7 @@ impl ServiceAdapter for Board {
         ServiceDescription {
             accepts: vec![ProviderKind::new(KIND).unwrap_or_else(|| unreachable!("a kind"))],
             addresses: AddressPolicy::LoopbackAllowed,
-            permissions: Vec::new(),
+            permissions: vec![stamp_permission(ADMIT_METHOD)],
         }
     }
 
