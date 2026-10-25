@@ -107,7 +107,7 @@ use crate::calls::{self, Ticket};
 use crate::journal::{Journal, Note, Page, PageProblem};
 use crate::keyring::{self, AttachmentToken};
 use crate::portrait::{self, Portrait};
-use crate::projections::{self, Feed, Reached, Subscription};
+use crate::projections::{self, Feed, Reached, ReachedAt, Subscription};
 use crate::registry::Registry;
 use crate::store::{CompanionRecord, State, Store};
 use crate::trace;
@@ -2006,29 +2006,36 @@ impl Lobby {
         // Catalogs are the adapters' fixed declarations, and what each
         // connection's issued data allows is read from the keyring, both
         // with nothing held. A service's tools are those any of its ready
-        // connections allows, in catalog order.
+        // connections allows, in catalog order; each connection says which
+        // of them it allows.
         by_service
             .into_iter()
             .filter_map(|(service, connections)| {
                 let adapter = self.registry.service(&service)?;
-                let allowed: Vec<lobby_contracts::ToolName> = connections
-                    .iter()
-                    .filter_map(|(_, _, id)| keyring::read_issued(&self.dir, *id).ok())
-                    .flat_map(|issued| adapter.available(&issued))
+                let connections: Vec<ReachedAt> = connections
+                    .into_iter()
+                    .map(|(label, address, id)| ReachedAt {
+                        label,
+                        address,
+                        allows: keyring::read_issued(&self.dir, id)
+                            .map(|issued| adapter.available(&issued))
+                            .unwrap_or_default(),
+                    })
                     .collect();
                 let tools = adapter
                     .catalog()
                     .into_iter()
-                    .filter(|tool| allowed.contains(&tool.name))
+                    .filter(|tool| {
+                        connections
+                            .iter()
+                            .any(|connection| connection.allows.contains(&tool.name))
+                    })
                     .collect();
                 Some(Reached {
                     title: self.registry.service_title(&service),
                     tools,
                     service,
-                    connections: connections
-                        .into_iter()
-                        .map(|(label, address, _)| (label, address))
-                        .collect(),
+                    connections,
                 })
             })
             .collect()

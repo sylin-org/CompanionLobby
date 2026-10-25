@@ -182,9 +182,18 @@ fn a_companion_connects_through_the_proof_exchange_reads_what_is_new_and_replies
     );
     assert_eq!(read["result"]["isError"], false, "{read}");
     assert!(
-        said(&read).contains("You can post here."),
+        said(&read).contains("\"Say hello.\"; 1 Post, oldest first. You can post here."),
         "{}",
         said(&read)
+    );
+    assert_eq!(
+        read["result"]["structuredContent"]["replyWith"],
+        json!({ "tool": "tangent_post", "topic": world.welcome }),
+        "the structured answer names how to reply, as the text does"
+    );
+    assert_eq!(
+        read["result"]["structuredContent"]["message"], read["result"]["content"][0]["text"],
+        "and holds the text for a host that shows it alone"
     );
 
     // Replying with a request id; the same request again is the same Post.
@@ -675,8 +684,14 @@ fn the_recorded_claude_code_mind_in_a_space_replays_through_the_shim() {
             );
             if name == "reach" {
                 // The companion's id is this install's own.
-                for field in ["tools", "connections", "waiting"] {
+                for field in ["tools", "connections", "waiting", "message"] {
                     assert_eq!(got[field], want[field], "reach's {field}");
+                }
+                for field in ["displayName", "moniker"] {
+                    assert_eq!(
+                        got["companion"][field], want["companion"][field],
+                        "reach's companion {field}"
+                    );
                 }
             } else {
                 assert_eq!(got, want, "{name} answers as it did when it was recorded");

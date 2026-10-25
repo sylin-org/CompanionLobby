@@ -881,7 +881,12 @@ fn say_attention(
     if attention["more"] == true {
         text.say("\nThere is more; tangent_updates reads further.");
     }
-    Ok(json!({ "newActivity": new, "waiting": waiting, "items": kept }))
+    Ok(json!({
+        "newActivity": new,
+        "waiting": waiting,
+        "order": "newest first",
+        "items": kept,
+    }))
 }
 
 fn say_tangents(
@@ -900,6 +905,7 @@ fn say_tangents(
             return Err(untrusted(effect));
         }
         let member = string(tangent, "membership") == Some("member");
+        let writable = tangent["hasWritableTopics"] == true;
         let (name, description) = (string(tangent, "name"), string(tangent, "description"));
         text.say(format!("\n- Tangent {}: ", reference.unwrap_or_default()))
             .quote_cut(name.unwrap_or_default(), NAME_SHOWN)
@@ -908,14 +914,18 @@ fn say_tangents(
             .say(format!(
                 "; you are {}{}.",
                 if member { "a member" } else { "not a member" },
-                if tangent["hasWritableTopics"] == true {
+                if writable {
                     ", and it has Topics you can write in"
                 } else {
                     ""
                 }
             ));
         kept.push(with_quoted(
-            json!({ "tangent": reference, "member": member }),
+            json!({
+                "tangent": reference,
+                "member": member,
+                "hasTopicsYouCanWriteIn": writable,
+            }),
             &[
                 ("name", name, NAME_SHOWN),
                 ("description", description, ABOUT_SHOWN),
@@ -1224,7 +1234,7 @@ fn read_topic(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<T
         .say(", about ")
         .quote_cut(brief.unwrap_or_default(), ABOUT_SHOWN)
         .say(format!(
-            ". {}, oldest first. {}",
+            "; {}, oldest first. {}",
             plural(shown, "Post", "Posts"),
             if writable {
                 "You can post here."
@@ -1282,6 +1292,9 @@ fn read_topic(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<T
             "\nTo reply, call tangent_post with topic {topic} and reply_to the reference of the Post you answer."
         ));
     }
+    // A host may show the structured answer alone, so it names how to
+    // reply too.
+    let reply_with = writable.then(|| json!({ "tool": "tangent_post", "topic": topic }));
     Ok(text.done(with_quoted(
         json!({
             "topic": topic,
@@ -1289,6 +1302,7 @@ fn read_topic(through: &Through<'_>, arguments: &Map<String, Value>) -> Result<T
             "posts": kept,
             "cursor": older,
             "readCursor": read_cursor,
+            "replyWith": reply_with,
         }),
         &[("title", title, NAME_SHOWN), ("about", brief, ABOUT_SHOWN)],
     )))

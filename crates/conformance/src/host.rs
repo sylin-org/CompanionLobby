@@ -454,6 +454,7 @@ pub fn two_boards_are_reached_through_one_set_of_tools(exe: &Path) {
     let front = BoardServer::start(&authority);
     let back = BoardServer::start(&authority);
     back.add_post("moss", "The back board's first post.");
+    back.admit_to_read_only();
     let install = Install::new(exe, "two-boards");
     install.open();
     let ada = install.create("ada");
@@ -499,6 +500,8 @@ pub fn two_boards_are_reached_through_one_set_of_tools(exe: &Path) {
         assert!(!listing.contains(word), "{word} in {listing}");
     }
 
+    // Each board says what the companion can do there: the back board
+    // admitted it to read only.
     let reach = call(&mut peer, 2, "reach", json!({}));
     let reached: Vec<Value> = reach["result"]["structuredContent"]["connections"]
         .as_array()
@@ -507,9 +510,37 @@ pub fn two_boards_are_reached_through_one_set_of_tools(exe: &Path) {
     assert_eq!(
         reached
             .iter()
-            .map(|connection| connection["at"].as_str().expect("at"))
+            .map(|connection| (
+                connection["at"].as_str().expect("at"),
+                connection["can"].clone()
+            ))
             .collect::<Vec<_>>(),
-        ["front", "back"]
+        [
+            ("front", json!(["read", "write"])),
+            ("back", json!(["read"]))
+        ]
+    );
+    let woke = reach["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text");
+    assert!(
+        woke.contains(", where it can read and write, and back (")
+            && woke.contains("), where it can read: start with board_read."),
+        "{woke}"
+    );
+    let refused = call(
+        &mut peer,
+        20,
+        "board_post",
+        json!({ "at": "back", "text": "Hello, back." }),
+    );
+    assert_eq!(
+        refused["result"]["structuredContent"]["outcome"], "needs_permission",
+        "{refused}"
+    );
+    assert_eq!(
+        refused["result"]["structuredContent"]["message"],
+        lobby_testkit::board::READ_ONLY
     );
 
     let missing = call(&mut peer, 3, "board_read", json!({}));
@@ -523,7 +554,11 @@ pub fn two_boards_are_reached_through_one_set_of_tools(exe: &Path) {
         0,
         "only the board named by at"
     );
-    assert_eq!(back.listener().count("/posts"), 1);
+    assert_eq!(
+        back.listener().count("/posts"),
+        1,
+        "the refused post never reached the back board"
+    );
 
     for board in [&front, &back] {
         let presented = board.presented();

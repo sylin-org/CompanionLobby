@@ -97,12 +97,12 @@ pub fn claude_code() -> Recording {
 /// one friendly sentence.
 ///
 /// The mind calls `reach`, asks the Space what is new and learns who wrote
-/// each Post by name, reads the Topic of the newest Post, lists the
-/// Tangent's Topics to see where it can post, replies to Bea with a request
-/// id of its own choosing and marks the Topic read, with no refused call
-/// and no guessed name or argument. Its host showed it each result's
-/// structured content. The Space's origin in the frames is the one that
-/// walk ran against; a replay puts its own in its place.
+/// each Post by name, and replies to Bea's newest Post with a request id
+/// of its own choosing, with no refused call and every reference copied
+/// from an earlier answer. Its host showed it each result's structured
+/// content, which held the answer's text as `message`. The Space's origin
+/// in the frames is the one that walk ran against; a replay puts its own
+/// in its place.
 pub fn claude_code_in_a_space() -> Recording {
     parse(
         "claude-code 2.1.303",
@@ -150,17 +150,7 @@ mod tests {
             .filter(|frame| frame["method"] == "tools/call")
             .filter_map(|frame| frame["params"]["name"].as_str())
             .collect();
-        assert_eq!(
-            calls,
-            [
-                "reach",
-                "tangent_updates",
-                "tangent_read_topic",
-                "tangent_topics",
-                "tangent_post",
-                "tangent_mark_read"
-            ]
-        );
+        assert_eq!(calls, ["reach", "tangent_updates", "tangent_post"]);
         for frame in recording
             .sent()
             .filter(|frame| frame["method"] == "tools/call")
@@ -174,6 +164,34 @@ mod tests {
             .expect("the reply");
         let arguments = &post["params"]["arguments"];
         assert!(arguments["reply_to"].is_string() && arguments["request_id"].is_string());
+
+        // Every reference the mind passed was copied from an answer the
+        // lobby gave before it, never derived or guessed.
+        let mut answered = String::new();
+        for frame in &recording.frames {
+            match frame.direction {
+                Direction::Lobby => answered.push_str(&frame.frame.to_string()),
+                Direction::Host if frame.frame["method"] == "tools/call" => {
+                    let arguments = &frame.frame["params"]["arguments"];
+                    for name in [
+                        "topic",
+                        "reply_to",
+                        "tangent",
+                        "read_cursor",
+                        "scope",
+                        "around",
+                    ] {
+                        if let Some(reference) = arguments[name].as_str() {
+                            assert!(
+                                answered.contains(&Value::String(reference.to_owned()).to_string()),
+                                "{name} {reference} was given before the mind used it"
+                            );
+                        }
+                    }
+                }
+                Direction::Host => {}
+            }
+        }
         let updates = recording
             .sent()
             .find(|frame| frame["params"]["name"] == "tangent_updates")
@@ -184,5 +202,16 @@ mod tests {
             "Bea",
             "the mind read who wrote the newest Post by name"
         );
+        for frame in recording
+            .sent()
+            .filter(|frame| frame["method"] == "tools/call")
+        {
+            let answer = recording.answer_to(&frame["id"]).expect("an answer");
+            assert_eq!(
+                answer["result"]["structuredContent"]["message"],
+                answer["result"]["content"][0]["text"],
+                "the structured form the host showed held the text too"
+            );
+        }
     }
 }

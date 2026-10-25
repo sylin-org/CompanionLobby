@@ -123,12 +123,19 @@ impl ToolResult {
     /// bytes. A text that does not fit is cut at a character boundary, a quote
     /// the cut falls inside is still closed, and [`Self::CUT_SHORT`] ends it.
     pub fn rendered(&self) -> String {
+        self.rendered_within(Self::RENDERED_BUDGET)
+    }
+
+    /// The text as [`Self::rendered`] gives it, within `budget` bytes
+    /// instead, which leaves room for a sentence added after it; `budget`
+    /// is never shorter than [`Self::CUT_SHORT`].
+    pub fn rendered_within(&self, budget: usize) -> String {
         let whole: String = self.text.iter().map(render).collect();
-        if whole.len() <= Self::RENDERED_BUDGET {
+        if whole.len() <= budget {
             return whole;
         }
-        let limit = Self::RENDERED_BUDGET - Self::CUT_SHORT.len();
-        let mut out = String::with_capacity(Self::RENDERED_BUDGET);
+        let limit = budget.saturating_sub(Self::CUT_SHORT.len());
+        let mut out = String::with_capacity(budget);
         for passage in &self.text {
             let piece = render(passage);
             if out.len() + piece.len() <= limit {
@@ -295,6 +302,18 @@ mod tests {
         let kept: String =
             serde_json::from_str(kept_part(&rendered, "Title: ")).expect("a closed JSON string");
         assert!(!kept.is_empty() && quoted.starts_with(&kept));
+    }
+
+    #[test]
+    fn a_smaller_budget_leaves_room_after_the_text() {
+        let result = ToolResult {
+            text: vec![Passage::Authored("a".repeat(ToolResult::RENDERED_BUDGET))],
+            structured: None,
+        };
+        let room = 200;
+        let rendered = result.rendered_within(ToolResult::RENDERED_BUDGET - room);
+        assert!(rendered.len() <= ToolResult::RENDERED_BUDGET - room);
+        assert!(rendered.ends_with(ToolResult::CUT_SHORT));
     }
 
     #[test]

@@ -52,8 +52,42 @@ pub struct Reached {
     pub title: String,
     /// Its tools, as its adapter declares them, those its connections allow.
     pub tools: Vec<ToolDescriptor>,
-    /// Each ready connection's label and address, oldest first.
-    pub connections: Vec<(Label, Address)>,
+    /// Each ready connection, oldest first.
+    pub connections: Vec<ReachedAt>,
+}
+
+/// One ready connection a companion reaches a service through.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReachedAt {
+    /// The sponsor's label for it.
+    pub label: Label,
+    /// Where the service is.
+    pub address: Address,
+    /// The tools that what the service issued for it allows.
+    pub allows: Vec<ToolName>,
+}
+
+impl ReachedAt {
+    /// The tools of `place` this connection allows, in catalog order.
+    fn tools<'a>(&'a self, place: &'a Reached) -> impl Iterator<Item = &'a ToolDescriptor> {
+        place
+            .tools
+            .iter()
+            .filter(|tool| self.allows.contains(&tool.name))
+    }
+
+    /// What the companion can do through this connection: `read`, `write`,
+    /// both, or neither.
+    fn can(&self, place: &Reached) -> Vec<&'static str> {
+        let mut can = Vec::new();
+        if self.tools(place).any(ToolDescriptor::read_only_hint) {
+            can.push("read");
+        }
+        if self.tools(place).any(|tool| !tool.read_only_hint()) {
+            can.push("write");
+        }
+        can
+    }
 }
 
 /// The descriptor of `reach`.
@@ -83,7 +117,7 @@ pub fn catalog(reached: &[Reached]) -> Vec<(String, ToolDescriptor)> {
         let labels: Vec<&str> = place
             .connections
             .iter()
-            .map(|(label, _)| label.as_str())
+            .map(|connection| connection.label.as_str())
             .collect();
         for tool in &place.tools {
             let mut descriptor = tool.clone();
@@ -129,10 +163,11 @@ fn with_at(schema: &Value, title: &str, labels: &[&str]) -> Value {
 /// The answer to `reach` for `companion`, which reaches `reached` and whose
 /// connections `waiting` wait for the sponsor to sign their account in
 /// again: who the companion is, then for each service where it is, by the
-/// sponsor's names, whether it can read or write there and the tool to
-/// start with, in a few sentences. The structured answer holds the same
-/// facts, each connection with its tool to start with, and the whole tool
-/// list, which the catalog has too.
+/// sponsor's names, whether it can read or write through each connection
+/// and the tool to start with, in a few sentences. The structured answer
+/// holds the same facts: each connection with its service's title, what it
+/// can do there and its tool to start with, each waiting connection with
+/// its service's title, and the whole tool list, which the catalog has too.
 pub fn reach(
     companion: &Companion,
     reached: &[Reached],
@@ -150,36 +185,55 @@ pub fn reach(
         ));
     }
     for place in reached {
+        let cans: Vec<Vec<&str>> = place
+            .connections
+            .iter()
+            .map(|connection| connection.can(place))
+            .collect();
+        let alike = cans.windows(2).all(|pair| pair[0] == pair[1]);
         let places: Vec<String> = place
             .connections
             .iter()
-            .map(|(label, address)| format!("{label} ({address})"))
+            .zip(&cans)
+            .map(|(connection, can)| {
+                let at = format!("{} ({})", connection.label, connection.address);
+                match can.as_slice() {
+                    _ if alike => at,
+                    [] => format!("{at}, where nothing is open to it now"),
+                    can => format!("{at}, where it can {}", can.join(" and ")),
+                }
+            })
             .collect();
-        let Some(first) = place.tools.first() else {
-            sentences.push(format!(
-                "{display} reaches {title} at {places}, where nothing is open to it now.",
-                title = place.title,
-                places = listed(&places),
-            ));
-            continue;
+        let title = &place.title;
+        // Each place that says what it can do ends in a clause, so the
+        // last one is set apart with a comma.
+        let places = match places.as_slice() {
+            [init @ .., last] if !alike && !init.is_empty() => {
+                format!("{}, and {last}", init.join(", "))
+            }
+            _ => listed(&places),
         };
-        let reads = place.tools.iter().any(ToolDescriptor::read_only_hint);
-        let writes = place.tools.iter().any(|tool| !tool.read_only_hint());
-        let can = match (reads, writes) {
-            (true, true) => "read and write",
-            (false, true) => "write",
-            _ => "read",
-        };
-        sentences.push(format!(
-            "{display} reaches {title} at {places}, where it can {can}: start with {first}.",
-            title = place.title,
-            places = listed(&places),
-            first = first.name.projected(&place.service),
-        ));
+        let first = place
+            .tools
+            .first()
+            .map(|first| first.name.projected(&place.service));
+        let can = cans
+            .first()
+            .map(|can| can.join(" and "))
+            .unwrap_or_default();
+        sentences.push(match first {
+            Some(first) if alike && !can.is_empty() => format!(
+                "{display} reaches {title} at {places}, where it can {can}: start with {first}."
+            ),
+            _ if alike => {
+                format!("{display} reaches {title} at {places}, where nothing is open to it now.")
+            }
+            Some(first) => format!("{display} reaches {title} at {places}: start with {first}."),
+            None => format!("{display} reaches {title} at {places}."),
+        });
         if place.connections.len() > 1 {
             sentences.push(format!(
-                "Every {title} tool takes {AT}, the name of the one it acts at.",
-                title = place.title
+                "Every {title} tool takes {AT}, the name of the one it acts at."
             ));
         }
     }
@@ -189,20 +243,22 @@ pub fn reach(
         ));
     }
     // A host may show a mind the structured answer and not the text, so it
-    // names the tool to start with too.
+    // names each service by its title, what each connection can do there
+    // and the tool to start with too.
     let connections: Vec<Value> = reached
         .iter()
         .flat_map(|place| {
-            let start = place
-                .tools
-                .first()
-                .map(|first| first.name.projected(&place.service));
-            place.connections.iter().map(move |(label, address)| {
+            place.connections.iter().map(move |connection| {
                 json!({
                     "service": place.service.as_str(),
-                    "at": label.as_str(),
-                    "address": address.as_str(),
-                    "startWith": start,
+                    "title": place.title,
+                    "at": connection.label.as_str(),
+                    "address": connection.address.as_str(),
+                    "can": connection.can(place),
+                    "startWith": connection
+                        .tools(place)
+                        .next()
+                        .map(|first| first.name.projected(&place.service)),
                 })
             })
         })
@@ -218,7 +274,11 @@ pub fn reach(
             "connections": connections,
             "waiting": waiting
                 .iter()
-                .map(|(service, _, label)| json!({ "service": service.as_str(), "at": label.as_str() }))
+                .map(|(service, title, label)| json!({
+                    "service": service.as_str(),
+                    "title": title,
+                    "at": label.as_str(),
+                }))
                 .collect::<Vec<_>>(),
             "tools": tools,
         })),
@@ -795,15 +855,14 @@ mod tests {
             connections: labels
                 .iter()
                 .enumerate()
-                .map(|(port, label)| {
-                    (
-                        Label::new(label).expect("label"),
-                        Address::parse(
-                            &format!("http://127.0.0.1:{}", 5300 + port),
-                            lobby_contracts::AddressPolicy::LoopbackAllowed,
-                        )
-                        .expect("address"),
+                .map(|(port, label)| ReachedAt {
+                    label: Label::new(label).expect("label"),
+                    address: Address::parse(
+                        &format!("http://127.0.0.1:{}", 5300 + port),
+                        lobby_contracts::AddressPolicy::LoopbackAllowed,
                     )
+                    .expect("address"),
+                    allows: vec![ToolName::new("read").expect("tool")],
                 })
                 .collect(),
         }
@@ -867,7 +926,7 @@ mod tests {
         );
         assert_eq!(
             waiting.structured.expect("structured")["waiting"],
-            json!([{ "service": "board", "at": "front" }])
+            json!([{ "service": "board", "title": "Board", "at": "front" }])
         );
         let structured = answer.structured.clone().expect("structured");
         assert_eq!(structured["tools"], json!(["reach", "board_read"]));
@@ -876,6 +935,8 @@ mod tests {
             structured["connections"][1]["startWith"], "board_read",
             "the structured answer names where to start, as the text does"
         );
+        assert_eq!(structured["connections"][1]["title"], "Board");
+        assert_eq!(structured["connections"][1]["can"], json!(["read"]));
         let said = answer.rendered();
         assert!(
             said.contains(
@@ -916,11 +977,29 @@ mod tests {
         let mut second = place.tools[0].clone();
         second.name = ToolName::new("list").expect("tool");
         place.tools.extend([second, write]);
-        let said = reach(&ada(), &[place], &[]).rendered();
+        place.connections[0].allows = place.tools.iter().map(|tool| tool.name.clone()).collect();
+        let said = reach(&ada(), std::slice::from_ref(&place), &[]).rendered();
         assert_eq!(
             said,
             "You are Ada (moniker ada), attached through Companion Lobby. Ada reaches Board at front (http://127.0.0.1:5300), where it can read and write: start with board_read."
         );
+
+        // Two connections whose services issued them different leave each
+        // say what they can do, in the text and in the structured answer.
+        let mut two = board(&["front", "back"]);
+        two.tools = place.tools.clone();
+        two.connections[0].allows = place.connections[0].allows.clone();
+        let answer = reach(&ada(), &[two], &[]);
+        assert_eq!(
+            answer.rendered(),
+            "You are Ada (moniker ada), attached through Companion Lobby. Ada reaches Board at front (http://127.0.0.1:5300), where it can read and write, and back (http://127.0.0.1:5301), where it can read: start with board_read. Every Board tool takes at, the name of the one it acts at."
+        );
+        let structured = answer.structured.expect("structured");
+        assert_eq!(
+            structured["connections"][0]["can"],
+            json!(["read", "write"])
+        );
+        assert_eq!(structured["connections"][1]["can"], json!(["read"]));
         assert_eq!(
             listed(&["a".to_owned(), "b".to_owned(), "c".to_owned()]),
             "a, b and c"

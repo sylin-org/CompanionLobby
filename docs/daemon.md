@@ -627,19 +627,26 @@ companion, each service it reaches with the labels and addresses of its
 connections, and the live tool set, so a mind can rely on it even when its
 host ignores tool list changes. Its text says who the companion is, then for
 each service where it is, by the sponsor's names, whether the companion
-can read or write there and the tool to start with, the service's first;
-its structured answer gives each connection's `startWith` too, since a host
-may show a mind the structured form alone, and the whole tool list is its
-structured `tools`. `initialize` declares `listChanged: true`,
+can read or write through each connection and the tool to start with, the
+service's first; its structured answer gives each connection's service
+`title`, what it `can` do there and its `startWith` too, and each waiting
+connection's `title`, since a host may show a mind the structured form
+alone, and the whole tool list is its structured `tools`. What a connection
+can do is what the service issued for it allows, so two connections to one
+service may differ. `initialize` declares `listChanged: true`,
 and the shim relays a `notifications/tools/list_changed` each time the
 companion's connections change.
 
 A tool call answers the tool's result, whose text marks third-party passages
 as quoted strings, with its structured content when that serializes within
-the same 32 KiB budget as the text; a result whose structured content is
-larger leaves it out and says so at the end of its text: that the text holds
-the whole answer, or, when the text was cut short too, that it does not and
-to ask for less at once. Or it answers an
+the same 32 KiB budget as the text. A host may show a mind the structured
+form alone, so the text goes into it as `message` beside the facts whenever
+both fit that budget together, with what other people wrote quoted there as
+in the text; when they do not, the facts go alone. A result whose
+structured content is larger than the budget leaves it out and says so at
+the end of its text, which keeps room for that note within its own budget:
+that the text holds the whole answer, or, when the text was cut short too,
+that it does not and to ask for less at once. Or it answers an
 error result (`isError: true`) whose text is the
 adapter's or the lobby's own sentence for the outcome and whose
 `structuredContent` is `{"outcome": "<code>", "message": "<that sentence>"}`,

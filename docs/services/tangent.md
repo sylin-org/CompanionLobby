@@ -102,7 +102,10 @@ written in, and say how many they left out; a Topic read that left Posts
 out offers a smaller `limit` to read them instead of its cursor, which
 would skip them. The structured answer keeps the same cuts: what other
 people wrote sits only under each item's `quoted` object, and `cutShort`
-names the fields that were cut.
+names the fields that were cut. It also gives what the text says around
+the items: what is new gives its `order`, each Tangent whether it
+`hasTopicsYouCanWriteIn`, and a Topic read the tool and Topic to reply
+with in `replyWith` when the companion can post there.
 
 What is new, in `tangent_arrive` and `tangent_updates`, names each person
 by the name their participant card shows beside their reference, both
