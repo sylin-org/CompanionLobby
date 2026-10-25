@@ -81,7 +81,7 @@ use crate::lock::{DaemonLock, DaemonRecord, LockProblem};
 use crate::manager;
 use crate::portrait::{self, Portrait};
 use crate::projections::{Reached, companion_json, connection_json, credential_json, sign_in_json};
-use crate::registry::{Registry, capitalized};
+use crate::registry::Registry;
 use crate::{discovery, mcp, trace};
 
 mod feed_body;
@@ -963,7 +963,7 @@ fn snapshot_json(lobby: &Lobby) -> Value {
             .map(|(name, accepts)| {
                 json!({
                     "name": name.as_str(),
-                    "title": capitalized(name.as_str()),
+                    "title": lobby.registry().service_title(name),
                     "accepts": accepts.iter().map(ProviderKind::as_str).collect::<Vec<_>>(),
                 })
             })

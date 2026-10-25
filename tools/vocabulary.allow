@@ -30,3 +30,9 @@ crates/conformance/Cargo.toml	provider-tangent	The conformance suite's tests hol
 crates/conformance/tests/tangent_service.rs	provider-tangent	The service suite runs against the Tangent adapter and the test kit's fake Space.
 crates/conformance/tests/tangent_service.rs	provider-atproto	The fake Space takes proofs the atproto adapter mints at the test kit's fake PDS.
 crates/conformance/tests/tangent_service.rs	provider-atproto-wire	The fake Space takes proofs the atproto adapter mints at the test kit's fake PDS.
+crates/daemon/src/registry.rs	provider-tangent	The registry is the one place the daemon composes the compiled-in service adapter with the credential adapter its Spaces take.
+crates/daemon/src/bin/synthetic.rs	provider-tangent	The test-only command composes the service adapter for the test kit's fake Space.
+crates/daemon/tests/manager_journey.rs	provider-tangent	The journey checks the services the page offers, the Tangent adapter among them.
+crates/daemon/tests/sign_in_journey.rs	provider-tangent	The journey checks the product offers the Tangent adapter for atproto accounts.
+crates/testkit/src/world.rs	provider-tangent	The whole fake world seeds the fake Space in its own nouns: Tangents, Topics and Posts.
+crates/testkit/tests/lobby_world.rs	provider-tangent	The test probes the fake Space at its own well-known path.

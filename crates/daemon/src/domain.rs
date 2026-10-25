@@ -2571,9 +2571,8 @@ impl Core {
                 .map(|record| record.companion.display_name.clone());
         }
         if names.service.is_none() {
-            names.service = service.and_then(|service| {
-                DisplayName::new(&crate::registry::capitalized(service.as_str())).ok()
-            });
+            names.service = service
+                .and_then(|service| DisplayName::new(&self.registry.service_title(service)).ok());
         }
         if names.connection.is_none() {
             names.connection = connection

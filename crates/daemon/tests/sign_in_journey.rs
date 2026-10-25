@@ -166,7 +166,11 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
         held[0]["label"], "ada.example.test",
         "the handle that resolves back to it, as the sponsor knows it"
     );
-    assert_eq!(held[0]["permissions"], json!(["atproto"]));
+    assert_eq!(
+        held[0]["permissions"],
+        json!(["atproto", lobby_service_tangent::PERMISSION]),
+        "identity, and the leave the installed service needs"
+    );
     assert_eq!(held[0]["state"], "ready");
     let ended = install.json("/api/lobby")["signIns"].clone();
     assert_eq!(ended.as_array().map(Vec::len), Some(1), "{ended}");
@@ -181,16 +185,18 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
         .collect();
     let par = pushes.last().expect("the PAR");
     let return_to = format!("http://127.0.0.1:{}/signin/atproto/return", install.port());
+    let scope = format!("atproto {}", lobby_service_tangent::PERMISSION);
     assert_eq!(
         par.field("client_id"),
         Some(format!(
-            "http://localhost?redirect_uri={}&scope=atproto",
-            percent_encode(&return_to)
+            "http://localhost?redirect_uri={}&scope={}",
+            percent_encode(&return_to),
+            percent_encode(&scope)
         )),
-        "the loopback client id declares the return route and the identity scope"
+        "the loopback client id declares the return route and the scope it asks"
     );
     assert_eq!(par.field("redirect_uri"), Some(return_to));
-    assert_eq!(par.field("scope").as_deref(), Some("atproto"));
+    assert_eq!(par.field("scope"), Some(scope));
     assert_eq!(par.field("code_challenge_method").as_deref(), Some("S256"));
     assert_eq!(par.field("nonce"), None);
     assert_eq!(par.field("login_hint"), None);
@@ -412,8 +418,8 @@ fn companion_lobby_refuses_a_loopback_authorization_server_and_reaches_nothing()
     );
     assert_eq!(
         product.json("/api/lobby")["services"],
-        json!([]),
-        "the product has no service installed yet"
+        json!([{ "name": "tangent", "title": "Tangent Space", "accepts": ["atproto"] }]),
+        "the product reaches Tangent Spaces with atproto accounts"
     );
     product.stop();
 }

@@ -104,7 +104,10 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
     );
     assert_eq!(
         lobby["services"],
-        json!([{ "name": "board", "title": "Board", "accepts": ["passbook"] }])
+        json!([
+            { "name": "board", "title": "Board", "accepts": ["passbook"] },
+            { "name": "tangent", "title": "Tangent Space", "accepts": ["atproto"] },
+        ])
     );
     let page = get(&install, "/");
     assert_eq!(page.status, 200);

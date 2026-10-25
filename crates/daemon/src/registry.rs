@@ -10,8 +10,9 @@
 //! the sponsor names the account to sign in with; a kind without a title is
 //! shown by its name, and one without a hint gets a plain one.
 //!
-//! [`Registry::product`] is what `companion-lobby` runs with: the adapters
-//! each slice adds here, one line each. The credential adapter reaches the
+//! [`Registry::product`] is what `companion-lobby` runs with: the atproto
+//! credential adapter and the Tangent service adapter, which takes atproto
+//! accounts and is shown as its makers name it. The credential adapter reaches the
 //! public network only; [`AUTHSERVER_ENV`] may name another public HTTPS
 //! origin for the authorization server a sign-in without a handle goes to,
 //! and a value that is not one stops the daemon from starting rather than
@@ -172,8 +173,9 @@ impl Registry {
             .map_err(|problem| format!("{AUTHSERVER_ENV}: {problem}"))?;
         Ok(Self::new(
             vec![Arc::new(lobby_credential_atproto::Atproto::new(world))],
-            Vec::new(),
+            vec![Arc::new(Self::tangent())],
         )
+        .service_titled(lobby_service_tangent::NAME, lobby_service_tangent::TITLE)
         .titled(
             lobby_credential_atproto::KIND,
             lobby_credential_atproto::TITLE,
@@ -182,6 +184,15 @@ impl Registry {
             lobby_credential_atproto::KIND,
             lobby_credential_atproto::HINT,
         ))
+    }
+
+    /// The Tangent service adapter, taking atproto accounts: the one line
+    /// that composes the two.
+    pub fn tangent() -> lobby_service_tangent::Tangent {
+        lobby_service_tangent::Tangent::accepting(
+            ProviderKind::new(lobby_credential_atproto::KIND)
+                .unwrap_or_else(|| unreachable!("atproto is a provider kind")),
+        )
     }
 
     /// The provider kinds of every credential adapter, in the order listed.
@@ -236,5 +247,37 @@ mod tests {
             "The account to sign in with, as its provider names it."
         );
         assert_eq!(capitalized(""), "");
+        let titled = registry.service_titled("board", "The Board");
+        assert_eq!(
+            titled.service_title(&ServiceName::new("board").expect("name")),
+            "The Board"
+        );
+        assert_eq!(
+            titled.service_title(&ServiceName::new("quill").expect("name")),
+            "Quill"
+        );
+    }
+
+    #[test]
+    fn a_kind_is_asked_for_what_every_service_taking_it_needs_once() {
+        let product = Registry::default().service_titled("x", "X");
+        assert!(
+            product
+                .permissions(&ProviderKind::new("atproto").expect("kind"))
+                .is_empty()
+        );
+        let registry = Registry::new(
+            Vec::new(),
+            vec![Arc::new(Registry::tangent()), Arc::new(Registry::tangent())],
+        );
+        assert_eq!(
+            registry.permissions(&ProviderKind::new(lobby_credential_atproto::KIND).expect("kind")),
+            [lobby_service_tangent::PERMISSION]
+        );
+        assert!(
+            registry
+                .permissions(&ProviderKind::new("passbook").expect("kind"))
+                .is_empty()
+        );
     }
 }
