@@ -615,7 +615,7 @@ function renderAttach(id) {
   const heading = element("div", "identity");
   heading.append(avatar(companion, "large"), element("h1", "", companion.displayName + (companion.attachments > 0 ? " is attached" : " is ready to attach")));
   parts.push(heading);
-  parts.push(element("p", "lede", "Copy this block into your MCP host's configuration, under mcpServers. The host starts the lobby itself whenever it needs it."));
+  parts.push(element("p", "lede", "Copy this block into your AI host's server settings. The host starts the lobby itself whenever it needs it."));
   const block = element("div", "config");
   const text = element("pre", "", companion.hostConfig);
   text.tabIndex = 0;
@@ -819,7 +819,7 @@ function renderSignIn(companionId, signInId) {
   const title = kindTitle(signIn.kind);
   const parts = [back, element("h1", "", "Sign " + companion.displayName + " in with " + title)];
   const meant = element("p", "lede");
-  meant.append(document.createTextNode("The account: "), element("strong", "", signIn.account || "the one you choose on the sign-in page"), document.createTextNode("."));
+  meant.append(document.createTextNode("The account: "), element("strong", "", placeText(signIn.account) || "the one you choose on the sign-in page"), document.createTextNode("."));
   parts.push(meant, element("p", "", companion.displayName + " receives this account's identity and nothing more. No connection opens until you grant one."));
   const status = element("p", "status");
   status.setAttribute("role", "status");
@@ -868,7 +868,7 @@ function renderSignIn(companionId, signInId) {
     const credential = readyCredential(companion, signIn.kind);
     const said = {
       signed_in: credential
-        ? "Signed in. " + companion.displayName + "'s " + title + " account is " + credential.label + "."
+        ? "Signed in. The " + title + " account for " + companion.displayName + " is " + credential.label + "."
         : "Signed in.",
       cancelled: "This sign-in was cancelled. Nothing was signed in.",
       refused: "The sign-in page's answer did not complete this sign-in. Nothing was signed in.",
@@ -876,7 +876,7 @@ function renderSignIn(companionId, signInId) {
     status.textContent = tidy(said);
     status.className = "status" + (signIn.status === "signed_in" ? " ok" : "");
     handoffs.clear(signIn.id);
-    const onward = link(companionPath(companion), "button primary", signIn.status === "signed_in" ? "Back to " + companion.displayName : "Start again from " + companion.displayName + "'s page");
+    const onward = link(companionPath(companion), "button primary", signIn.status === "signed_in" ? "Back to " + companion.displayName : "Start again from " + companion.displayName);
     onward.dataset.key = "back";
     actions.append(onward);
   }
@@ -927,7 +927,7 @@ function connectionRow(companion, connection) {
   let action;
   if (word === "ready") {
     action = button("Revoke", "danger");
-    confirmInPlace(action, "Revoke " + connection.label + "? " + companion.displayName + "'s tools for it go away at the mind's next call.", "Revoke", () => revokeConnection(companion, connection));
+    confirmInPlace(action, "Revoke " + connection.label + "? Its tools go away for " + companion.displayName + " at the mind's next call.", "Revoke", () => revokeConnection(companion, connection));
   } else if (word === "sign_in_needed") {
     const credential = lobby.credentials.get(connection.credential);
     action = button("Sign in again");
@@ -985,7 +985,9 @@ async function grant(companion, credential, service, address, label, form) {
   const connection = result.body.connection;
   lobby.connections.set(connection.id, connection);
   const name = (lobby.companions.get(companion.id) || companion).displayName;
-  note(name + " can use " + serviceTitle(service) + " at " + connection.label + ". Its tools appear at the mind's next call.");
+  const title = serviceTitle(service);
+  const plain = [service, title].some(word => String(word).toLowerCase() === String(connection.label).toLowerCase());
+  note(name + " can use " + title + (plain ? "" : " at " + connection.label) + ". Its tools appear at the mind's next call.");
   return connection;
 }
 

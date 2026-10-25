@@ -122,6 +122,42 @@ mod tests {
     }
 
     #[test]
+    fn an_account_is_shown_by_its_label_and_its_key_only_in_the_details() {
+        let script = SCRIPT.0;
+        let keyed: Vec<&str> = script
+            .lines()
+            .filter(|line| line.contains("credential.account"))
+            .collect();
+        assert_eq!(keyed.len(), 1, "{keyed:#?}");
+        assert!(
+            keyed[0].contains("\"Account key\"") && keyed[0].contains("element(\"dd\""),
+            "{}",
+            keyed[0]
+        );
+        let body = |name: &str| {
+            let start = script
+                .find(&format!("function {name}("))
+                .unwrap_or_else(|| panic!("{name} is defined"));
+            let rest = &script[start..];
+            &rest[..rest
+                .find(
+                    "
+}
+",
+                )
+                .unwrap_or(rest.len())]
+        };
+        assert!(body("card").contains("credential.label"));
+        let row = body("accountRow");
+        assert!(row.contains("element(\"strong\", \"\", credential.label)"));
+        let details = row
+            .find("disclosure(\"details\"")
+            .expect("a details disclosure");
+        let key = row.find("credential.account").expect("the key");
+        assert!(details < key, "the key sits inside the details");
+    }
+
+    #[test]
     fn the_page_loads_only_its_own_files() {
         let page = PAGE.0;
         assert!(page.contains("<script src=\"/manager.js\" defer></script>"));
