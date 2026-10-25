@@ -134,8 +134,8 @@ impl BoardServer {
             .collect()
     }
 
-    /// Forgets every badge it gave out, as a board that restarted would.
-    pub fn forget_badges(&self) {
+    /// Drops every badge it gave out, as a board that restarted would.
+    pub fn drop_badges(&self) {
         locked(&self.floor).badges.clear();
     }
 }
@@ -246,7 +246,7 @@ fn tool(name: &str) -> ToolName {
     ToolName::new(name).unwrap_or_else(|| unreachable!("{name} is a tool name"))
 }
 
-/// How a request to a board failed: the board no longer took the badge,
+/// How a request to a board failed: the board stopped taking the badge,
 /// which refuses the request before the board acts on it, or it ended
 /// otherwise.
 enum Failed {

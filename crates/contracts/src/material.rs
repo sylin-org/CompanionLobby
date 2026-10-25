@@ -138,8 +138,8 @@ pub trait MaterialSlot: Send + Sync {
 /// for one tool call through it.
 ///
 /// A service adapter reads what the service issued through it. When the
-/// service no longer takes that (it expired, or the service answers that
-/// it does not know it), the adapter establishes the connection again
+/// service stops taking that (it expired, or the service answers that it
+/// does not know it), the adapter establishes the connection again
 /// through [`IssuedSlot::authority`], which mints a fresh proof from the
 /// connection's credential, and keeps what the service issued anew with
 /// [`IssuedSlot::reissue`]. The lobby keeps it only while the connection is

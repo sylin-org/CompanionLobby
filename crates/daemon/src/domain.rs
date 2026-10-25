@@ -1981,8 +1981,8 @@ impl Lobby {
     /// ready connection to, its tools, and the labels and addresses of those
     /// connections.
     pub fn reached(&self, companion: CompanionId) -> Vec<Reached> {
-        type Place = (Label, Address, ConnectionId);
-        let mut by_service: Vec<(ServiceName, Vec<Place>)> = Vec::new();
+        type Reaching = (Label, Address, ConnectionId);
+        let mut by_service: Vec<(ServiceName, Vec<Reaching>)> = Vec::new();
         {
             let core = self.core();
             for connection in &core.store.state().connections {

@@ -106,7 +106,7 @@ fn the_atproto_adapter_renews_in_the_order_the_contract_lays_down() {
 }
 
 #[test]
-fn a_refresh_that_grants_more_than_the_session_held_is_never_kept() {
+fn a_refresh_that_grants_more_than_the_sign_in_held_is_never_kept() {
     let world = AtprotoWorld::start();
     let adapter = Atproto::new(World::loopback(&world.origin()).expect("a loopback world"));
     let fixture = AtprotoFixture { world };
@@ -132,7 +132,7 @@ fn a_refresh_that_grants_more_than_the_session_held_is_never_kept() {
     assert_eq!(
         adapter.renew(&slot).map(|_| ()),
         Err(Outcome::Unknown),
-        "the provider rotated the secret but granted more than the session held"
+        "the provider rotated the secret but granted more than the sign-in held"
     );
     assert_eq!(slot.steps(), ["mark"], "nothing was committed");
     assert!(

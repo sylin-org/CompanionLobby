@@ -261,8 +261,8 @@ impl ServiceFixture for BoardFixture {
         self.board.listener().requests().len()
     }
 
-    fn forget_issued(&self) {
-        self.board.forget_badges();
+    fn drop_issued(&self) {
+        self.board.drop_badges();
     }
 }
 

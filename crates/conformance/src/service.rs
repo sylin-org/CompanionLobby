@@ -42,7 +42,7 @@ pub trait ServiceFixture {
     fn requests(&self) -> usize;
     /// Makes the service stop taking everything it issued so far, as one
     /// that restarted or expired them would.
-    fn forget_issued(&self);
+    fn drop_issued(&self);
 }
 
 /// Text a third party might write to steer a mind.
@@ -181,7 +181,7 @@ pub fn run(adapter: &dyn ServiceAdapter, fixture: &dyn ServiceFixture) {
     // A service that stopped taking what it issued: the adapter establishes
     // the connection again once, with a fresh proof, keeps what the service
     // issued anew, and the call answers.
-    fixture.forget_issued();
+    fixture.drop_issued();
     let minted = fixture.minted().len();
     adapter
         .call(&tool, &arguments, &address, &slot)
