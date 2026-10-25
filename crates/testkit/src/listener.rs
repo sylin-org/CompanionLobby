@@ -125,6 +125,7 @@ struct Shared {
     requests: Mutex<Vec<Received>>,
     arrived: Condvar,
     held: Mutex<Vec<String>>,
+    held_answers: Mutex<Vec<String>>,
     released: Condvar,
     stopped: AtomicBool,
 }
@@ -139,19 +140,26 @@ pub struct Listener {
     shared: Arc<Shared>,
 }
 
-/// A hold on one route: requests to it wait until this is dropped.
+/// A hold on one route: requests to it, or their answers, wait until this
+/// is dropped.
 pub struct Hold<'a> {
     listener: &'a Listener,
     prefix: String,
+    answers: bool,
 }
 
 impl Drop for Hold<'_> {
     fn drop(&mut self) {
-        let mut held = locked(&self.listener.shared.held);
+        let shared = &self.listener.shared;
+        let mut held = locked(if self.answers {
+            &shared.held_answers
+        } else {
+            &shared.held
+        });
         if let Some(index) = held.iter().position(|prefix| *prefix == self.prefix) {
             held.remove(index);
         }
-        self.listener.shared.released.notify_all();
+        shared.released.notify_all();
     }
 }
 
@@ -165,6 +173,7 @@ impl Listener {
             requests: Mutex::new(Vec::new()),
             arrived: Condvar::new(),
             held: Mutex::new(Vec::new()),
+            held_answers: Mutex::new(Vec::new()),
             released: Condvar::new(),
             stopped: AtomicBool::new(false),
         });
@@ -212,6 +221,19 @@ impl Listener {
         Hold {
             listener: self,
             prefix: prefix.to_owned(),
+            answers: false,
+        }
+    }
+
+    /// Lets every request whose route starts with `prefix` be handled, and
+    /// holds its answer until the returned hold is dropped: what the
+    /// handler did has happened, and the client has not heard of it.
+    pub fn hold_answers(&self, prefix: &str) -> Hold<'_> {
+        locked(&self.shared.held_answers).push(prefix.to_owned());
+        Hold {
+            listener: self,
+            prefix: prefix.to_owned(),
+            answers: true,
         }
     }
 
@@ -241,6 +263,7 @@ impl Drop for Listener {
     fn drop(&mut self) {
         self.shared.stopped.store(true, Ordering::Release);
         locked(&self.shared.held).clear();
+        locked(&self.shared.held_answers).clear();
         self.shared.released.notify_all();
         // Wakes the accepting thread so it sees the stop.
         let _ = TcpStream::connect(("127.0.0.1", self.port));
@@ -269,6 +292,18 @@ fn serve(stream: TcpStream, shared: &Shared) {
         }
     }
     let reply = (shared.handler)(&request);
+    {
+        let mut held = locked(&shared.held_answers);
+        while held
+            .iter()
+            .any(|prefix| request.route().starts_with(prefix.as_str()))
+        {
+            held = shared
+                .released
+                .wait(held)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
     let mut head = format!("HTTP/1.1 {} Scripted\r\n", reply.status);
     for (name, value) in &reply.headers {
         head.push_str(&format!("{name}: {value}\r\n"));
@@ -365,6 +400,29 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         assert!(!call.is_finished(), "held");
         assert!(get(port, "/fast").starts_with("HTTP/1.1 200"));
+        drop(hold);
+        assert!(call.join().expect("call").starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn a_held_answer_comes_after_the_handler_ran() {
+        let handled = Arc::new(AtomicBool::new(false));
+        let marking = handled.clone();
+        let listener = Listener::start(move |_| {
+            marking.store(true, Ordering::SeqCst);
+            Reply::json(200, &json!({}))
+        });
+        let port = listener.port();
+        let hold = listener.hold_answers("/slow");
+        let call = std::thread::spawn(move || get(port, "/slow"));
+        listener.wait_for("/slow", 1);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !handled.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "the handler ran");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!call.is_finished(), "the answer waits");
         drop(hold);
         assert!(call.join().expect("call").starts_with("HTTP/1.1 200"));
     }

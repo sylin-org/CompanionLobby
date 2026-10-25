@@ -29,12 +29,21 @@
 //! * the authorize endpoint approves as whichever account the test scripted
 //!   with [`AtprotoWorld::sign_in_as`], whatever the request names, and sends
 //!   the browser back with `code`, `state` and `iss`; with no account
-//!   scripted it sends back `error=access_denied`.
+//!   scripted it sends back `error=access_denied`;
+//! * a refresh (`grant_type=refresh_token`) must present the grant's
+//!   current refresh token, the client id it was granted under and a proof
+//!   made with the key its PAR was signed by; it rotates both tokens, so a
+//!   refresh token works once, and one presented again is `invalid_grant`;
+//! * the revocation endpoint ends the grant a refresh or access token
+//!   belongs to: after it, the grant's refresh token refreshes nothing.
 //!
-//! Tokens are DPoP-bound. An access token is JWT-shaped unless
+//! Tokens are DPoP-bound and live [`AtprotoWorld::access_lifetime`] seconds,
+//! an hour unless a test says otherwise. An access token is JWT-shaped unless
 //! [`AtprotoWorld::opaque_tokens`] says otherwise; the adapter must not care.
-//! Knobs break the metadata the adapter checks, make the token name another
-//! subject, and make the PDS name another authorization server.
+//! Knobs break the metadata the adapter checks, flaw the token answer (its
+//! type, subject, refresh token or scope), refuse or slow refreshes, widen
+//! what a refresh grants, let a handle resolve to an account whose document
+//! does not claim it, and make the PDS name another authorization server.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -65,6 +74,8 @@ pub enum Flaw {
     AnotherIssuer,
     /// The metadata document redirects elsewhere instead of answering.
     Redirects,
+    /// The metadata names no revocation endpoint.
+    NoRevocation,
 }
 
 /// An account the world knows.
@@ -86,11 +97,35 @@ struct Pushed {
     key: VerifyingKey,
 }
 
+/// One grant the authorization server issued: the account, what it was
+/// granted under, and its current tokens.
+#[derive(Debug, Clone)]
+struct Grant {
+    did: String,
+    scope: String,
+    client_id: String,
+    key: VerifyingKey,
+    refresh: String,
+    access: String,
+    ended: bool,
+}
+
 #[derive(Debug, Default)]
 struct Book {
     accounts: Vec<Account>,
+    /// Handles the resolver answers for, which no document claims.
+    aliases: Vec<(String, String)>,
     approving: Option<String>,
     subject: Option<String>,
+    token_type: Option<String>,
+    without_refresh: bool,
+    granted_scope: Option<String>,
+    access_lifetime: Option<u64>,
+    refusing_refreshes: bool,
+    limiting_refreshes: bool,
+    widened_refresh: Option<String>,
+    grants: Vec<Grant>,
+    revocations: Vec<String>,
     flaws: Vec<Flaw>,
     pds_names: Option<String>,
     opaque: bool,
@@ -195,6 +230,80 @@ impl AtprotoWorld {
         locked(&self.book).subject = Some(did.to_owned());
     }
 
+    /// Makes the token response say `kind` as its token type.
+    pub fn token_type_is(&self, kind: &str) {
+        locked(&self.book).token_type = Some(kind.to_owned());
+    }
+
+    /// Makes the code exchange answer without a refresh token.
+    pub fn without_refresh_token(&self) {
+        locked(&self.book).without_refresh = true;
+    }
+
+    /// Makes the code exchange say it granted `scope`, whatever was asked.
+    pub fn grants_scope(&self, scope: &str) {
+        locked(&self.book).granted_scope = Some(scope.to_owned());
+    }
+
+    /// Makes the resolver answer `did` for `handle`, a handle the account's
+    /// document does not claim.
+    pub fn alias_handle(&self, handle: &str, did: &str) {
+        locked(&self.book)
+            .aliases
+            .push((handle.to_owned(), did.to_owned()));
+    }
+
+    /// Issues tokens that live `secs` seconds from now on.
+    pub fn access_lifetime(&self, secs: u64) {
+        locked(&self.book).access_lifetime = Some(secs);
+    }
+
+    /// Refuses every refresh from now on, as a grant the provider ended.
+    pub fn refuse_refreshes(&self) {
+        locked(&self.book).refusing_refreshes = true;
+    }
+
+    /// Answers every refresh with 429 while `limiting`, rotating nothing.
+    pub fn rate_limit_refreshes(&self, limiting: bool) {
+        locked(&self.book).limiting_refreshes = limiting;
+    }
+
+    /// Makes every refresh from now on say it granted `scope`.
+    pub fn widen_refreshes(&self, scope: &str) {
+        locked(&self.book).widened_refresh = Some(scope.to_owned());
+    }
+
+    /// Every refresh token presented to the token endpoint, oldest first,
+    /// whether or not it refreshed anything.
+    pub fn refresh_tokens_presented(&self) -> Vec<String> {
+        self.server
+            .requests()
+            .iter()
+            .filter(|request| {
+                request.route() == "/oauth/token"
+                    && request.field("grant_type").as_deref() == Some("refresh_token")
+            })
+            .filter_map(|request| request.field("refresh_token"))
+            .collect()
+    }
+
+    /// Every token the revocation endpoint was asked to revoke, oldest
+    /// first.
+    pub fn revocations(&self) -> Vec<String> {
+        locked(&self.book).revocations.clone()
+    }
+
+    /// The current refresh token of the grant made to `did` last, while it
+    /// is live.
+    pub fn live_refresh_token(&self, did: &str) -> Option<String> {
+        locked(&self.book)
+            .grants
+            .iter()
+            .rev()
+            .find(|grant| grant.did == did && !grant.ended)
+            .map(|grant| grant.refresh.clone())
+    }
+
     /// Breaks one metadata promise.
     pub fn break_metadata(&self, flaw: Flaw) {
         locked(&self.book).flaws.push(flaw);
@@ -257,13 +366,20 @@ fn answer_server(book: &Mutex<Book>, origin: &str, pds: &str, request: &Received
         }
         ("GET", "/xrpc/com.atproto.identity.resolveHandle") => {
             let handle = request.query("handle").unwrap_or_default();
-            match book
+            let named = book
                 .accounts
                 .iter()
                 .rev()
                 .find(|account| account.handle == handle)
-            {
-                Some(account) => Reply::json(200, &json!({ "did": account.did })),
+                .map(|account| account.did.clone())
+                .or_else(|| {
+                    book.aliases
+                        .iter()
+                        .find(|(alias, _)| *alias == handle)
+                        .map(|(_, did)| did.clone())
+                });
+            match named {
+                Some(did) => Reply::json(200, &json!({ "did": did })),
                 None => error(400, "InvalidRequest"),
             }
         }
@@ -294,6 +410,9 @@ fn answer_server(book: &Mutex<Book>, origin: &str, pds: &str, request: &Received
         ("POST", "/oauth/par") => pushed(&mut book, origin, request),
         ("GET", "/oauth/authorize") => authorize(&mut book, origin, request),
         ("POST", "/oauth/token") => token(&mut book, origin, request),
+        ("POST", "/oauth/revoke") if !book.flaws.contains(&Flaw::NoRevocation) => {
+            revoke(&mut book, request)
+        }
         _ => error(404, "NotFound"),
     }
 }
@@ -327,6 +446,7 @@ fn metadata(flaws: &[Flaw], origin: &str) -> Value {
         "authorization_endpoint": format!("{origin}/oauth/authorize"),
         "token_endpoint": format!("{origin}/oauth/token"),
         "pushed_authorization_request_endpoint": format!("{origin}/oauth/par"),
+        "revocation_endpoint": format!("{origin}/oauth/revoke"),
         "require_pushed_authorization_requests": true,
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
@@ -350,6 +470,11 @@ fn metadata(flaws: &[Flaw], origin: &str) -> Value {
             Flaw::NoDpop => metadata["dpop_signing_alg_values_supported"] = json!([]),
             Flaw::NoAtprotoScope => metadata["scopes_supported"] = json!(["openid"]),
             Flaw::AnotherIssuer => metadata["issuer"] = json!("https://issuer.test"),
+            Flaw::NoRevocation => {
+                if let Some(fields) = metadata.as_object_mut() {
+                    fields.remove("revocation_endpoint");
+                }
+            }
             Flaw::Redirects => {}
         }
     }
@@ -484,10 +609,21 @@ fn token(book: &mut Book, origin: &str, request: &Received) -> Reply {
         Err(reply) => return reply,
     };
     let nonce = book.rotate();
-    let refuse = |code: &str| error(400, code).with_header("DPoP-Nonce", &nonce);
-    if request.field("grant_type").as_deref() != Some("authorization_code") {
-        return refuse("unsupported_grant_type");
+    match request.field("grant_type").as_deref() {
+        Some("authorization_code") => exchange(book, origin, request, &key, &nonce),
+        Some("refresh_token") => refresh(book, origin, request, &key, &nonce),
+        _ => error(400, "unsupported_grant_type").with_header("DPoP-Nonce", &nonce),
     }
+}
+
+fn exchange(
+    book: &mut Book,
+    origin: &str,
+    request: &Received,
+    key: &VerifyingKey,
+    nonce: &str,
+) -> Reply {
+    let refuse = |code: &str| error(400, code).with_header("DPoP-Nonce", nonce);
     let code = request.field("code").unwrap_or_default();
     let Some((pushed, did)) = book.codes.remove(&code) else {
         return refuse("invalid_grant");
@@ -501,10 +637,79 @@ fn token(book: &mut Book, origin: &str, request: &Received) -> Reply {
     if verifier.len() < 43 || base64url(&Sha256::digest(verifier.as_bytes())) != pushed.challenge {
         return refuse("invalid_grant");
     }
-    if key != pushed.key {
+    if *key != pushed.key {
         return refuse("invalid_dpop_proof");
     }
     let subject = book.subject.clone().unwrap_or(did);
+    let scope = book
+        .granted_scope
+        .clone()
+        .unwrap_or_else(|| pushed.scope.clone());
+    let access = access_token(book, origin, &subject, &scope);
+    let refresh = unique_token("refresh");
+    book.issued.push(refresh.clone());
+    book.grants.push(Grant {
+        did: subject.clone(),
+        scope: pushed.scope.clone(),
+        client_id: pushed.client_id,
+        key: *key,
+        refresh: refresh.clone(),
+        access: access.clone(),
+        ended: false,
+    });
+    let mut answer = token_answer(book, &access, &subject, &scope);
+    if !book.without_refresh {
+        answer["refresh_token"] = json!(refresh);
+    }
+    Reply::json(200, &answer).with_header("DPoP-Nonce", nonce)
+}
+
+fn refresh(
+    book: &mut Book,
+    origin: &str,
+    request: &Received,
+    key: &VerifyingKey,
+    nonce: &str,
+) -> Reply {
+    let refuse = |code: &str| error(400, code).with_header("DPoP-Nonce", nonce);
+    if book.limiting_refreshes {
+        return error(429, "rate_limited").with_header("DPoP-Nonce", nonce);
+    }
+    if book.refusing_refreshes {
+        return refuse("invalid_grant");
+    }
+    let presented = request.field("refresh_token").unwrap_or_default();
+    let Some(index) = book
+        .grants
+        .iter()
+        .position(|grant| grant.refresh == presented && !grant.ended)
+    else {
+        return refuse("invalid_grant");
+    };
+    let grant = book.grants[index].clone();
+    if request.field("client_id").as_deref() != Some(grant.client_id.as_str()) {
+        return refuse("invalid_client");
+    }
+    if *key != grant.key {
+        return refuse("invalid_dpop_proof");
+    }
+    let scope = book
+        .widened_refresh
+        .clone()
+        .unwrap_or_else(|| grant.scope.clone());
+    let access = access_token(book, origin, &grant.did, &scope);
+    let rotated = unique_token("refresh");
+    book.issued.push(rotated.clone());
+    book.grants[index].refresh = rotated.clone();
+    book.grants[index].access = access.clone();
+    let mut answer = token_answer(book, &access, &grant.did, &scope);
+    answer["refresh_token"] = json!(rotated);
+    Reply::json(200, &answer).with_header("DPoP-Nonce", nonce)
+}
+
+/// A fresh access token for `subject`, JWT-shaped unless the world issues
+/// opaque ones.
+fn access_token(book: &mut Book, origin: &str, subject: &str, scope: &str) -> String {
     let access = if book.opaque {
         unique_token("access")
     } else {
@@ -512,28 +717,39 @@ fn token(book: &mut Book, origin: &str, request: &Received) -> Reply {
             "{}.{}.{}",
             base64url(br#"{"alg":"ES256","typ":"at+jwt"}"#),
             base64url(
-                json!({ "sub": subject, "scope": pushed.scope, "aud": origin })
+                json!({ "sub": subject, "scope": scope, "aud": origin })
                     .to_string()
                     .as_bytes()
             ),
             base64url(unique_token("signature").as_bytes())
         )
     };
-    let refresh = unique_token("refresh");
     book.issued.push(access.clone());
-    book.issued.push(refresh.clone());
-    Reply::json(
-        200,
-        &json!({
-            "access_token": access,
-            "refresh_token": refresh,
-            "token_type": "DPoP",
-            "expires_in": 3600,
-            "scope": pushed.scope,
-            "sub": subject,
-        }),
-    )
-    .with_header("DPoP-Nonce", &nonce)
+    access
+}
+
+/// The token answer, without its refresh token.
+fn token_answer(book: &Book, access: &str, subject: &str, scope: &str) -> Value {
+    json!({
+        "access_token": access,
+        "token_type": book.token_type.clone().unwrap_or_else(|| "DPoP".to_owned()),
+        "expires_in": book.access_lifetime.unwrap_or(3600),
+        "scope": scope,
+        "sub": subject,
+    })
+}
+
+/// Ends the grant the presented token belongs to (RFC 7009): the answer is
+/// 200 whether or not the token was known.
+fn revoke(book: &mut Book, request: &Received) -> Reply {
+    let token = request.field("token").unwrap_or_default();
+    book.revocations.push(token.clone());
+    for grant in &mut book.grants {
+        if grant.refresh == token || grant.access == token {
+            grant.ended = true;
+        }
+    }
+    Reply::json(200, &json!({}))
 }
 
 /// Checks one DPoP proof the way a server does: a compact JWS of three

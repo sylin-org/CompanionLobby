@@ -513,6 +513,19 @@ fn every_ask_is_refused_as_unsupported_before_the_material_is_read() {
     assert!(world.server().requests().is_empty());
 }
 
+/// Whether `host` resolves, through the system resolver, to this machine
+/// only, as RFC 6761 has `.localhost` names do.
+fn resolves_to_this_machine(host: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    (host, 443)
+        .to_socket_addrs()
+        .map(|addresses| {
+            let addresses: Vec<_> = addresses.collect();
+            !addresses.is_empty() && addresses.iter().all(|address| address.ip().is_loopback())
+        })
+        .unwrap_or(false)
+}
+
 #[test]
 fn the_public_world_refuses_loopback_and_private_targets_before_anything_is_sent() {
     let adapter = Atproto::new(World::public(None).expect("the public world"));
@@ -526,4 +539,93 @@ fn the_public_world_refuses_loopback_and_private_targets_before_anything_is_sent
         );
     }
     assert!(World::public(Some("http://127.0.0.1:5300")).is_err());
+
+    // A name that parses as a public origin but resolves to this machine is
+    // refused by the address policy itself, before a connection opens: an
+    // account document on such a host, and an authorization server there.
+    let host = "lobby-policy-check.localhost";
+    if !resolves_to_this_machine(host) {
+        eprintln!("{host} does not resolve to this machine here; the policy check is skipped");
+        return;
+    }
+    assert_eq!(
+        adapter
+            .begin_sign_in(&request(&format!("did:web:{host}"), "state-policy-1"))
+            .map(|start| start.url),
+        Err(Outcome::Refused),
+        "the document's host resolves to loopback, which the public world never reaches"
+    );
+    let elsewhere = Atproto::new(
+        World::public(Some(&format!("https://{host}"))).expect("a public-looking origin"),
+    );
+    assert_eq!(
+        elsewhere
+            .begin_sign_in(&request("", "state-policy-2"))
+            .map(|start| start.url),
+        Err(Outcome::Refused),
+        "the authorization server's name resolves to loopback"
+    );
+}
+
+#[test]
+fn a_handle_its_account_does_not_claim_back_names_nobody() {
+    let world = world();
+    world.alias_handle("alias.example.test", ADA);
+    let adapter = adapter(&world);
+    assert_eq!(
+        adapter
+            .begin_sign_in(&request("alias.example.test", "state-alias"))
+            .map(|start| start.url),
+        Err(Outcome::NotFound),
+        "the resolver names ada, and ada's document does not claim the handle"
+    );
+    assert_eq!(
+        world.server().count(&format!("/{ADA}")),
+        1,
+        "the document was read"
+    );
+    assert_eq!(world.server().count("/oauth/par"), 0, "nothing was pushed");
+}
+
+/// Signs in as ada with the world's token answer flawed by `flaw`, and
+/// answers how the completion ended.
+fn completed_with(flaw: impl Fn(&AtprotoWorld)) -> Result<String, Outcome> {
+    let world = world();
+    world.sign_in_as(ADA);
+    flaw(&world);
+    let adapter = adapter(&world);
+    let request = request("", "state-flawed-answer");
+    let start = adapter.begin_sign_in(&request).expect("a sign-in starts");
+    adapter
+        .complete_sign_in(&request, &returned(&world.approve(&start.url)))
+        .map(|signed| signed.account.as_str().to_owned())
+}
+
+#[test]
+fn a_token_answer_that_breaks_the_profile_signs_nothing_in() {
+    assert_eq!(
+        completed_with(|_| {}),
+        Ok(ADA.to_owned()),
+        "the unflawed answer"
+    );
+    assert_eq!(
+        completed_with(|world| world.token_type_is("Bearer")),
+        Err(Outcome::Refused),
+        "a token that is not DPoP-bound"
+    );
+    assert_eq!(
+        completed_with(AtprotoWorld::without_refresh_token),
+        Err(Outcome::Refused),
+        "no refresh token"
+    );
+    assert_eq!(
+        completed_with(|world| world.grants_scope("atproto transition:generic")),
+        Err(Outcome::Refused),
+        "a scope wider than the one asked for"
+    );
+    assert_eq!(
+        completed_with(|world| world.grants_scope("transition:generic")),
+        Err(Outcome::Refused),
+        "a scope without atproto"
+    );
 }

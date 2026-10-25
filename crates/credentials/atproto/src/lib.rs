@@ -65,6 +65,7 @@ pub mod flight;
 pub mod identity;
 pub mod material;
 pub mod server;
+pub mod tokens;
 pub mod wire;
 
 use std::time::{Duration, Instant};
@@ -82,6 +83,7 @@ use crate::dpop::DpopKey;
 use crate::flight::{Flight, Flights};
 use crate::identity::Named;
 use crate::material::Material;
+use crate::tokens::{TOKEN_LIMIT, Tokens};
 use crate::wire::{json_object, proved_post, status_outcome};
 
 pub use crate::wire::World;
@@ -102,9 +104,6 @@ pub const SCOPE: &str = "atproto";
 
 /// How many of the handles a document claims are tried as its label.
 const LABEL_HANDLES: usize = 3;
-
-/// The longest token, code or state accepted.
-const TOKEN_LIMIT: usize = 4096;
 
 /// The atproto credential adapter.
 pub struct Atproto {
@@ -180,7 +179,7 @@ impl Atproto {
 
     /// Exchanges `code` for the session `flight` started, and checks what
     /// came back: the token pair, its subject and its scope.
-    fn exchange(&self, flight: &Flight, code: &str) -> Result<(Value, Vec<String>), Outcome> {
+    fn exchange(&self, flight: &Flight, code: &str) -> Result<Tokens, Outcome> {
         let fields = [
             ("grant_type", "authorization_code"),
             ("code", code),
@@ -195,38 +194,11 @@ impl Atproto {
             &flight.key,
             flight.nonce.clone(),
         )?;
-        let tokens = json_object(&answered.response).map_err(|outcome| match outcome {
+        let answer = json_object(&answered.response).map_err(|outcome| match outcome {
             Outcome::NotFound => Outcome::Refused,
             other => other,
         })?;
-        let usable = |field: &str| {
-            tokens[field]
-                .as_str()
-                .is_some_and(|token| is_token(token, TOKEN_LIMIT))
-        };
-        if !tokens["token_type"]
-            .as_str()
-            .is_some_and(|kind| kind.eq_ignore_ascii_case("DPoP"))
-            || !usable("access_token")
-            || !usable("refresh_token")
-            || !tokens["sub"].as_str().is_some_and(identity::valid_did)
-        {
-            return Err(Outcome::Refused);
-        }
-        let asked: Vec<&str> = flight.scope.split(' ').collect();
-        let granted: Vec<String> = tokens["scope"]
-            .as_str()
-            .unwrap_or_default()
-            .split(' ')
-            .filter(|word| !word.is_empty())
-            .map(str::to_owned)
-            .collect();
-        if !granted.iter().any(|word| word == SCOPE)
-            || !granted.iter().all(|word| asked.contains(&word.as_str()))
-        {
-            return Err(Outcome::Refused);
-        }
-        Ok((tokens, granted))
+        tokens::checked(&answer, &flight.scope)
     }
 }
 
@@ -317,8 +289,8 @@ impl CredentialAdapter for Atproto {
             .get("code")
             .filter(|code| is_token(code, TOKEN_LIMIT))
             .ok_or(Outcome::Refused)?;
-        let (tokens, permissions) = self.exchange(&flight, code)?;
-        let subject = tokens["sub"].as_str().unwrap_or_default().to_owned();
+        let tokens = self.exchange(&flight, code)?;
+        let subject = tokens.subject.clone();
         if let Some((did, _)) = &flight.expected
             && *did != subject
         {
@@ -336,10 +308,11 @@ impl CredentialAdapter for Atproto {
         }
         let account = AccountKey::new(&subject).ok_or(Outcome::Refused)?;
         let label = self.label(&subject, &document.handles)?;
+        let permissions = tokens.granted.clone();
         let material = Material {
             subject,
-            access: Secret::new(tokens["access_token"].as_str().unwrap_or_default()),
-            refresh: Secret::new(tokens["refresh_token"].as_str().unwrap_or_default()),
+            access: tokens.access,
+            refresh: tokens.refresh,
             pds: document.pds,
             authserver: flight.authserver,
             client_id: flight.client_id,
