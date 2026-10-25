@@ -64,13 +64,13 @@ const NONCE_LIMIT: usize = 1024;
 
 /// Why an account signed in without leave to prove itself to a service
 /// cannot give one, and what brings it.
-pub const NOT_GRANTED: &str = "The account was signed in before this service needed it, so it cannot prove itself here. Revoking the account on the manager page and signing it in again grants that; revoking it revokes its other connections too.";
+pub const NOT_GRANTED: &str = "The account was signed in before this service needed it, so it cannot prove itself here. The sponsor grants that by revoking the account on the manager page and signing it in again, which revokes its other connections too.";
 
 /// What the PDS refusing the method says.
-pub const REFUSED_BY_PDS: &str = "The account's server refused to prove the account to this service. Revoking the account on the manager page and signing it in again asks its server for that leave anew; revoking it revokes its other connections too.";
+pub const REFUSED_BY_PDS: &str = "The account's server refused to prove the account to this service. The sponsor can ask it for that leave anew by revoking the account on the manager page and signing it in again, which revokes its other connections too.";
 
 /// What a session the PDS does not take says.
-pub const NOT_TAKEN: &str = "The account's server does not take this sign-in any more. Sign the companion in again on the manager page.";
+pub const NOT_TAKEN: &str = "The account's server stopped taking this sign-in, so the sponsor needs to sign the companion in again on the manager page.";
 
 /// Whether `audience` is an exact service reference an atproto account may
 /// prove itself to.

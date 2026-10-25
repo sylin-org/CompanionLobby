@@ -65,7 +65,7 @@ pub fn stamp_permission(method: &str) -> String {
 
 /// What the adapter says when an account was not granted a stamp a service
 /// asks for.
-pub const NOT_GRANTED: &str = "This Passbook account was signed in without leave to be stamped for this service. Revoking it on the manager page and signing it in again grants that; revoking it revokes its other connections too.";
+pub const NOT_GRANTED: &str = "This Passbook account was signed in without leave to be stamped for this service. The sponsor grants that by revoking it on the manager page and signing it in again, which revokes its other connections too.";
 
 /// How long a key lives when a test says nothing else, in seconds.
 pub const KEY_SECS: u64 = 3600;
