@@ -10,16 +10,11 @@
 //! The page writes text only through `textContent` and text nodes, never
 //! through markup, so nothing a companion's name holds can become markup. It
 //! never opens a dialog: a destructive action asks for confirmation in place.
-//! Links marked `data-link` are routed inside the page. A companion's page
-//! lists its accounts with a revoke for each ready one, and offers a sign-in
-//! for each provider kind the lobby runs with; a sign-in has a page of its
-//! own between the lobby and the provider, which names the companion and
-//! the account the sponsor meant, links to the provider's page in a new tab,
-//! and follows the sign-in until it is signed in, refused, cancelled or
-//! expired. Each companion shows
-//! the `mcpServers` block a host configuration needs, naming the companion by
-//! its immutable id, with a warning that host configurations naming it by its
-//! moniker stop working after a rename.
+//! Links marked `data-link` are routed inside the page. What the sponsor
+//! types is kept as a draft in the tab's own storage, so a reload loses
+//! nothing; everything else it shows comes from the lobby. The routes, the
+//! moments they serve and the words they use are described in
+//! `docs/manager.md`.
 //!
 //! This module also writes the live feed's frames.
 
@@ -42,16 +37,22 @@ pub const SCRIPT: (&str, &str) = (
     "text/javascript; charset=utf-8",
 );
 /// The content security policy of every file the page is made of: its own
-/// script and stylesheet, requests to its own origin, nothing else.
+/// script and stylesheet, requests to its own origin, nothing else. Images
+/// come from its own origin, or from a file the sponsor just chose, shown
+/// before it is sent.
 pub const CONTENT_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
-     connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+     connect-src 'self'; img-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-/// Whether `path` is a route of the page: the companions, one companion, one
-/// of its sign-ins, or the journal.
+/// Whether `path` is a route of the page: the companions, the journal, one
+/// companion, the page that tells a host how to attach as it, or one of its
+/// sign-ins.
 pub fn is_page_path(path: &str) -> bool {
     let Some(rest) = path.strip_prefix("/companion/") else {
         return matches!(path, "/" | "/journal");
     };
+    if let Some(id) = rest.strip_suffix("/attach") {
+        return CompanionId::parse(id).is_some();
+    }
     match rest.split_once("/sign-in/") {
         Some((id, sign_in)) => {
             CompanionId::parse(id).is_some()
@@ -121,6 +122,40 @@ mod tests {
     }
 
     #[test]
+    fn the_page_shows_an_account_by_its_label_and_its_key_only_in_its_details() {
+        let script = SCRIPT.0;
+        let keys: Vec<&str> = script
+            .lines()
+            .filter(|line| line.contains("credential.account"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                r#"facts.append(element("dt", "", "Account key"), element("dd", "mono", credential.account));"#
+            ],
+            "the account key appears once, inside the account's details"
+        );
+        assert!(script.contains(r#"element("strong", "", credential.label)"#));
+        for line in script.lines() {
+            for id in [
+                "companion.id",
+                "credential.id",
+                "connection.id",
+                "signIn.id",
+                "entry.companion",
+            ] {
+                for shown in [format!(", {id})"), format!(", {id} +"), format!("+ {id})")] {
+                    assert!(
+                        !(line.contains("element(") && line.contains(&shown)),
+                        "an id becomes text: {line}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_page_loads_only_its_own_files() {
         let page = PAGE.0;
         assert!(page.contains("<script src=\"/manager.js\" defer></script>"));
@@ -136,6 +171,9 @@ mod tests {
         assert!(is_page_path("/"));
         assert!(is_page_path("/journal"));
         assert!(is_page_path(&format!("/companion/{id}")));
+        assert!(is_page_path(&format!("/companion/{id}/attach")));
+        assert!(!is_page_path("/companion/ada/attach"));
+        assert!(!is_page_path(&format!("/companion/{id}/attach/x")));
         assert!(!is_page_path("/companion/ada"));
         let sign_in = "0123456789abcdef0123456789abcdef";
         assert!(is_page_path(&format!("/companion/{id}/sign-in/{sign_in}")));

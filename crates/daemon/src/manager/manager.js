@@ -3,7 +3,9 @@
 // The manager page holds no truth. It loads the lobby, follows the live feed,
 // and loads the lobby again whenever the feed says to reset or a change it
 // asked for was refused because the lobby changed first. Text reaches the
-// page only through textContent; nothing becomes markup.
+// page only through textContent; nothing becomes markup. What the sponsor
+// types is kept as a draft in this tab's own storage, so a reload loses
+// nothing; everything else the page shows comes from the lobby.
 
 // ---------- small helpers ----------
 
@@ -27,15 +29,29 @@ function button(label, className) {
   return node;
 }
 
-function field(label, value, hint) {
-  const wrapper = element("label", "", label);
+let fieldCount = 0;
+
+// A labelled input; the hint is tied to it for assistive technology.
+function field(label, value, hint, options = {}) {
+  const id = "field-" + (++fieldCount);
+  const wrapper = element("div", "field");
+  const caption = element("label", "", label);
+  caption.htmlFor = id;
   const input = element("input");
-  input.type = "text";
+  input.id = id;
+  input.type = options.type || "text";
   input.value = value || "";
   input.autocomplete = "off";
   input.spellcheck = false;
-  wrapper.append(input);
-  if (hint) wrapper.append(element("span", "hint", hint));
+  if (options.placeholder) input.placeholder = options.placeholder;
+  if (options.required) input.required = true;
+  wrapper.append(caption, input);
+  if (hint) {
+    const said = element("span", "hint", hint);
+    said.id = id + "-hint";
+    input.setAttribute("aria-describedby", said.id);
+    wrapper.append(said);
+  }
   return { wrapper, input };
 }
 
@@ -67,7 +83,8 @@ function note(message, isError) {
   note.timer = setTimeout(() => { line.textContent = ""; }, 6000);
 }
 
-// A destructive action asks in place; the page never opens a dialog.
+// A destructive action asks in place, where the thing lives; the page never
+// opens a dialog.
 function confirmInPlace(trigger, question, confirmLabel, action, cancelLabel = "Keep") {
   const group = element("span", "confirm-inline");
   group.setAttribute("role", "group");
@@ -84,6 +101,19 @@ function confirmInPlace(trigger, question, confirmLabel, action, cancelLabel = "
   });
 }
 
+// Drafts live in this tab's own storage, which may be refused.
+const drafts = {
+  read(key) {
+    try { return JSON.parse(sessionStorage.getItem("draft:" + key) || "null"); } catch { return null; }
+  },
+  write(key, value) {
+    try { sessionStorage.setItem("draft:" + key, JSON.stringify(value)); } catch { /* a draft is a convenience */ }
+  },
+  clear(key) {
+    try { sessionStorage.removeItem("draft:" + key); } catch { /* a draft is a convenience */ }
+  },
+};
+
 // A moniker suggested from a display name: lowercase ASCII, single hyphens.
 function monikerFrom(name) {
   return name.trim().toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "")
@@ -91,14 +121,29 @@ function monikerFrom(name) {
 }
 
 function hue(id) {
-  return Array.from(id).reduce((sum, letter) => sum + letter.charCodeAt(0), 0) % 360;
+  return Array.from(id || "").reduce((sum, letter) => sum + letter.charCodeAt(0), 0) % 360;
 }
 
-function avatar(companion) {
-  const initial = Array.from(companion.displayName || companion.moniker || "?")[0].toUpperCase();
-  const node = element("span", "avatar", initial);
+function initials(name) {
+  const words = String(name || "?").trim().split(/\s+/).filter(Boolean);
+  const letters = words.length > 1 ? [words[0], words[words.length - 1]] : [words[0] || "?"];
+  return letters.map(word => Array.from(word)[0].toUpperCase()).join("");
+}
+
+// A portrait, or the companion's initials when it has none. Only a path of
+// this lobby's own becomes an image.
+function avatar(companion, size) {
+  const node = element("span", "avatar" + (size ? " " + size : ""), initials(companion.displayName || companion.moniker));
   node.setAttribute("aria-hidden", "true");
-  node.style.backgroundColor = "hsl(" + hue(companion.id) + " 70% 70%)";
+  node.style.setProperty("--hue", String(hue(companion.id || companion.displayName)));
+  const source = companion.portrait;
+  if (typeof source === "string" && source.startsWith("/") && !source.startsWith("//")) {
+    const image = element("img");
+    image.alt = "";
+    image.src = source;
+    image.addEventListener("error", () => image.remove());
+    node.append(image);
+  }
   return node;
 }
 
@@ -107,13 +152,28 @@ function attachedText(count) {
   return count === 1 ? "1 mind attached" : count + " minds attached";
 }
 
+function timeText(millis) {
+  const when = new Date(millis);
+  const sameDay = when.toDateString() === new Date().toDateString();
+  return sameDay
+    ? when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : when.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+// The address the sponsor typed, without its scheme.
+function placeText(address) {
+  return String(address || "").replace(/^[a-z]+:\/\//, "");
+}
+
+function companionPath(companion, rest) {
+  return "/companion/" + encodeURIComponent(companion.id) + (rest || "");
+}
+
 // ---------- the lobby: loaded, then patched by the feed ----------
 
-// handoffs holds, in this page's memory only, where the provider's page is
-// for each sign-in this page started, and what the sponsor typed.
 const lobby = {
-  companions: new Map(), credentials: new Map(), signIns: new Map(), kinds: [],
-  handoffs: new Map(), journalHealthy: true, position: 0, loaded: false,
+  companions: new Map(), credentials: new Map(), connections: new Map(), signIns: new Map(),
+  kinds: [], services: [], journalHealthy: true, position: 0, loaded: false,
 };
 let resynchronizing = true;
 let loads = 0;
@@ -129,9 +189,10 @@ function applyItem(seq, item) {
   if (item.kind === "companion") lobby.companions.set(item.companion.id, item.companion);
   else if (item.kind === "companion_removed") lobby.companions.delete(item.id);
   else if (item.kind === "credential") lobby.credentials.set(item.credential.id, item.credential);
+  else if (item.kind === "connection") lobby.connections.set(item.connection.id, item.connection);
   else if (item.kind === "sign_in") lobby.signIns.set(item.signIn.id, item.signIn);
   else if (item.kind === "journal_health") lobby.journalHealthy = item.healthy;
-  else if (item.kind === "journal") journalArrived(item.entry);
+  else if (item.kind === "journal") { journalArrived(item.entry); return false; }
   return true;
 }
 
@@ -145,16 +206,15 @@ async function resynchronize() {
   const result = await call("/api/lobby");
   if (mine !== loads) return;
   if (result.ok) {
-    lobby.companions = new Map(result.body.companions.map(companion => [companion.id, companion]));
-    lobby.credentials = new Map(result.body.credentials.map(credential => [credential.id, credential]));
-    // The lobby lists the sign-ins that wait; the ones this page saw end
-    // stay as the page last heard of them.
-    const ended = [...lobby.signIns.values()].filter(signIn => signIn.status !== "pending");
-    lobby.signIns = new Map(result.body.signIns.map(signIn => [signIn.id, signIn]));
-    for (const signIn of ended) if (!lobby.signIns.has(signIn.id)) lobby.signIns.set(signIn.id, signIn);
-    lobby.kinds = result.body.kinds;
-    lobby.position = result.body.feed.position;
-    lobby.journalHealthy = result.body.journal.healthy;
+    const body = result.body;
+    lobby.companions = new Map(body.companions.map(companion => [companion.id, companion]));
+    lobby.credentials = new Map(body.credentials.map(credential => [credential.id, credential]));
+    lobby.connections = new Map(body.connections.map(connection => [connection.id, connection]));
+    lobby.signIns = new Map(body.signIns.map(signIn => [signIn.id, signIn]));
+    lobby.kinds = body.kinds;
+    lobby.services = body.services;
+    lobby.position = body.feed.position;
+    lobby.journalHealthy = body.journal.healthy;
     lobby.loaded = true;
   }
   resynchronizing = false;
@@ -195,11 +255,72 @@ function startFeed() {
   };
 }
 
-// A reply holds the companion as the command left it; the feed may already
+// A reply holds the record as the command left it; the feed may already
 // have brought a later revision, which the reply must not overwrite.
 function keepNewer(companion) {
   const held = lobby.companions.get(companion.id);
   if (!held || held.revision < companion.revision) lobby.companions.set(companion.id, companion);
+}
+
+// ---------- what the lobby says about one companion ----------
+
+function kindTitle(kind) {
+  const found = lobby.kinds.find(entry => entry.kind === kind);
+  return found ? found.title : kind;
+}
+
+function serviceTitle(name) {
+  const found = lobby.services.find(entry => entry.name === name);
+  return found ? found.title : name;
+}
+
+function credentialsOf(companion) {
+  return [...lobby.credentials.values()].filter(credential => credential.companion === companion.id);
+}
+
+function readyCredential(companion, kind) {
+  return credentialsOf(companion).find(credential => credential.kind === kind && credential.state === "ready");
+}
+
+function waitingNow(signIn) {
+  return signIn.status === "pending" && Date.now() < signIn.expiresAt;
+}
+
+function waitingSignIn(companion, kind) {
+  return [...lobby.signIns.values()].find(signIn => signIn.companion === companion.id && signIn.kind === kind && waitingNow(signIn));
+}
+
+function connectionsOf(companion) {
+  return [...lobby.connections.values()].filter(connection => connection.companion === companion.id);
+}
+
+// The one honest word for a connection, and the one action beside it.
+function connectionWord(connection) {
+  if (connection.state !== "ready") return "revoked";
+  const credential = lobby.credentials.get(connection.credential);
+  return credential && credential.state === "ready" ? "ready" : "sign_in_needed";
+}
+
+const WORDS = { ready: "Ready", sign_in_needed: "Sign in needed", revoked: "Revoked" };
+
+// The connections worth showing: every ready one, and a revoked one only
+// while nothing ready or newer holds its name.
+function shownConnections(companion) {
+  const all = connectionsOf(companion);
+  return all.filter((connection, index) => {
+    if (connection.state === "ready") return true;
+    return !all.some((other, at) => other !== connection && other.service === connection.service && other.label === connection.label && (other.state === "ready" || at > index));
+  });
+}
+
+// What the companion's page offers first: the single primary action.
+function nextStep(companion) {
+  const anyAccount = lobby.kinds.some(entry => readyCredential(companion, entry.kind) || waitingSignIn(companion, entry.kind));
+  if (!anyAccount) return "sign-in";
+  const usable = lobby.services.some(service => service.accepts.some(kind => readyCredential(companion, kind)));
+  const reaching = connectionsOf(companion).some(connection => connection.state === "ready");
+  if (usable && !reaching) return "connect";
+  return null;
 }
 
 // ---------- the router: every state of the page is a route ----------
@@ -208,6 +329,7 @@ const view = document.getElementById("view");
 let editing = false;
 let refreshPending = false;
 let journalView = null;
+let expiryTimer = null;
 
 view.addEventListener("input", () => { editing = true; });
 
@@ -230,6 +352,7 @@ function route() {
   journalView = null;
   render();
   view.focus({ preventScroll: true });
+  window.scrollTo(0, 0);
 }
 
 // A feed update waits while the sponsor edits a form, unless it must not.
@@ -237,15 +360,16 @@ function refresh(force) {
   if (editing && !force) { refreshPending = true; return; }
   editing = false;
   refreshPending = false;
+  const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.key : null;
   render();
-}
-
-function doneEditing() {
-  editing = false;
-  if (refreshPending) refresh(true);
+  if (focused) {
+    const again = view.querySelector('[data-key="' + focused + '"]');
+    if (again) again.focus({ preventScroll: true });
+  }
 }
 
 function render() {
+  clearTimeout(expiryTimer);
   const parts = location.pathname.split("/").filter(Boolean);
   const section = parts[0] === "journal" ? "journal" : "companions";
   document.querySelectorAll(".primary-nav [data-section]").forEach(item => {
@@ -256,152 +380,312 @@ function render() {
   condition.hidden = lobby.journalHealthy;
   condition.textContent = lobby.journalHealthy ? "" : "The journal could not record a change. The change itself happened; the trace log in the data directory says why the journal failed.";
   if (!lobby.loaded) { view.replaceChildren(element("p", "muted", "Loading the lobby…")); return; }
-  if (parts.length === 0) renderCompanions();
-  else if (parts[0] === "journal" && parts.length === 1) renderJournal();
+  if (parts.length === 0) renderLobby();
+  else if (parts[0] === "journal" && parts.length === 1) renderJournalPage();
   else if (parts[0] === "companion" && parts[1] && parts.length === 2) renderCompanion(parts[1]);
+  else if (parts[0] === "companion" && parts.length === 3 && parts[2] === "attach") renderAttach(parts[1]);
   else if (parts[0] === "companion" && parts.length === 4 && parts[2] === "sign-in") renderSignIn(parts[1], parts[3]);
-  else { history.replaceState({}, "", "/"); renderCompanions(); }
+  else { history.replaceState({}, "", "/"); renderLobby(); }
 }
 
-// ---------- companions ----------
+function notHere(text) {
+  view.replaceChildren(link("/", "back", "All companions"), element("h1", "", "Not here"), element("p", "muted", text));
+}
 
-function renderCompanions() {
-  const heading = element("h1", "", "Companions");
+// ---------- the lobby ----------
+
+function renderLobby() {
   const companions = [...lobby.companions.values()];
-  let list;
-  if (companions.length === 0) {
-    list = element("p", "muted", "No companions yet. Create one, then give an MCP host its configuration so a mind can attach as it.");
-  } else {
-    list = element("ul", "cards");
-    for (const companion of companions) {
-      const card = element("li", "card");
-      const words = element("div");
-      words.append(link("/companion/" + encodeURIComponent(companion.id), "", companion.displayName),
-        element("p", "", companion.moniker + " · " + attachedText(companion.attachments)));
-      card.append(avatar(companion), words);
-      list.append(card);
-    }
-  }
-  view.replaceChildren(heading, list, createForm());
+  if (companions.length === 0) { renderFirstRun(); return; }
+  const list = element("ul", "cards");
+  for (const companion of companions) list.append(card(companion));
+  const parts = [element("h1", "", "Companions"), list];
+  const draft = drafts.read("create");
+  const adding = element("section", "adding");
+  adding.setAttribute("aria-label", "Add a companion");
+  const open = button("Add a companion", "primary");
+  open.dataset.key = "add";
+  const form = createForm(false);
+  form.hidden = !draft;
+  open.hidden = !!draft;
+  open.addEventListener("click", () => { open.hidden = true; form.hidden = false; form.querySelector("input").focus(); });
+  form.addEventListener("reset", () => { drafts.clear("create"); form.hidden = true; open.hidden = false; open.focus(); });
+  adding.append(open, form);
+  parts.push(adding);
+  view.replaceChildren(...parts);
 }
 
-function createForm() {
-  const form = element("form");
-  form.setAttribute("aria-label", "Create a companion");
-  const name = field("Display name", "", "What people read.");
-  const moniker = field("Moniker", "", "What a host configuration may name it by: lowercase letters, digits and single hyphens, starting with a letter.");
-  let monikerEdited = false;
-  name.input.addEventListener("input", () => { if (!monikerEdited) moniker.input.value = monikerFrom(name.input.value); });
-  moniker.input.addEventListener("input", () => { monikerEdited = true; });
+function card(companion) {
+  const item = element("li", "card");
+  const words = element("div", "card-words");
+  const name = link(companionPath(companion), "card-name", companion.displayName);
+  const facts = [attachedText(companion.attachments)];
+  const accounts = credentialsOf(companion).filter(credential => credential.state === "ready");
+  facts.push(accounts.length ? "Signed in as " + accounts.map(credential => credential.label).join(", ") : "No account yet");
+  const ready = connectionsOf(companion).filter(connection => connectionWord(connection) === "ready").length;
+  if (ready) facts.push(ready === 1 ? "1 connection ready" : ready + " connections ready");
+  words.append(name, element("p", "", facts.join(" · ")));
+  item.append(avatar(companion), words);
+  return item;
+}
+
+function renderFirstRun() {
+  const intro = element("p", "lede", "A companion is who a mind attaches as. Give yours a name; you can change it later.");
+  view.replaceChildren(element("h1", "", "Name your first companion"), intro, createForm(true));
+}
+
+// The form that names a new companion. Its draft survives a reload.
+function createForm(first) {
+  const form = element("form", "panel");
+  form.setAttribute("aria-label", "Name a companion");
+  form.noValidate = true;
+  const draft = drafts.read("create") || {};
+  const preview = avatar({ displayName: draft.name || "?", id: draft.name || "" }, "large");
+  const name = field("Display name", draft.name, "What people read, such as Ada.", { required: true });
+  const moniker = field("Moniker", draft.moniker, "How a host names it: lowercase letters, digits and single hyphens.");
+  const portrait = field("Portrait (optional)", "", "A PNG, JPEG, WebP or GIF image of at most 512 KiB. Without one, the initials show.", { type: "file" });
+  portrait.input.accept = "image/png,image/jpeg,image/webp,image/gif";
+  name.input.dataset.key = "create-name";
+  moniker.input.dataset.key = "create-moniker";
+  let monikerEdited = !!draft.monikerEdited;
+  let chosen = null;
+  let shownUrl = null;
+  const save = () => drafts.write("create", { name: name.input.value, moniker: moniker.input.value, monikerEdited });
+  const showPreview = () => {
+    const next = avatar({ displayName: name.input.value.trim() || "?", id: name.input.value }, "large");
+    if (shownUrl) URL.revokeObjectURL(shownUrl);
+    shownUrl = null;
+    if (chosen) {
+      const image = element("img");
+      image.alt = "";
+      shownUrl = URL.createObjectURL(chosen);
+      image.src = shownUrl;
+      next.append(image);
+    }
+    previewHolder.replaceChildren(next);
+  };
+  const previewHolder = element("div", "preview");
+  previewHolder.append(preview);
+  name.input.addEventListener("input", () => {
+    if (!monikerEdited) moniker.input.value = monikerFrom(name.input.value);
+    save();
+    showPreview();
+  });
+  moniker.input.addEventListener("input", () => { monikerEdited = true; save(); });
+  portrait.input.addEventListener("change", () => {
+    chosen = portrait.input.files && portrait.input.files[0] ? portrait.input.files[0] : null;
+    showPreview();
+  });
   const create = element("button", "primary", "Create companion");
   create.type = "submit";
   const actions = element("div", "actions");
   actions.append(create);
-  form.append(element("h2", "", "Create a companion"), name.wrapper, moniker.wrapper, actions);
+  if (!first) {
+    const cancel = element("button", "quiet", "Cancel");
+    cancel.type = "reset";
+    actions.append(cancel);
+  }
+  const fields = element("div", "fields");
+  fields.append(name.wrapper, moniker.wrapper, portrait.wrapper);
+  const row = element("div", "create-row");
+  row.append(previewHolder, fields);
+  form.append(row, actions);
   form.addEventListener("submit", async event => {
     event.preventDefault();
-    create.disabled = true;
     const displayName = name.input.value.trim();
-    const result = await call("/api/companions", "POST", { moniker: moniker.input.value.trim(), displayName: displayName || moniker.input.value.trim() });
-    create.disabled = false;
-    if (!result.ok) { note(sentence(result), true); return; }
-    const companion = result.body.companion;
-    note(companion.displayName + " was created.");
-    navigate("/companion/" + encodeURIComponent(companion.id));
+    const wanted = moniker.input.value.trim() || monikerFrom(displayName);
+    if (!displayName) { note("Give the companion a display name first.", true); name.input.focus(); return; }
+    create.disabled = true;
+    const result = await call("/api/companions", "POST", { moniker: wanted, displayName });
+    if (!result.ok) { create.disabled = false; note(sentence(result), true); return; }
+    let companion = result.body.companion;
+    keepNewer(companion);
+    drafts.clear("create");
+    editing = false;
+    if (chosen) {
+      const uploaded = await uploadPortrait(companion, chosen);
+      if (uploaded) companion = uploaded;
+    }
+    navigate(companionPath(companion, "/attach"));
   });
   return form;
 }
 
+function readAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadPortrait(companion, file) {
+  if (file.size > 512 * 1024) { note("That image is too large; a portrait is at most 512 KiB.", true); return null; }
+  let image;
+  try { image = await readAsDataUrl(file); } catch { note("That file could not be read.", true); return null; }
+  const result = await call(companionPath(companion).replace("/companion/", "/api/companions/") + "/portrait", "PUT", { expectedRevision: companion.revision, image });
+  if (!result.ok) { note(sentence(result), true); if (result.status === 409) resynchronize(); return null; }
+  keepNewer(result.body.companion);
+  return result.body.companion;
+}
+
+// ---------- first attachment: what just happened and what comes next ----------
+
+function renderAttach(id) {
+  const companion = lobby.companions.get(id);
+  if (!companion) { notHere("No companion has that id; it may have been removed."); return; }
+  const parts = [link(companionPath(companion), "back", companion.displayName)];
+  const heading = element("div", "identity");
+  heading.append(avatar(companion, "large"), element("h1", "", companion.displayName + " is ready to attach"));
+  parts.push(heading);
+  parts.push(element("p", "lede", "Copy this block into your MCP host's configuration, under mcpServers. The host starts the lobby itself whenever it needs it."));
+  const block = element("div", "config");
+  const text = element("pre", "", companion.hostConfig);
+  text.tabIndex = 0;
+  text.setAttribute("aria-label", "The configuration block for " + companion.displayName);
+  block.append(text);
+  parts.push(block);
+  const attached = companion.attachments > 0;
+  const copy = button("Copy block", attached ? "" : "primary");
+  copy.dataset.key = "copy";
+  copy.addEventListener("click", () => copyBlock(companion, text));
+  const actions = element("div", "actions");
+  actions.append(copy);
+  parts.push(actions);
+  const status = element("p", "status" + (attached ? " ok" : ""));
+  status.setAttribute("role", "status");
+  if (attached) {
+    status.textContent = "A mind is attached as " + companion.displayName + ". Next, lend " + companion.displayName + " an account.";
+    const next = link(companionPath(companion), "button primary", "Lend " + companion.displayName + " an account");
+    next.dataset.key = "lend";
+    parts.push(status, next);
+  } else {
+    status.textContent = "No mind is attached as " + companion.displayName + " yet. This page changes when one attaches.";
+    parts.push(status);
+  }
+  view.replaceChildren(...parts);
+}
+
+async function copyBlock(companion, text) {
+  try {
+    await navigator.clipboard.writeText(companion.hostConfig);
+    note("The block is on the clipboard.");
+  } catch {
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    text.focus();
+    note("The block is selected; copy it with the keyboard.");
+  }
+}
+
+// ---------- one companion: accounts, connections, journal ----------
+
 function renderCompanion(id) {
   const companion = lobby.companions.get(id);
-  const back = link("/", "", "All companions");
-  if (!companion) {
-    view.replaceChildren(back, element("h1", "", "Not here"), element("p", "muted", "No companion has that id; it may have been removed."));
-    return;
-  }
-  const heading = element("h1", "", companion.displayName);
-  const facts = element("p", "muted", companion.moniker + " · " + attachedText(companion.attachments));
-  view.replaceChildren(back, heading, facts, accounts(companion), renameForm(companion), hostConfig(companion), removal(companion));
+  if (!companion) { notHere("No companion has that id; it may have been removed."); return; }
+  const step = nextStep(companion);
+  const head = element("header", "identity");
+  const words = element("div");
+  words.append(element("h1", "", companion.displayName), element("p", "muted", companion.moniker + " · " + attachedText(companion.attachments)));
+  head.append(avatar(companion, "large"), words);
+  const tools = element("div", "head-tools");
+  tools.append(link(companionPath(companion, "/attach"), "", "Host configuration"), settings(companion));
+  view.replaceChildren(link("/", "back", "All companions"), head, tools,
+    accountsSection(companion, step), connectionsSection(companion, step), journalSection(companion));
+  loadCompanionJournal(companion);
 }
 
-// ---------- accounts: credentials and the sign-ins that make them ----------
+// ---------- accounts ----------
 
-function waitingNow(signIn) {
-  return signIn.status === "pending" && Date.now() < signIn.expiresAt;
-}
-
-function credentialsOf(companion) {
-  return [...lobby.credentials.values()].filter(credential => credential.companion === companion.id);
-}
-
-function accounts(companion) {
-  const section = element("section");
-  section.setAttribute("aria-label", "Accounts");
-  const parts = [element("h2", "", "Accounts")];
-  const held = credentialsOf(companion);
-  if (held.length === 0) {
-    parts.push(element("p", "muted", "No account is signed in for " + companion.displayName + " yet."));
-  } else {
-    const list = element("ul", "accounts");
-    for (const credential of held) list.append(credentialLine(credential));
-    parts.push(list);
+function accountsSection(companion, step) {
+  const section = element("section", "block");
+  section.setAttribute("aria-labelledby", "accounts-title");
+  const title = element("h2", "", "Accounts");
+  title.id = "accounts-title";
+  section.append(title);
+  if (lobby.kinds.length === 0) {
+    section.append(element("p", "muted", "No kind of account is installed in this lobby."));
+    return section;
   }
-  for (const kind of lobby.kinds) {
-    const ready = held.some(credential => credential.kind === kind && credential.state === "ready");
-    const waiting = [...lobby.signIns.values()].find(signIn => signIn.companion === companion.id && signIn.kind === kind && waitingNow(signIn));
-    if (waiting) parts.push(waitingLine(companion, waiting));
-    else if (!ready) parts.push(signInForm(companion, kind));
-  }
-  section.append(...parts);
+  const list = element("ul", "rows");
+  for (const entry of lobby.kinds) list.append(accountRow(companion, entry, step === "sign-in" && entry === lobby.kinds[0]));
+  section.append(list);
   return section;
 }
 
-function credentialLine(credential) {
-  const line = element("li", "account");
-  const words = element("div");
-  const facts = [credential.kind, credential.state === "ready" ? "signed in" : "revoked"];
-  if (credential.permissions.length) facts.push("permissions: " + credential.permissions.join(", "));
-  words.append(element("strong", "", credential.account), element("p", "hint", facts.join(" · ")));
-  line.append(words);
-  if (credential.state === "ready") {
-    const trigger = button("Revoke", "danger");
-    confirmInPlace(trigger, "Revoke this account for this companion? Every connection made with it is revoked too.", "Revoke", async () => {
-      const result = await call("/api/credentials/" + encodeURIComponent(credential.id) + "/revoke", "POST", {});
-      if (!result.ok) {
-        note(sentence(result), true);
-        if (result.status === 409) resynchronize();
-        return;
-      }
-      lobby.credentials.set(credential.id, result.body.credential);
-      note("The account was revoked.");
-      refresh(true);
-    });
-    line.append(trigger);
+function accountRow(companion, entry, primary) {
+  const row = element("li", "row");
+  row.id = "account-" + entry.kind;
+  const credential = readyCredential(companion, entry.kind);
+  const waiting = waitingSignIn(companion, entry.kind);
+  if (credential) {
+    const words = element("div", "row-words");
+    words.append(element("strong", "", credential.label), element("span", "kind", entry.title + " account"));
+    const details = element("details", "details");
+    details.append(element("summary", "", "Details"));
+    const facts = element("dl");
+    facts.append(element("dt", "", "Account key"), element("dd", "mono", credential.account));
+    facts.append(element("dt", "", "Granted"), element("dd", "", credential.permissions.length ? credential.permissions.join(", ") : "Nothing beyond the sign-in"));
+    details.append(facts);
+    words.append(details);
+    const revoke = button("Revoke", "danger");
+    revoke.dataset.key = "revoke-" + credential.id;
+    const derived = connectionsOf(companion).filter(connection => connection.credential === credential.id && connection.state === "ready").length;
+    const question = "Revoke " + credential.label + " for " + companion.displayName + "?" + (derived ? " Its connections are revoked too." : "");
+    confirmInPlace(revoke, question, "Revoke", () => revokeCredential(companion, credential));
+    row.append(words, element("span", "word ok", "Signed in"), revoke);
+    return row;
   }
-  return line;
+  if (waiting) {
+    const words = element("div", "row-words");
+    words.append(element("strong", "", waiting.account || "An account of your choice"), element("span", "kind", entry.title + " account"));
+    const follow = link(companionPath(companion, "/sign-in/" + encodeURIComponent(waiting.id)), "button" + (primary ? " primary" : ""), "Continue");
+    follow.dataset.key = "continue-" + waiting.id;
+    row.append(words, element("span", "word", "Signing in"), follow);
+    return row;
+  }
+  const revoked = credentialsOf(companion).filter(credential => credential.kind === entry.kind).pop();
+  row.classList.add("row-form");
+  if (revoked) row.append(element("p", "muted wide", revoked.label + " was revoked. Sign " + companion.displayName + " in again to lend an account."));
+  row.append(signInForm(companion, entry, primary));
+  return row;
 }
 
-function waitingLine(companion, signIn) {
-  const line = element("p", "warning");
-  line.append(document.createTextNode("A sign-in with " + signIn.kind + " is waiting until " + new Date(signIn.expiresAt).toLocaleTimeString() + ". "),
-    link("/companion/" + encodeURIComponent(companion.id) + "/sign-in/" + encodeURIComponent(signIn.id), "", "Follow it"));
-  return line;
+async function revokeCredential(companion, credential) {
+  const result = await call("/api/credentials/" + encodeURIComponent(credential.id) + "/revoke", "POST", {});
+  if (!result.ok) {
+    note(sentence(result), true);
+    if (result.status === 409) resynchronize();
+    return;
+  }
+  lobby.credentials.set(credential.id, result.body.credential);
+  for (const connection of lobby.connections.values()) {
+    if (connection.credential === credential.id) lobby.connections.set(connection.id, Object.assign({}, connection, { state: "revoked" }));
+  }
+  note(credential.label + " is revoked for " + companion.displayName + ".");
+  refresh(true);
 }
 
-function signInForm(companion, kind) {
-  const form = element("form");
-  form.setAttribute("aria-label", "Sign " + companion.displayName + " in with " + kind);
-  const account = field("Account with " + kind + " (optional)", "", "What the provider calls the account, such as its handle. Leave it empty to choose the account on the provider's own page.");
-  const go = element("button", "primary", "Sign in with " + kind);
+function signInForm(companion, entry, primary) {
+  const form = element("form", "inline-form");
+  form.setAttribute("aria-label", "Sign " + companion.displayName + " in with " + entry.title);
+  const key = "sign-in:" + companion.id + ":" + entry.kind;
+  const account = field(entry.title + " account (optional)", drafts.read(key) || "", "The account's handle or name. Leave it empty to choose it on the sign-in page.");
+  account.input.dataset.key = key;
+  account.input.addEventListener("input", () => drafts.write(key, account.input.value));
+  const go = element("button", primary ? "primary" : "", "Sign in with " + entry.title);
   go.type = "submit";
-  const actions = element("div", "actions");
-  actions.append(go);
-  form.append(account.wrapper, actions);
+  go.dataset.key = key + ":go";
+  form.append(account.wrapper, go);
   form.addEventListener("submit", async event => {
     event.preventDefault();
     go.disabled = true;
     const hint = account.input.value.trim();
-    const result = await call("/api/sign-ins", "POST", { companion: companion.id, kind, hint });
+    const result = await call("/api/sign-ins", "POST", { companion: companion.id, kind: entry.kind, hint });
     go.disabled = false;
     if (!result.ok) {
       note(sentence(result), true);
@@ -410,97 +694,302 @@ function signInForm(companion, kind) {
     }
     const signIn = result.body.signIn;
     lobby.signIns.set(signIn.id, signIn);
-    lobby.handoffs.set(signIn.id, { url: result.body.url, hint });
-    navigate("/companion/" + encodeURIComponent(companion.id) + "/sign-in/" + encodeURIComponent(signIn.id));
+    handoffs.write(signIn.id, result.body.url);
+    drafts.clear(key);
+    editing = false;
+    navigate(companionPath(companion, "/sign-in/" + encodeURIComponent(signIn.id)));
   });
   return form;
 }
 
-let expiryTimer = null;
+// Where the sign-in page is, kept in this tab only: the lobby never shows it.
+const handoffs = {
+  read(id) { try { return sessionStorage.getItem("handoff:" + id); } catch { return null; } },
+  write(id, url) { try { sessionStorage.setItem("handoff:" + id, url); } catch { /* the tab that started it shows the link */ } },
+  clear(id) { try { sessionStorage.removeItem("handoff:" + id); } catch { /* nothing kept */ } },
+};
 
-// The page between the lobby and the provider: it names the companion and
-// the account the sponsor meant, links to the provider's page, and follows
-// the sign-in until it ends.
+// The page between the lobby and the provider. It names the companion, the
+// account the sponsor meant, as the lobby remembers it, and what is being
+// granted, and follows the sign-in until it ends.
 function renderSignIn(companionId, signInId) {
-  clearTimeout(expiryTimer);
   const companion = lobby.companions.get(companionId);
   const signIn = lobby.signIns.get(signInId);
-  const handoff = lobby.handoffs.get(signInId);
-  if (!companion || !signIn || signIn.companion !== companionId) {
-    view.replaceChildren(link("/", "", "All companions"), element("h1", "", "Not here"),
-      element("p", "muted", "This page does not know that sign-in; it may have ended. Start one from the companion's page."));
+  if (!companion) { notHere("No companion has that id; it may have been removed."); return; }
+  const back = link(companionPath(companion), "back", companion.displayName);
+  if (!signIn || signIn.companion !== companionId) {
+    view.replaceChildren(back, element("h1", "", "This sign-in has ended"),
+      element("p", "", "The lobby does not know this sign-in; it ended before the lobby last started. Nothing was signed in by it."),
+      link(companionPath(companion), "button primary", "Back to " + companion.displayName));
     return;
   }
-  const back = link("/companion/" + encodeURIComponent(companion.id), "", companion.displayName);
-  const heading = element("h1", "", "Sign " + companion.displayName + " in with " + signIn.kind);
-  const meant = handoff && handoff.hint
-    ? "The account: " + handoff.hint + ". Sign in as it on the provider's page; another account signs nothing in."
-    : "The account: the one you choose on the provider's page.";
-  const parts = [back, heading, element("p", "", meant)];
-  const signedIn = credentialsOf(companion).find(credential => credential.kind === signIn.kind && credential.state === "ready");
+  const title = kindTitle(signIn.kind);
+  const parts = [back, element("h1", "", "Sign " + companion.displayName + " in with " + title)];
+  const meant = element("p", "lede");
+  meant.append(document.createTextNode("The account: "), element("strong", "", signIn.account || "the one you choose on the sign-in page"), document.createTextNode("."));
+  parts.push(meant, element("p", "", companion.displayName + " receives this account's identity and nothing more. No connection opens until you grant one."));
+  const status = element("p", "status");
+  status.setAttribute("role", "status");
+  parts.push(status);
+  const actions = element("div", "actions");
+  let after = null;
   if (waitingNow(signIn)) {
-    parts.push(element("p", "muted", "Waiting for the provider to send you back, until " + new Date(signIn.expiresAt).toLocaleTimeString() + "."));
-    const actions = element("div", "actions");
-    if (handoff && handoff.url) {
-      const onward = element("a", "button primary", "Continue to " + new URL(handoff.url).host);
-      onward.href = handoff.url;
+    status.textContent = "Waiting for the sign-in page to send you back, until " + timeText(signIn.expiresAt) + ".";
+    const url = handoffs.read(signIn.id);
+    if (url) {
+      const onward = element("a", "button primary", "Continue to sign in");
+      onward.href = url;
       onward.target = "_blank";
       onward.rel = "noopener noreferrer";
+      onward.dataset.key = "onward";
       actions.append(onward);
+      let host = "";
+      try { host = new URL(url).hostname; } catch { host = ""; }
+      if (host) after = element("p", "hint", "Opens " + host + " in a new tab. Come back here when it is done.");
     } else {
-      parts.push(element("p", "hint", "The provider's page is linked only from the page that started this sign-in. Cancel it and start again if that page was closed."));
+      parts.push(element("p", "hint", "The sign-in page opens from the tab that started this sign-in. Finish there, or cancel this one and start again here."));
     }
     const cancel = button("Cancel sign-in", "danger");
+    cancel.dataset.key = "cancel";
     confirmInPlace(cancel, "Cancel this sign-in? Nothing is signed in.", "Cancel sign-in", async () => {
       const result = await call("/api/sign-ins/" + encodeURIComponent(signIn.id) + "/cancel", "POST", {});
-      if (!result.ok) {
-        note(sentence(result), true);
-        resynchronize();
-        return;
-      }
+      if (!result.ok) { note(sentence(result), true); resynchronize(); return; }
       lobby.signIns.set(signIn.id, result.body.signIn);
-      if (handoff) handoff.url = null;
+      handoffs.clear(signIn.id);
       note("The sign-in was cancelled.");
       refresh(true);
     }, "Keep waiting");
     actions.append(cancel);
-    parts.push(actions);
     expiryTimer = setTimeout(() => refresh(false), Math.max(0, signIn.expiresAt - Date.now()) + 500);
-  } else if (signIn.status === "signed_in") {
-    parts.push(element("p", "ok", signedIn
-      ? "Signed in: " + signedIn.account + " is now " + companion.displayName + "'s " + signIn.kind + " account."
-      : "Signed in."));
-  } else if (signIn.status === "cancelled") {
-    parts.push(element("p", "muted", "This sign-in was cancelled; nothing was signed in."));
-  } else if (signIn.status === "refused") {
-    parts.push(element("p", "error", "The provider's answer did not complete this sign-in; nothing was signed in. Start it again from the companion's page."));
   } else {
-    parts.push(element("p", "muted", "This sign-in expired; nothing was signed in. Start it again from the companion's page."));
+    const credential = readyCredential(companion, signIn.kind);
+    const said = {
+      signed_in: credential
+        ? "Signed in. " + companion.displayName + "'s " + title + " account is " + credential.label + "."
+        : "Signed in.",
+      cancelled: "This sign-in was cancelled. Nothing was signed in.",
+      refused: "The sign-in page's answer did not complete this sign-in. Nothing was signed in.",
+    }[signIn.status] || "This sign-in expired before it came back. Nothing was signed in.";
+    status.textContent = said;
+    status.className = "status" + (signIn.status === "signed_in" ? " ok" : "");
+    handoffs.clear(signIn.id);
+    const onward = link(companionPath(companion), "button primary", signIn.status === "signed_in" ? "Back to " + companion.displayName : "Start again from " + companion.displayName + "'s page");
+    onward.dataset.key = "back";
+    actions.append(onward);
   }
+  parts.push(actions);
+  if (after) parts.push(after);
   view.replaceChildren(...parts);
 }
 
-function renameForm(companion) {
-  const form = element("form");
-  form.setAttribute("aria-label", "Rename " + companion.displayName);
-  const name = field("Display name", companion.displayName);
-  const moniker = field("Moniker", companion.moniker);
-  const warning = element("p", "warning", "A host configuration that names this companion by its moniker stops working after the moniker changes. The configuration below names it by its id and keeps working.");
-  warning.hidden = true;
-  moniker.input.addEventListener("input", () => { warning.hidden = moniker.input.value.trim() === companion.moniker; });
-  const save = element("button", "primary", "Save");
-  save.type = "submit";
-  const cancel = button("Discard changes", "quiet");
-  cancel.addEventListener("click", () => refresh(true));
+// ---------- connections ----------
+
+function connectionsSection(companion, step) {
+  const section = element("section", "block");
+  section.setAttribute("aria-labelledby", "connections-title");
+  const title = element("h2", "", "Connections");
+  title.id = "connections-title";
+  section.append(title);
+  if (lobby.services.length === 0) {
+    section.append(element("p", "muted", "This lobby has no service installed yet, so there is nothing to connect " + companion.displayName + " to."));
+    return section;
+  }
+  const shown = shownConnections(companion);
+  if (shown.length) {
+    const list = element("ul", "rows");
+    for (const connection of shown) list.append(connectionRow(companion, connection));
+    section.append(list);
+  } else {
+    section.append(element("p", "muted", companion.displayName + " reaches no service yet."));
+  }
+  lobby.services.forEach((service, index) => section.append(grantPanel(companion, service, step === "connect" && index === 0)));
+  return section;
+}
+
+function connectionRow(companion, connection) {
+  const row = element("li", "row");
+  const word = connectionWord(connection);
+  const words = element("div", "row-words");
+  words.append(element("strong", "", connection.label), element("span", "kind", serviceTitle(connection.service) + " at " + placeText(connection.address)));
+  const shownWord = element("span", "word" + (word === "ready" ? " ok" : word === "revoked" ? " off" : " warn"), WORDS[word]);
+  let action;
+  if (word === "ready") {
+    action = button("Revoke", "danger");
+    confirmInPlace(action, "Revoke " + connection.label + "? " + companion.displayName + "'s tools for it go away at the mind's next call.", "Revoke", () => revokeConnection(companion, connection));
+  } else if (word === "sign_in_needed") {
+    const credential = lobby.credentials.get(connection.credential);
+    action = button("Sign in again");
+    action.addEventListener("click", () => focusSignIn(credential ? credential.kind : ""));
+  } else {
+    const service = lobby.services.find(entry => entry.name === connection.service);
+    const usable = service && service.accepts.map(kind => readyCredential(companion, kind)).find(Boolean);
+    if (usable) {
+      action = button("Open again");
+      action.addEventListener("click", async () => {
+        action.disabled = true;
+        const opened = await grant(companion, usable, connection.service, connection.address, connection.label);
+        action.disabled = false;
+        if (opened) refresh(true);
+      });
+    } else {
+      const kind = service ? service.accepts[0] : "";
+      action = button("Sign in");
+      action.addEventListener("click", () => focusSignIn(kind));
+    }
+  }
+  action.dataset.key = "connection-" + connection.id;
+  row.append(words, shownWord, action);
+  return row;
+}
+
+function focusSignIn(kind) {
+  const row = document.getElementById("account-" + kind);
+  const target = row && row.querySelector("input, a, button");
+  if (target) { row.scrollIntoView({ block: "center" }); target.focus(); }
+}
+
+async function revokeConnection(companion, connection) {
+  const result = await call("/api/connections/" + encodeURIComponent(connection.id) + "/revoke", "POST", {});
+  if (!result.ok) {
+    note(sentence(result), true);
+    if (result.status === 409) resynchronize();
+    return;
+  }
+  lobby.connections.set(connection.id, result.body.connection);
+  note(connection.label + " is revoked for " + companion.displayName + ".");
+  refresh(true);
+}
+
+async function grant(companion, credential, service, address, label) {
+  const result = await call("/api/connections", "POST", { companion: companion.id, credential: credential.id, service, address, label });
+  if (!result.ok) {
+    note(sentence(result), true);
+    if (result.status === 409) resynchronize();
+    return null;
+  }
+  lobby.connections.set(result.body.connection.id, result.body.connection);
+  note(companion.displayName + " reaches " + serviceTitle(service) + " at " + label + ". Its tools appear at the mind's next call.");
+  return result.body.connection;
+}
+
+// A name suggested for a connection: the first word of the address's host,
+// or the service's own name, made unique among the companion's.
+function labelFrom(companion, service, address) {
+  let host = "";
+  try { host = new URL(address.includes("://") ? address : "https://" + address).hostname; } catch { host = ""; }
+  let base = /^[a-z][a-z0-9-]*$/.test(host.split(".")[0] || "") && !/^\d/.test(host) ? host.split(".")[0] : service;
+  base = monikerFrom(base) || service;
+  const taken = new Set(connectionsOf(companion).filter(connection => connection.service === service && connection.state === "ready").map(connection => connection.label));
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) if (!taken.has(base + "-" + n)) return base + "-" + n;
+}
+
+function grantPanel(companion, service, primary) {
+  const panel = element("div", "panel");
+  const heading = element("h3", "", "Open a connection to " + service.title);
+  panel.append(heading);
+  const usable = service.accepts.map(kind => readyCredential(companion, kind)).filter(Boolean);
+  if (usable.length === 0) {
+    const titles = service.accepts.map(kindTitle).join(" or ");
+    panel.append(element("p", "muted", service.title + " takes " + (titles ? "a " + titles + " account" : "an account this lobby cannot sign in") + ". Sign " + companion.displayName + " in above first."));
+    return panel;
+  }
+  const form = element("form", "fields");
+  form.setAttribute("aria-label", "Open a connection for " + companion.displayName + " to " + service.title);
+  const key = "grant:" + companion.id + ":" + service.name;
+  const draft = drafts.read(key) || {};
+  const address = field("Address", draft.address, "Where this " + service.title + " is, such as " + service.name + ".example.");
+  const label = field("Name", draft.label, "What " + companion.displayName + " says to mean this one.");
+  address.input.dataset.key = key + ":address";
+  label.input.dataset.key = key + ":label";
+  let labelEdited = !!draft.labelEdited;
+  const save = () => drafts.write(key, { address: address.input.value, label: label.input.value, labelEdited });
+  address.input.addEventListener("input", () => {
+    if (!labelEdited) label.input.value = address.input.value.trim() ? labelFrom(companion, service.name, address.input.value.trim()) : "";
+    save();
+  });
+  label.input.addEventListener("input", () => { labelEdited = true; save(); });
+  form.append(address.wrapper, label.wrapper);
+  let account = null;
+  if (usable.length > 1) {
+    const wrapper = element("div", "field");
+    const caption = element("label", "", "Account");
+    account = element("select");
+    account.id = "field-" + (++fieldCount);
+    caption.htmlFor = account.id;
+    for (const credential of usable) {
+      const option = element("option", "", credential.label + " (" + kindTitle(credential.kind) + ")");
+      option.value = credential.id;
+      account.append(option);
+    }
+    wrapper.append(caption, account);
+    form.append(wrapper);
+  }
+  const open = element("button", primary ? "primary" : "", "Open connection");
+  open.type = "submit";
+  open.dataset.key = key + ":open";
   const actions = element("div", "actions");
-  actions.append(save, cancel);
-  form.append(element("h2", "", "Names"), name.wrapper, moniker.wrapper, warning, actions);
+  actions.append(open);
+  form.append(actions);
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    const typed = address.input.value.trim();
+    const where = typed && !typed.includes("://") ? "https://" + typed : typed;
+    const name = label.input.value.trim() || (where ? labelFrom(companion, service.name, where) : "");
+    if (!where) { note("Type where this " + service.title + " is first.", true); address.input.focus(); return; }
+    const same = connectionsOf(companion).find(connection => connection.service === service.name && connection.state === "ready" && placeText(connection.address).replace(/\/$/, "") === placeText(where.toLowerCase()).replace(/\/$/, ""));
+    if (same) { note(companion.displayName + " already reaches this " + service.title + " as " + same.label + ".", true); return; }
+    const credential = account ? usable.find(entry => entry.id === account.value) : usable[0];
+    open.disabled = true;
+    const opened = await grant(companion, credential, service.name, where, name);
+    open.disabled = false;
+    if (opened) { drafts.clear(key); editing = false; refresh(true); }
+  });
+  panel.append(form);
+  return panel;
+}
+
+// ---------- names, portrait and removal ----------
+
+function settings(companion) {
+  const details = element("details", "settings");
+  const draft = drafts.read("rename:" + companion.id);
+  if (draft) details.open = true;
+  details.append(element("summary", "", "Name and portrait"));
+  details.append(renameForm(companion, draft), portraitControls(companion), removal(companion));
+  return details;
+}
+
+function renameForm(companion, draft) {
+  const form = element("form", "fields");
+  form.setAttribute("aria-label", "Rename " + companion.displayName);
+  const key = "rename:" + companion.id;
+  const name = field("Display name", draft ? draft.name : companion.displayName);
+  const moniker = field("Moniker", draft ? draft.moniker : companion.moniker);
+  name.input.dataset.key = key + ":name";
+  moniker.input.dataset.key = key + ":moniker";
+  const warning = element("p", "warning", "A host configuration that names this companion by its moniker stops working after the moniker changes. The block this lobby gives names it by its id and keeps working.");
+  const update = () => {
+    warning.hidden = moniker.input.value.trim() === companion.moniker;
+    if (name.input.value === companion.displayName && moniker.input.value === companion.moniker) drafts.clear(key);
+    else drafts.write(key, { name: name.input.value, moniker: moniker.input.value });
+  };
+  warning.hidden = moniker.input.value.trim() === companion.moniker;
+  name.input.addEventListener("input", update);
+  moniker.input.addEventListener("input", update);
+  const save = element("button", "", "Save names");
+  save.type = "submit";
+  const discard = button("Discard changes", "quiet");
+  discard.addEventListener("click", () => { drafts.clear(key); editing = false; refresh(true); });
+  const actions = element("div", "actions");
+  actions.append(save, discard);
+  form.append(name.wrapper, moniker.wrapper, warning, actions);
   form.addEventListener("submit", async event => {
     event.preventDefault();
     const change = { expectedRevision: companion.revision };
     if (name.input.value.trim() !== companion.displayName) change.displayName = name.input.value.trim();
     if (moniker.input.value.trim() !== companion.moniker) change.moniker = moniker.input.value.trim();
-    if (!("displayName" in change) && !("moniker" in change)) { note("Nothing changed."); doneEditing(); return; }
+    if (!("displayName" in change) && !("moniker" in change)) { note("Nothing changed."); drafts.clear(key); return; }
     save.disabled = true;
     const result = await call("/api/companions/" + encodeURIComponent(companion.id), "PATCH", change);
     save.disabled = false;
@@ -509,48 +998,49 @@ function renameForm(companion) {
       if (result.status === 409) resynchronize();
       return;
     }
+    drafts.clear(key);
     keepNewer(result.body.companion);
     note("Saved.");
+    editing = false;
     refresh(true);
   });
   return form;
 }
 
-function hostConfig(companion) {
-  const section = element("section");
-  section.setAttribute("aria-label", "Host configuration");
-  const block = element("div", "config");
-  const text = element("pre", "", companion.hostConfig);
-  block.append(text);
-  const copy = button("Copy configuration");
-  copy.addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(companion.hostConfig);
-      note("The configuration is on the clipboard.");
-    } catch {
-      const range = document.createRange();
-      range.selectNodeContents(text);
-      const selection = window.getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
-      note("The configuration is selected; copy it with the keyboard.");
-    }
+function portraitControls(companion) {
+  const box = element("div", "fields");
+  const choose = field("Portrait", "", "A PNG, JPEG, WebP or GIF image of at most 512 KiB.", { type: "file" });
+  choose.input.accept = "image/png,image/jpeg,image/webp,image/gif";
+  choose.input.addEventListener("change", async () => {
+    const file = choose.input.files && choose.input.files[0];
+    if (!file) return;
+    const updated = await uploadPortrait(companion, file);
+    if (updated) { note("The portrait is changed."); editing = false; refresh(true); }
   });
-  const actions = element("div", "actions");
-  actions.append(copy);
-  section.append(element("h2", "", "Host configuration"),
-    element("p", "hint", "Add this to an MCP host's mcpServers. The host starts companion-lobby attach, which starts the lobby when it is not running."),
-    block, actions);
-  return section;
+  box.append(choose.wrapper);
+  if (companion.portrait) {
+    const clear = button("Use initials instead", "quiet");
+    clear.addEventListener("click", async () => {
+      const result = await call("/api/companions/" + encodeURIComponent(companion.id) + "/portrait", "PUT", { expectedRevision: companion.revision, image: null });
+      if (!result.ok) { note(sentence(result), true); if (result.status === 409) resynchronize(); return; }
+      keepNewer(result.body.companion);
+      note(companion.displayName + " shows its initials.");
+      refresh(true);
+    });
+    const actions = element("div", "actions");
+    actions.append(clear);
+    box.append(actions);
+  }
+  return box;
 }
 
 function removal(companion) {
-  const section = element("section");
-  const trigger = button("Remove companion", "danger");
+  const box = element("div", "actions removal");
+  const trigger = button("Remove " + companion.displayName, "danger");
   const count = companion.attachments;
   const question = count
-    ? "Remove " + companion.displayName + " and end its " + (count === 1 ? "attachment" : count + " attachments") + "?"
-    : "Remove " + companion.displayName + "?";
+    ? "Remove " + companion.displayName + " and end its " + (count === 1 ? "attachment" : count + " attachments") + "? Its accounts are removed here too."
+    : "Remove " + companion.displayName + "? Its accounts are removed here too.";
   confirmInPlace(trigger, question, "Remove", async () => {
     const result = await call("/api/companions/" + encodeURIComponent(companion.id), "DELETE", { expectedRevision: companion.revision, cascade: count > 0 });
     if (!result.ok) {
@@ -562,93 +1052,123 @@ function removal(companion) {
     note(companion.displayName + " was removed.");
     navigate("/");
   });
-  section.append(element("h2", "", "Remove"), trigger);
-  return section;
+  box.append(trigger);
+  return box;
 }
 
 // ---------- the journal ----------
 
-function who(entry) {
-  if (entry.initiator === "sponsor") return "Sponsor";
-  if (entry.initiator === "lobby") return "Lobby";
-  return "Mind, attachment " + String(entry.attachment || "").slice(0, 8);
-}
-
-function whom(entry) {
-  if (!entry.companion) return "";
-  const companion = lobby.companions.get(entry.companion);
-  return companion ? companion.displayName : "companion " + entry.companion.slice(0, 8);
-}
-
 function entryLine(entry) {
   const line = element("li");
-  const time = element("time", "", new Date(entry.at).toLocaleString());
+  const time = element("time", "", timeText(entry.at));
   time.dateTime = new Date(entry.at).toISOString();
-  const what = [who(entry), (entry.command || entry.tool || entry.kind).replace(/_/g, " "), whom(entry)].filter(Boolean).join(" · ");
+  time.title = new Date(entry.at).toLocaleString();
   const failed = !["done", "accepted", "pending"].includes(entry.outcome);
-  line.append(time, element("span", "", what), element("span", "outcome" + (failed ? " failed" : ""), entry.outcome));
+  line.append(element("span", "said" + (failed ? " failed" : ""), entry.sentence || ""), time);
   return line;
 }
 
-async function loadJournal(before) {
-  const query = before ? "?before=" + encodeURIComponent(before) : "";
-  return call("/api/journal" + query);
+function journalQuery(scope, before) {
+  const query = ["finished=1"];
+  if (scope) query.push("companion=" + encodeURIComponent(scope));
+  if (before) query.push("before=" + encodeURIComponent(before));
+  return "/api/journal?" + query.join("&");
 }
 
 function journalArrived(entry) {
-  // New entries join the list when it shows the newest ones.
-  if (journalView && journalView.live) {
-    if (journalView.entries.some((shown) => shown.seq === entry.seq)) return;
-    journalView.entries.unshift(entry);
-    if (journalView.list) journalView.list.prepend(entryLine(entry));
+  // New entries join a list that shows the newest ones.
+  const shown = journalView;
+  if (!shown || !shown.live || entry.outcome === "pending") return;
+  if (shown.scope && entry.companion !== shown.scope) return;
+  if (shown.entries.some(held => held.seq === entry.seq)) return;
+  shown.entries.unshift(entry);
+  if (shown.list && shown.list.isConnected) {
+    shown.list.prepend(entryLine(entry));
+    if (shown.empty) shown.empty.remove();
   }
 }
 
-async function renderJournal() {
-  if (journalView) { drawJournal(); return; }
-  const mine = journalView = { entries: [], next: null, live: true, list: null };
-  view.replaceChildren(element("h1", "", "Journal"), element("p", "muted", "Loading the journal…"));
-  const result = await loadJournal(null);
-  if (journalView !== mine) return;
-  if (!result.ok) { view.replaceChildren(element("h1", "", "Journal"), element("p", "error", sentence(result))); return; }
-  // Entries that arrived while the page loaded and lie above it stay on top;
-  // the page already holds the rest.
-  const arrived = mine.entries.filter((entry) => entry.seq > result.body.upper);
-  mine.entries = arrived.concat(result.body.entries);
-  mine.next = result.body.next;
-  drawJournal();
-}
-
-function drawJournal() {
-  const state = journalView;
+function journalBlock(state) {
+  const box = element("div");
   const list = element("ul", "journal");
   for (const entry of state.entries) list.append(entryLine(entry));
   state.list = list;
-  const parts = [element("h1", "", "Journal"),
-    element("p", "muted", "Who did what, when, with which outcome; newest first. Entries hold no content and no secrets."),
-    list];
-  if (state.entries.length === 0) parts.push(element("p", "muted", "Nothing has happened yet."));
+  box.append(list);
+  state.empty = null;
+  if (state.failed) box.append(element("p", "error", state.failed));
+  else if (!state.loaded) box.append(element("p", "muted", "Reading the journal…"));
+  else if (state.entries.length === 0) { state.empty = element("p", "muted", "Nothing has happened yet."); box.append(state.empty); }
   if (state.next) {
     const older = button("Older entries");
+    older.dataset.key = "older";
     older.addEventListener("click", async () => {
       older.disabled = true;
-      const result = await loadJournal(state.next);
+      const result = await call(journalQuery(state.scope, state.next));
       if (journalView !== state) return;
+      older.disabled = false;
       if (!result.ok) {
         note(sentence(result), true);
-        if (result.status === 409) { journalView = null; renderJournal(); }
-        older.disabled = false;
+        if (result.status === 409) { state.next = null; state.entries = []; state.loaded = false; loadJournal(state); }
         return;
       }
       state.entries.push(...result.body.entries);
       state.next = result.body.next;
-      drawJournal();
+      state.redraw();
+      const again = view.querySelector('[data-key="older"]');
+      if (again) again.focus({ preventScroll: true });
     });
     const actions = element("div", "actions");
     actions.append(older);
-    parts.push(actions);
+    box.append(actions);
   }
-  view.replaceChildren(...parts);
+  return box;
+}
+
+async function loadJournal(state) {
+  const result = await call(journalQuery(state.scope, null));
+  if (journalView !== state) return;
+  if (!result.ok) { state.failed = sentence(result); state.loaded = true; state.redraw(); return; }
+  // Entries that arrived while the page loaded and lie above it stay on top.
+  const arrived = state.entries.filter(entry => entry.seq > result.body.upper);
+  state.entries = arrived.concat(result.body.entries);
+  state.next = result.body.next;
+  state.loaded = true;
+  state.redraw();
+}
+
+function journalSection(companion) {
+  const section = element("section", "block");
+  section.setAttribute("aria-labelledby", "journal-title");
+  const title = element("h2", "", "Journal");
+  title.id = "journal-title";
+  const holder = element("div");
+  if (!journalView || journalView.scope !== companion.id) {
+    journalView = { scope: companion.id, entries: [], next: null, live: true, list: null, loaded: false, failed: null, started: false };
+  }
+  const state = journalView;
+  state.redraw = () => { if (holder.isConnected) holder.replaceChildren(journalBlock(state)); };
+  holder.append(journalBlock(state));
+  section.append(title, element("p", "hint", "What happened with " + companion.displayName + ", newest first. The journal holds no content and no secrets."), holder);
+  return section;
+}
+
+function loadCompanionJournal() {
+  const state = journalView;
+  if (state && !state.started) { state.started = true; loadJournal(state); }
+}
+
+function renderJournalPage() {
+  if (!journalView || journalView.scope !== null) {
+    journalView = { scope: null, entries: [], next: null, live: true, list: null, loaded: false, failed: null, started: false };
+  }
+  const state = journalView;
+  const holder = element("div");
+  state.redraw = () => { if (holder.isConnected) holder.replaceChildren(journalBlock(state)); };
+  holder.append(journalBlock(state));
+  view.replaceChildren(element("h1", "", "Journal"),
+    element("p", "hint", "Who did what, as which companion, through which connection, and how it ended; newest first. The journal holds no content and no secrets."),
+    holder);
+  if (!state.started) { state.started = true; loadJournal(state); }
 }
 
 // ---------- start ----------

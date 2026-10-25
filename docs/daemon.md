@@ -309,14 +309,14 @@ beside it with every test feature on, carries no passbook material tag.
 ## The manager page and the live feed
 
 The manager page is a shell of three embedded files, `index.html`,
-`manager.css` and `manager.js`, served at `/`, `/companion/<id>` and
-`/journal` with a content security policy that allows only the page's own
+`manager.css` and `manager.js`, served at every route of the page with a content security policy that allows only the page's own
 script, stylesheet and origin. It holds no truth. It loads
 `GET /api/lobby`, follows `GET /api/events`, and writes text only through
 `textContent`, never markup. A removal is confirmed in place; the page opens
 no dialog. Each companion shows the `mcpServers` block for an MCP host,
 naming the companion by its immutable id, and a rename of the moniker warns
-that configurations naming the moniker stop working.
+that configurations naming the moniker stop working. What the page shows,
+route by route, is in [manager.md](manager.md).
 
 `GET /api/events` is the live feed as server-sent events. Each item is one
 JSON object (`companion`, `companion_removed`, `credential`, `sign_in`, `connection`,
