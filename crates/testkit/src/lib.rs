@@ -24,7 +24,9 @@
 //!   boards, each in its own words, which prove the host without any real
 //!   provider or service;
 //! * [`atproto`], a fake atproto authorization server and PDS, for the
-//!   atproto credential adapter.
+//!   atproto credential adapter;
+//! * [`world::LobbyWorld`], all of these at once on loopback, which the
+//!   `lobby-world` command runs for walking the sponsor's journey by hand.
 //!
 //! Nothing here reaches the live network.
 
@@ -35,6 +37,7 @@ pub mod hosts;
 pub mod listener;
 pub mod passbook;
 mod peer;
+pub mod world;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};

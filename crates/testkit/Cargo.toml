@@ -8,6 +8,12 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# The fake world on loopback, for walking the sponsor's journey by hand
+# against companion-lobby-synthetic; see docs/manager.md.
+[[bin]]
+name = "lobby-world"
+path = "src/bin/lobby-world.rs"
+
 [dependencies]
 lobby-contracts.workspace = true
 lobby-outbound.workspace = true
