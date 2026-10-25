@@ -855,7 +855,7 @@ impl Lobby {
         let subject = Subject::new(Initiator::Sponsor, Some(companion), BEGIN_SIGN_IN);
         let limit = self.sign_in_limit;
         let (adapter, kind) = self.run(|core| {
-            core.prune_awaited(limit);
+            core.expire_overdue(limit);
             let validated = (|| {
                 core.store
                     .state()
@@ -890,7 +890,8 @@ impl Lobby {
                 .retain(|(waiting, of)| !(*waiting == companion && *of == kind));
             match started {
                 Ok((start, request)) => {
-                    core.prune_awaited(limit);
+                    core.expire_overdue(limit);
+                    core.make_room();
                     let awaited = Awaited {
                         id: uuid::Uuid::now_v7().simple().to_string(),
                         companion,
@@ -918,7 +919,7 @@ impl Lobby {
     pub fn cancel_sign_in(&self, id: &str) -> Result<SignInView, Refusal> {
         let limit = self.sign_in_limit;
         self.run(|core| {
-            core.prune_awaited(limit);
+            core.expire_overdue(limit);
             let found = core
                 .awaited
                 .iter()
@@ -953,7 +954,7 @@ impl Lobby {
         let returned = SignInReturn { query };
         let limit = self.sign_in_limit;
         let (state, awaited) = self.run(|core| {
-            core.prune_awaited(limit);
+            core.expire_overdue(limit);
             let state = returned.get("state").unwrap_or_default().to_owned();
             if !core
                 .awaited
@@ -1436,7 +1437,7 @@ impl Lobby {
     pub fn snapshot(&self) -> Snapshot {
         let limit = self.sign_in_limit;
         let mut core = self.core();
-        core.prune_awaited(limit);
+        core.expire_overdue(limit);
         core.settle_events(&self.feed, &self.command);
         let state = core.store.state();
         Snapshot {
@@ -1869,29 +1870,35 @@ impl Core {
         Refusal::new(Outcome::NotFound, message)
     }
 
-    /// Ends the sign-ins that waited past `limit` as expired, and the oldest
-    /// when too many wait.
-    fn prune_awaited(&mut self, limit: Duration) {
-        let mut expired: Vec<String> = self
+    /// Ends the sign-ins that waited past `limit` as expired.
+    fn expire_overdue(&mut self, limit: Duration) {
+        let expired: Vec<String> = self
             .awaited
             .iter()
             .filter(|(_, awaited)| awaited.started.elapsed() >= limit)
             .map(|(state, _)| state.clone())
             .collect();
+        for state in expired {
+            self.end_sign_in(&state, SignInStatus::Expired);
+        }
+    }
+
+    /// Ends the oldest waiting sign-ins as expired until one more may wait.
+    /// Only starting a sign-in makes room; reading the lobby never does.
+    fn make_room(&mut self) {
         let mut kept: Vec<(&String, Instant)> = self
             .awaited
             .iter()
-            .filter(|(state, _)| !expired.contains(state))
             .map(|(state, awaited)| (state, awaited.started))
             .collect();
         kept.sort_by_key(|(_, started)| *started);
         let excess = (kept.len() + 1).saturating_sub(SIGN_INS_WAITING);
-        expired.extend(
-            kept.into_iter()
-                .take(excess)
-                .map(|(state, _)| state.clone()),
-        );
-        for state in expired {
+        let oldest: Vec<String> = kept
+            .into_iter()
+            .take(excess)
+            .map(|(state, _)| state.clone())
+            .collect();
+        for state in oldest {
             self.end_sign_in(&state, SignInStatus::Expired);
         }
     }
@@ -2420,6 +2427,59 @@ mod tests {
             .collect();
         assert_eq!(statuses, [SignInStatus::Expired]);
         assert_eq!(authority.listener().count("/exchange"), 0);
+    }
+
+    #[test]
+    fn reading_the_lobby_never_ends_a_sign_in_that_still_has_time() {
+        let dir = Dir::new("full");
+        let lobby = passbook_lobby(&dir);
+        let authority = lobby_testkit::passbook::PassbookAuthority::start();
+        let mut started = Vec::new();
+        for index in 0..=SIGN_INS_WAITING {
+            let companion = lobby
+                .create_companion(&format!("c{index}"), &format!("C {index}"))
+                .expect("companion")
+                .record
+                .companion
+                .id;
+            let (view, _) = lobby
+                .begin_sign_in(
+                    companion,
+                    "passbook",
+                    &authority.origin(),
+                    "http://127.0.0.1:1",
+                )
+                .expect("a sign-in starts");
+            started.push(view.id);
+            if index + 1 == SIGN_INS_WAITING {
+                for _ in 0..3 {
+                    let waiting = lobby
+                        .snapshot()
+                        .sign_ins
+                        .iter()
+                        .filter(|sign_in| sign_in.status == SignInStatus::Pending)
+                        .count();
+                    assert_eq!(waiting, SIGN_INS_WAITING, "every one still waits");
+                }
+            }
+        }
+        let picture = lobby.snapshot().sign_ins;
+        let status = |id: &str| {
+            picture
+                .iter()
+                .find(|sign_in| sign_in.id == id)
+                .map(|sign_in| sign_in.status)
+        };
+        assert_eq!(
+            status(&started[0]),
+            Some(SignInStatus::Expired),
+            "starting one more makes room by ending the oldest"
+        );
+        assert!(
+            started[1..]
+                .iter()
+                .all(|id| status(id) == Some(SignInStatus::Pending))
+        );
     }
 
     #[test]
