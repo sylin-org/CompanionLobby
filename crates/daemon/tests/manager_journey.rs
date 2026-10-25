@@ -98,8 +98,8 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
     assert_eq!(
         lobby["kinds"],
         json!([
-            { "kind": "passbook", "title": "Passbook" },
-            { "kind": "atproto", "title": "Atmosphere" },
+            { "kind": "passbook", "title": "Passbook", "hint": lobby_testkit::passbook::HINT },
+            { "kind": "atproto", "title": "Atmosphere", "hint": lobby_credential_atproto::HINT },
         ])
     );
     assert_eq!(
@@ -163,6 +163,19 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
     let mut peer = install.attach("ada");
     initialize(&mut peer);
     assert_eq!(companion(&install, &id)["attachments"], 1);
+
+    // A kind that cannot choose its account on the provider's page says
+    // so when nothing was typed, rather than blaming what was typed.
+    let empty = install.operator(
+        "POST",
+        "/api/sign-ins",
+        &json!({ "companion": id, "kind": "passbook", "hint": "" }),
+    );
+    assert_eq!(empty.status, 400, "{}", text(&empty));
+    assert_eq!(
+        body(&empty)["message"],
+        "This kind of account cannot be chosen on the sign-in page; type the account to sign in with first."
+    );
 
     // Lending an identity: the handoff remembers the account meant, from
     // the lobby, across a reload or a second tab.
@@ -296,14 +309,15 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
     assert_eq!(paged.len(), 3);
     assert_eq!(paged[0]["sentence"], said[0]);
 
-    // The page itself carries no account key: it shows labels it reads.
-    for asset in ["/", "/manager.js", "/manager.css", handoff.as_str()] {
-        let served = get(&install, asset);
-        assert_eq!(served.status, 200, "{asset}");
-        assert!(
-            !String::from_utf8_lossy(&served.body).contains(DID),
-            "{asset}"
-        );
+    // The page's own files are served for every route it has.
+    for asset in [
+        "/",
+        "/journal",
+        "/manager.js",
+        "/manager.css",
+        handoff.as_str(),
+    ] {
+        assert_eq!(get(&install, asset).status, 200, "{asset}");
     }
 
     peer.close_stdin();

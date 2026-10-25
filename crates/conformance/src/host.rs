@@ -191,8 +191,7 @@ impl Install {
         assert!(returned.body.is_empty());
         let onward = returned.header("location").expect("a location").to_owned();
         assert!(
-            onward.starts_with("/signin/")
-                && onward.contains("/done?outcome=")
+            onward.starts_with("/signin/done?outcome=")
                 && !onward.contains("state")
                 && !onward.contains("code"),
             "nothing the provider sent rides on: {onward}"

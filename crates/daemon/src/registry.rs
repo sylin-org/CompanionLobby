@@ -6,8 +6,9 @@
 //! service name, and a credential or connection whose adapter is not here
 //! stays in the state file, unused, and reaches no catalog. Beside each
 //! provider kind it keeps the title the sponsor reads on the manager page,
-//! as the kind's own adapter names it; a kind without one is shown by its
-//! name.
+//! as the kind's own adapter names it, and the hint beside the field where
+//! the sponsor names the account to sign in with; a kind without a title is
+//! shown by its name, and one without a hint gets a plain one.
 //!
 //! [`Registry::product`] is what `companion-lobby` runs with: the adapters
 //! each slice adds here, one line each. The credential adapter reaches the
@@ -33,6 +34,7 @@ pub struct Registry {
     credentials: Vec<Arc<dyn CredentialAdapter>>,
     services: Vec<Arc<dyn ServiceAdapter>>,
     titles: Vec<(ProviderKind, String)>,
+    hints: Vec<(ProviderKind, String)>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -68,6 +70,7 @@ impl Registry {
             credentials,
             services,
             titles: Vec::new(),
+            hints: Vec::new(),
         }
     }
 
@@ -80,6 +83,29 @@ impl Registry {
             self.titles.push((kind, title.to_owned()));
         }
         self
+    }
+
+    /// The same registry, showing `hint` beside the field where the sponsor
+    /// names an account of the provider kind `kind`.
+    #[must_use]
+    pub fn hinted(mut self, kind: &str, hint: &str) -> Self {
+        if let Some(kind) = ProviderKind::new(kind) {
+            self.hints.retain(|(hinted, _)| *hinted != kind);
+            self.hints.push((kind, hint.to_owned()));
+        }
+        self
+    }
+
+    /// What the sponsor reads beside the field naming an account of the
+    /// provider kind `kind`.
+    pub fn hint(&self, kind: &ProviderKind) -> String {
+        self.hints
+            .iter()
+            .find(|(hinted, _)| hinted == kind)
+            .map_or_else(
+                || "The account to sign in with, as its provider names it.".to_owned(),
+                |(_, hint)| hint.clone(),
+            )
     }
 
     /// The title the sponsor reads for the provider kind `kind`.
@@ -111,6 +137,10 @@ impl Registry {
         .titled(
             lobby_credential_atproto::KIND,
             lobby_credential_atproto::TITLE,
+        )
+        .hinted(
+            lobby_credential_atproto::KIND,
+            lobby_credential_atproto::HINT,
         ))
     }
 
@@ -159,6 +189,12 @@ mod tests {
         assert_eq!(registry.title(&kind("passbook")), "Pass book");
         assert_eq!(registry.title(&kind("quillbook")), "Quillbook");
         assert_eq!(capitalized("board"), "Board");
+        let registry = registry.hinted("passbook", "The authority's address.");
+        assert_eq!(registry.hint(&kind("passbook")), "The authority's address.");
+        assert_eq!(
+            registry.hint(&kind("quillbook")),
+            "The account to sign in with, as its provider names it."
+        );
         assert_eq!(capitalized(""), "");
     }
 }

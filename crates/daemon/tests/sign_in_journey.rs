@@ -115,10 +115,10 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
     assert_eq!(
         install.json("/api/lobby")["kinds"],
         json!([
-            { "kind": "passbook", "title": "Passbook" },
-            { "kind": "atproto", "title": "Atmosphere" },
+            { "kind": "passbook", "title": "Passbook", "hint": lobby_testkit::passbook::HINT },
+            { "kind": "atproto", "title": "Atmosphere", "hint": lobby_credential_atproto::HINT },
         ]),
-        "each kind with the title the sponsor reads"
+        "each kind with the title and the hint the sponsor reads"
     );
 
     let started = begin(&install, &ada, "");
@@ -402,7 +402,7 @@ fn companion_lobby_refuses_a_loopback_authorization_server_and_reaches_nothing()
     product.open();
     assert_eq!(
         product.json("/api/lobby")["kinds"],
-        json!([{ "kind": "atproto", "title": "Atmosphere" }])
+        json!([{ "kind": "atproto", "title": "Atmosphere", "hint": lobby_credential_atproto::HINT }])
     );
     assert_eq!(
         product.json("/api/lobby")["services"],

@@ -34,6 +34,10 @@ pub const KIND: &str = "passbook";
 /// What the sponsor reads for a passbook account.
 pub const TITLE: &str = "Passbook";
 
+/// What the sponsor reads beside the field naming a passbook account: a
+/// passbook sign-in starts from the authority's address and nothing else.
+pub const HINT: &str = "The address of the Passbook authority to sign in at.";
+
 /// What every passbook sign-in grants: stamps for any audience.
 pub const PERMISSION: &str = "stamp";
 

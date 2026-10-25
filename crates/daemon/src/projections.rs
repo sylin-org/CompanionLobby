@@ -427,8 +427,8 @@ pub fn sentence(entry: &Value, names: &Names) -> String {
             format!("revoke the connection of {companion} to {service}{at}"),
         ),
         (_, "sweep_keyring") => (
-            "cleared away kept files no record names".to_owned(),
-            "clear away kept files no record names".to_owned(),
+            "tidied its stored files".to_owned(),
+            "tidy its stored files".to_owned(),
         ),
         _ => (
             "changed the lobby".to_owned(),
@@ -436,9 +436,9 @@ pub fn sentence(entry: &Value, names: &Names) -> String {
         ),
     };
     let ended = match text("outcome") {
-        "done" => return format!("{who} {done}."),
+        "done" => return stopped(format!("{who} {done}")),
         "accepted" => return format!("{who} {done}; the service finishes it later."),
-        "pending" => return format!("{who} set out to {attempt}."),
+        "pending" => return stopped(format!("{who} set out to {attempt}")),
         "refused" => "it was refused",
         "not_found" => "what it named was not found",
         "conflict" => "it clashed with a change made first",
@@ -450,9 +450,18 @@ pub fn sentence(entry: &Value, names: &Names) -> String {
         "rate_limited" => "it was asked to slow down",
         "outcome_unknown" => "whether it landed is unknown",
         "unsupported" => "it is not offered",
-        _ => "the lobby failed; its trace log says why",
+        _ => "something went wrong inside the lobby",
     };
     format!("{who} tried to {attempt}, but {ended}.")
+}
+
+/// `text` closed with a full stop, unless a name it ends with closes it
+/// already.
+fn stopped(mut text: String) -> String {
+    if !text.ends_with(['.', '!', '?']) {
+        text.push('.');
+    }
+    text
 }
 
 /// How many items the feed keeps for a client that reconnects.
@@ -744,6 +753,29 @@ mod tests {
             }
             assert!(!sentence.contains('_'), "no wire name: {sentence}");
         }
+        let short = CompanionId::from_u128(4).to_string();
+        let names = Names {
+            companions: vec![
+                (ada.clone(), "Ada".to_owned()),
+                (short.clone(), "Ada L.".to_owned()),
+            ],
+            connections: names.connections,
+        };
+        assert_eq!(
+            sentence(
+                &json!({ "initiator": "sponsor", "companion": short, "kind": "command", "command": "rename_companion", "outcome": "done" }),
+                &names
+            ),
+            "You renamed Ada L.",
+            "a name that ends with a stop is not stopped twice"
+        );
+        assert_eq!(
+            sentence(
+                &json!({ "initiator": "lobby", "kind": "command", "command": "sweep_keyring", "outcome": "internal" }),
+                &names
+            ),
+            "The lobby tried to tidy its stored files, but something went wrong inside the lobby."
+        );
         let mut entry = json!({ "initiator": "sponsor", "companion": ada, "kind": "command", "command": "remove_companion", "outcome": "done" });
         told(&mut entry, &names);
         assert_eq!(entry["sentence"], "You removed Ada.");

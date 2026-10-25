@@ -28,9 +28,14 @@ fn synthetic() -> Result<Registry, String> {
     }
     Ok(Registry::new(credentials, vec![Arc::new(Board::new())])
         .titled(passbook::KIND, passbook::TITLE)
+        .hinted(passbook::KIND, passbook::HINT)
         .titled(
             lobby_credential_atproto::KIND,
             lobby_credential_atproto::TITLE,
+        )
+        .hinted(
+            lobby_credential_atproto::KIND,
+            lobby_credential_atproto::HINT,
         ))
 }
 

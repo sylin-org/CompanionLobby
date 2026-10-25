@@ -54,7 +54,7 @@ tab.
    sign-in from its page; a companion waits on one sign-in at a time.
 5. **The return.** The provider sends the browser to the return route, which
    completes the sign-in and sends the browser straight on to
-   `/signin/atproto/done?outcome=<outcome>`, so the code and the `state` leave
+   `/signin/done?outcome=<outcome>`, so the code and the `state` leave
    the address bar at once. The return must carry the `state` of a sign-in
    still waiting, an `iss` naming the very authorization server it went to,
    and a code; a return carrying `error` signs nothing in. The code is

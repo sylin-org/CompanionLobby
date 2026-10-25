@@ -26,8 +26,8 @@
 //!    verified the listener;
 //! 6. `/signin/<kind>/return` is where a provider sends the sponsor's browser
 //!    back after a sign-in; it completes only a sign-in the lobby started and
-//!    waits for, once, and sends the browser on to `/signin/<kind>/done`,
-//!    which says how it ended from the outcome alone, so the code and the
+//!    waits for, once, and sends the browser on to `/signin/done`, which
+//!    says how it ended from the outcome alone, so the code and the
 //!    `state` leave the address bar at once and no page echoes anything the
 //!    provider sent.
 //!
@@ -428,12 +428,9 @@ fn sign_in_cancelled_in(path: &str) -> Option<&str> {
         .filter(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
-/// The provider kind a `/signin/<kind>/done` path names.
-fn sign_in_done_in(path: &str) -> Option<&str> {
-    path.strip_prefix("/signin/")
-        .and_then(|rest| rest.strip_suffix("/done"))
-        .filter(|kind| !kind.is_empty() && !kind.contains('/'))
-}
+/// The path of the page that says how a sign-in ended; it names no kind, so
+/// the address bar the sponsor reads names no provider.
+const SIGN_IN_DONE: &str = "/signin/done";
 
 /// The provider kind a `/signin/<kind>/return` path names.
 fn sign_in_return_in(path: &str) -> Option<&str> {
@@ -562,7 +559,7 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
                 Err(refused) => refused.reply(),
             }
         }
-        (&Method::GET, done) if sign_in_done_in(done).is_some() => sign_in_done(&query),
+        (&Method::GET, SIGN_IN_DONE) => sign_in_done(&query),
         (&Method::GET, returned) if sign_in_return_in(returned).is_some() => {
             let kind = sign_in_return_in(returned)
                 .unwrap_or_else(|| unreachable!("checked above"))
@@ -685,7 +682,7 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
                 || credential_revoked_in(other).is_some()
                 || connection_revoked_in(other).is_some()
                 || sign_in_cancelled_in(other).is_some()
-                || sign_in_done_in(other).is_some()
+                || other == SIGN_IN_DONE
                 || sign_in_return_in(other).is_some() =>
         {
             method_not_allowed()
@@ -911,7 +908,13 @@ fn snapshot_json(lobby: &Lobby) -> Value {
         "kinds": lobby
             .credential_kinds()
             .iter()
-            .map(|kind| json!({ "kind": kind.as_str(), "title": lobby.registry().title(kind) }))
+            .map(|kind| {
+                json!({
+                    "kind": kind.as_str(),
+                    "title": lobby.registry().title(kind),
+                    "hint": lobby.registry().hint(kind),
+                })
+            })
             .collect::<Vec<_>>(),
         "services": lobby
             .registry()
@@ -1133,8 +1136,7 @@ fn complete_sign_in(lobby: &Lobby, kind: &str, pairs: Vec<(String, String)>) -> 
         Err(refusal) => refusal.outcome,
     };
     let mut reply = empty_reply(StatusCode::SEE_OTHER);
-    if let Ok(value) =
-        HeaderValue::from_str(&format!("/signin/{kind}/done?outcome={}", outcome.code()))
+    if let Ok(value) = HeaderValue::from_str(&format!("{SIGN_IN_DONE}?outcome={}", outcome.code()))
     {
         reply.headers_mut().insert(header::LOCATION, value);
     }

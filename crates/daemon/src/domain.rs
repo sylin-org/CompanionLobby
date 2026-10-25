@@ -908,7 +908,7 @@ impl Lobby {
                 }
                 Err(outcome) => {
                     core.settle_as(&subject, outcome);
-                    Err(begin_refusal(outcome))
+                    Err(begin_refusal(outcome, hint))
                 }
             }
         })
@@ -1652,8 +1652,11 @@ fn epoch_millis() -> u64 {
 }
 
 /// The refusal of a sign-in its adapter could not start, in the lobby's words.
-fn begin_refusal(outcome: Outcome) -> Refusal {
+fn begin_refusal(outcome: Outcome, hint: &str) -> Refusal {
     let message = match outcome {
+        Outcome::InvalidInput if hint.trim().is_empty() => {
+            "This kind of account cannot be chosen on the sign-in page; type the account to sign in with first."
+        }
         Outcome::InvalidInput => {
             "The provider cannot start a sign-in from what was typed; check it and try again."
         }

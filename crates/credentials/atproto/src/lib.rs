@@ -93,6 +93,10 @@ pub const KIND: &str = "atproto";
 /// name its own community gives the network an atproto account lives in.
 pub const TITLE: &str = "Atmosphere";
 
+/// What the sponsor reads beside the field naming the account to sign in
+/// with.
+pub const HINT: &str = "Your handle, such as yourname.bsky.social. Leave it empty to choose the account on the sign-in page.";
+
 /// The scope every sign-in asks for: the account's identity.
 pub const SCOPE: &str = "atproto";
 
