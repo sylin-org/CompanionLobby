@@ -46,6 +46,19 @@ fn lobby_world_prints_origins_that_answer_and_stops_when_its_input_closes() {
             .expect("the fake answers");
         assert_eq!(answer.status, 200, "{name}");
     }
+    for knob in [
+        "/keys/brief",
+        "/renewals/refuse",
+        "/renewals/allow",
+        "/keys/long",
+    ] {
+        let origin =
+            Address::parse(&value("control"), AddressPolicy::LoopbackAllowed).expect("control");
+        let answer = outbound
+            .send(&origin, Request::new("GET", knob))
+            .expect("the control page answers");
+        assert_eq!(answer.status, 200, "{knob}");
+    }
     assert_eq!(value("passbook-holder"), "ada");
     assert_eq!(value("atmosphere-handle"), "ada.example.test");
     child

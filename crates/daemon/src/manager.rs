@@ -121,40 +121,64 @@ mod tests {
         }
     }
 
+    /// The page's text as a browser rendered it, walking the journey
+    /// against the fake world `lobby-world` serves: the lobby, a companion's
+    /// accounts with their details closed and with one opened, and both in
+    /// trouble. See docs/manager.md for how they are recorded again.
+    const RENDERED: [(&str, &str); 5] = [
+        (
+            "lobby",
+            include_str!("../../testkit/fixtures/manager/lobby.txt"),
+        ),
+        (
+            "lobby in trouble",
+            include_str!("../../testkit/fixtures/manager/lobby-trouble.txt"),
+        ),
+        (
+            "accounts",
+            include_str!("../../testkit/fixtures/manager/companion-accounts.txt"),
+        ),
+        (
+            "accounts with details",
+            include_str!("../../testkit/fixtures/manager/companion-account-details.txt"),
+        ),
+        (
+            "accounts in trouble",
+            include_str!("../../testkit/fixtures/manager/companion-trouble.txt"),
+        ),
+    ];
+
     #[test]
-    fn an_account_is_shown_by_its_label_and_its_key_only_in_the_details() {
-        let script = SCRIPT.0;
-        let keyed: Vec<&str> = script
-            .lines()
-            .filter(|line| line.contains("credential.account"))
-            .collect();
-        assert_eq!(keyed.len(), 1, "{keyed:#?}");
+    fn a_rendered_page_shows_an_account_by_its_label_and_its_key_only_in_the_details() {
+        use lobby_testkit::world::{DID, HANDLE};
+        for (page, text) in RENDERED {
+            let lines: Vec<&str> = text.lines().collect();
+            let keyed: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.contains(DID))
+                .map(|(index, _)| index)
+                .collect();
+            if page == "accounts with details" {
+                assert_eq!(keyed.len(), 1, "{page}: the key shows once");
+                assert_eq!(
+                    lines[keyed[0] - 1],
+                    "Account key",
+                    "{page}: the key sits under its name, in the opened details"
+                );
+                assert_eq!(lines[keyed[0]], DID, "{page}: and nothing else on its line");
+            } else {
+                assert!(
+                    keyed.is_empty(),
+                    "{page} shows the key where a label belongs"
+                );
+            }
+        }
+        let (_, lobby) = RENDERED[0];
         assert!(
-            keyed[0].contains("\"Account key\"") && keyed[0].contains("element(\"dd\""),
-            "{}",
-            keyed[0]
+            lobby.contains(&format!("{HANDLE} · Atmosphere")),
+            "the lobby names the account by its label"
         );
-        let body = |name: &str| {
-            let start = script
-                .find(&format!("function {name}("))
-                .unwrap_or_else(|| panic!("{name} is defined"));
-            let rest = &script[start..];
-            &rest[..rest
-                .find(
-                    "
-}
-",
-                )
-                .unwrap_or(rest.len())]
-        };
-        assert!(body("card").contains("credential.label"));
-        let row = body("accountRow");
-        assert!(row.contains("element(\"strong\", \"\", credential.label)"));
-        let details = row
-            .find("disclosure(\"details\"")
-            .expect("a details disclosure");
-        let key = row.find("credential.account").expect("the key");
-        assert!(details < key, "the key sits inside the details");
     }
 
     #[test]

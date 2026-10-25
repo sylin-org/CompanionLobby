@@ -1,0 +1,21 @@
+All companions
+A
+Ada
+
+ada · No mind attached
+
+Host configuration
+Name and portrait
+ACCOUNTS
+ada
+Passbook account
+Details
+Signed in
+Revoke
+ada.example.test
+Atmosphere account
+Details
+Account key
+did:plc:aaaaaaaaaaaaaaaaaaaaaaaa
+Signed in
+Revoke

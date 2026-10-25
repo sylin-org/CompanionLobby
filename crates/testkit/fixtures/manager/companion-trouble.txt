@@ -1,0 +1,29 @@
+All companions
+A
+Ada
+
+ada · No mind attached
+
+Host configuration
+Name and portrait
+ACCOUNTS
+ada
+Passbook account
+Details
+Sign in needed
+Sign in again
+
+ada.example.test was revoked. Sign Ada in again to lend an account.
+
+Atmosphere account
+Your handle, such as yourname.bsky.social. Leave it empty to choose the account on the sign-in page.
+Sign in with Atmosphere
+CONNECTIONS
+board
+Board at 127.0.0.1:56252
+Sign in needed
+Sign in again
+Open a connection to Board
+
+Sign ada in again above to open another connection to Board.
+

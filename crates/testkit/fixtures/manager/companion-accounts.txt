@@ -1,0 +1,30 @@
+All companions
+A
+Ada
+
+ada · No mind attached
+
+Host configuration
+Name and portrait
+ACCOUNTS
+ada
+Passbook account
+Details
+Signed in
+Revoke
+ada.example.test
+Atmosphere account
+Details
+Signed in
+Revoke
+CONNECTIONS
+board
+Board at 127.0.0.1:56252
+Ready
+Revoke
+Open a connection to Board
+Address
+Where this Board is, such as board.example.
+Name
+What Ada calls this Board when it has more than one.
+Open connection

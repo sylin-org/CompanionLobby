@@ -84,6 +84,10 @@ main > .button { justify-self: start; }
 .card-name { font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
 .card-name:hover { text-decoration: underline; text-decoration-color: var(--accent); }
 .card p { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.card-accounts { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 6px; }
+.card-account { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; font-size: 12px; }
+.card-account > span { overflow-wrap: anywhere; min-width: 0; }
+.card-account .warn, .status.warn { color: var(--warn); }
 .adding { display: grid; gap: 12px; justify-items: start; }
 
 .block { display: grid; gap: 10px; padding-top: 16px; border-top: 1px solid var(--line); }

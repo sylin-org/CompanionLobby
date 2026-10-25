@@ -206,6 +206,28 @@ impl PassbookAuthority {
     pub fn revoked(&self) -> Vec<String> {
         locked(&self.book).revoked.clone()
     }
+
+    /// A handle that turns the authority's knobs from elsewhere, such as a
+    /// control page.
+    pub fn controls(&self) -> Controls {
+        Controls(self.book.clone())
+    }
+}
+
+/// The knobs of one authority, held apart from it.
+#[derive(Clone)]
+pub struct Controls(Arc<Mutex<Book>>);
+
+impl Controls {
+    /// Issues keys that live `secs` seconds from now on.
+    pub fn key_lifetime(&self, secs: u64) {
+        locked(&self.0).key_secs = Some(secs);
+    }
+
+    /// Refuses every renewal while `refusing`.
+    pub fn refuse_renewals(&self, refusing: bool) {
+        locked(&self.0).refusing = refusing;
+    }
 }
 
 /// Checks stamps against one authority, as the services that trust it do.

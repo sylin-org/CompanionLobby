@@ -318,6 +318,16 @@ function readyCredential(companion, kind) {
   return credentialsOf(companion).find(credential => credential.kind === kind && credential.state === "ready");
 }
 
+// The credential of a kind that waits for the sponsor to sign it in again.
+function waitingCredential(companion, kind) {
+  return credentialsOf(companion).find(credential => credential.kind === kind && credential.state === "needs_sign_in");
+}
+
+// The accounts a companion holds now: ready, or waiting to be signed in again.
+function liveCredentials(companion) {
+  return credentialsOf(companion).filter(credential => credential.state !== "revoked");
+}
+
 function waitingNow(signIn) {
   return signIn.status === "pending" && Date.now() < signIn.expiresAt;
 }
@@ -332,25 +342,27 @@ function connectionsOf(companion) {
 
 // The one honest word for a connection, and the one action beside it.
 function connectionWord(connection) {
-  if (connection.state !== "ready") return "revoked";
+  if (connection.state === "revoked") return "revoked";
   const credential = lobby.credentials.get(connection.credential);
-  return credential && credential.state === "ready" ? "ready" : "sign_in_needed";
+  return connection.state === "ready" && credential && credential.state === "ready" ? "ready" : "sign_in_needed";
 }
 
 const WORDS = { ready: "Ready", sign_in_needed: "Sign in needed", revoked: "Revoked" };
 
-// The connections worth showing: every ready one, and a revoked one only
-// while nothing ready or newer holds its name.
+// The connections worth showing: every one that stands, ready or waiting
+// for a sign-in, and a revoked one only while nothing standing or newer
+// holds its name.
 function shownConnections(companion) {
   const all = connectionsOf(companion);
   return all.filter((connection, index) => {
-    if (connection.state === "ready") return true;
-    return !all.some((other, at) => other !== connection && other.service === connection.service && other.label === connection.label && (other.state === "ready" || at > index));
+    if (connection.state !== "revoked") return true;
+    return !all.some((other, at) => other !== connection && other.service === connection.service && other.label === connection.label && (other.state !== "revoked" || at > index));
   });
 }
 
 // What the companion's page offers first: the single primary action.
 function nextStep(companion) {
+  if (lobby.kinds.some(entry => waitingCredential(companion, entry.kind) && !waitingSignIn(companion, entry.kind))) return "sign-in-again";
   const anyAccount = lobby.kinds.some(entry => readyCredential(companion, entry.kind) || waitingSignIn(companion, entry.kind));
   if (!anyAccount) return "sign-in";
   const usable = lobby.services.some(service => service.accepts.some(kind => readyCredential(companion, kind)));
@@ -494,14 +506,57 @@ function card(companion) {
   const item = element("li", "card");
   const words = element("div", "card-words");
   const name = link(companionPath(companion), "card-name", companion.displayName);
+  name.dataset.key = "card-" + companion.id;
   const facts = [attachedText(companion.attachments)];
-  const accounts = credentialsOf(companion).filter(credential => credential.state === "ready");
-  facts.push(accounts.length ? "Signed in as " + accounts.map(credential => credential.label).join(", ") : "No account yet");
+  const accounts = liveCredentials(companion);
+  if (accounts.length === 0) facts.push("No account yet");
   const ready = connectionsOf(companion).filter(connection => connectionWord(connection) === "ready").length;
   if (ready) facts.push(ready === 1 ? "1 connection ready" : ready + " connections ready");
+  const waiting = connectionsOf(companion).filter(connection => connectionWord(connection) === "sign_in_needed").length;
+  if (waiting) facts.push(waiting === 1 ? "1 connection needs a sign-in" : waiting + " connections need a sign-in");
   words.append(name, element("p", "", facts.join(" · ")));
+  if (accounts.length) {
+    const list = element("ul", "card-accounts");
+    list.setAttribute("aria-label", "Accounts of " + companion.displayName);
+    for (const credential of accounts) list.append(cardAccount(companion, credential));
+    words.append(list);
+  }
   item.append(avatar(companion), words);
   return item;
+}
+
+// One account on a companion's card, with its one action: Revoke while it
+// is signed in, Sign in again while it waits for that.
+function cardAccount(companion, credential) {
+  const line = element("li", "card-account");
+  const ready = credential.state === "ready";
+  const said = element("span", ready ? "" : "warn", credential.label + " · " + kindTitle(credential.kind) + (ready ? "" : " · Sign in needed"));
+  let action;
+  if (ready) {
+    action = button("Revoke", "danger");
+    action.dataset.key = "card-revoke-" + credential.id;
+    confirmInPlace(action, revokeQuestion(companion, credential), "Revoke", () => revokeCredential(companion, credential, "card-" + companion.id));
+  } else {
+    action = button("Sign in again");
+    action.dataset.key = "card-again-" + credential.id;
+    action.addEventListener("click", () => signInAgain(companion, credential, action));
+  }
+  line.append(said, action);
+  return line;
+}
+
+// Starts signing the same account in again and leads to the handoff.
+async function signInAgain(companion, credential, control) {
+  control.disabled = true;
+  const handoff = await startSignIn(companion, credential.kind, "");
+  control.disabled = false;
+  if (handoff) navigate(handoff);
+  else control.focus();
+}
+
+function revokeQuestion(companion, credential) {
+  const derived = connectionsOf(companion).filter(connection => connection.credential === credential.id && connection.state !== "revoked").length;
+  return "Revoke " + credential.label + " for " + companion.displayName + "?" + (derived ? " Its connections are revoked too." : "");
 }
 
 function renderFirstRun() {
@@ -578,7 +633,9 @@ function createForm(first) {
       drafts.clear("create");
       editing = false;
       if (chosen) {
-        const uploaded = await uploadPortrait(companion, chosen);
+        // A portrait that is not kept leaves a note on the pages that come
+        // next, with the way to choose it again.
+        const uploaded = await uploadPortrait(companion, chosen, true);
         if (uploaded) companion = uploaded;
       }
       navigate(companionPath(companion, "/attach"));
@@ -596,14 +653,52 @@ function readAsDataUrl(file) {
   });
 }
 
-async function uploadPortrait(companion, file) {
-  if (file.size > 512 * 1024) { note("That image is too large; a portrait is at most 512 KiB.", true); return null; }
+// Sends a portrait; a refusal is said at once, or, when `lasting`, kept as
+// a note the companion's pages show until a portrait is kept or the sponsor
+// keeps the initials.
+async function uploadPortrait(companion, file, lasting) {
+  const failed = message => {
+    if (lasting) drafts.write("portrait-failed:" + companion.id, message);
+    else note(message, true);
+    return null;
+  };
+  if (file.size > 512 * 1024) return failed("That image is too large; a portrait is at most 512 KiB.");
   let image;
-  try { image = await readAsDataUrl(file); } catch { note("That file could not be read.", true); return null; }
+  try { image = await readAsDataUrl(file); } catch { return failed("That file could not be read."); }
   const result = await call(companionPath(companion).replace("/companion/", "/api/companions/") + "/portrait", "PUT", { expectedRevision: companion.revision, image });
-  if (!result.ok) { note(sentence(result), true); if (result.status === 409) resynchronize(); return null; }
+  if (!result.ok) { if (result.status === 409) resynchronize(); return failed(sentence(result)); }
+  drafts.clear("portrait-failed:" + companion.id);
   keepNewer(result.body.companion);
   return result.body.companion;
+}
+
+// The note a portrait that was not kept leaves, with the way to choose it
+// again and the way to keep the initials, or nothing.
+function portraitNote(companion) {
+  const said = drafts.read("portrait-failed:" + companion.id);
+  if (!said) return null;
+  const box = element("div", "panel portrait-note");
+  const line = element("p", "status warn", tidy("The portrait was not kept: " + said + " " + companion.displayName + " shows its initials until you choose one again."));
+  line.setAttribute("role", "status");
+  const choose = button("Choose a portrait");
+  choose.dataset.key = "portrait-again-" + companion.id;
+  choose.addEventListener("click", () => {
+    opened.add("settings-" + companion.id);
+    if (location.pathname !== companionPath(companion)) history.pushState({}, "", companionPath(companion));
+    editing = false;
+    refresh(true, "portrait-" + companion.id);
+  });
+  const keep = button("Keep the initials", "quiet");
+  keep.dataset.key = "portrait-keep-" + companion.id;
+  keep.addEventListener("click", () => {
+    drafts.clear("portrait-failed:" + companion.id);
+    refresh(true);
+    view.focus({ preventScroll: true });
+  });
+  const actions = element("div", "actions");
+  actions.append(choose, keep);
+  box.append(line, actions);
+  return box;
 }
 
 // ---------- first attachment: what just happened and what comes next ----------
@@ -615,6 +710,8 @@ function renderAttach(id) {
   const heading = element("div", "identity");
   heading.append(avatar(companion, "large"), element("h1", "", companion.displayName + (companion.attachments > 0 ? " is attached" : " is ready to attach")));
   parts.push(heading);
+  const trouble = portraitNote(companion);
+  if (trouble) parts.push(trouble);
   parts.push(element("p", "lede", "Copy this block into your AI host's server settings. The host starts the lobby itself whenever it needs it."));
   const block = element("div", "config");
   const text = element("pre", "", companion.hostConfig);
@@ -670,8 +767,9 @@ function renderCompanion(id) {
   head.append(avatar(companion, "large"), words);
   const tools = element("div", "head-tools");
   tools.append(link(companionPath(companion, "/attach"), "", "Host configuration"), settings(companion));
-  view.replaceChildren(link("/", "back", "All companions"), head, tools,
-    accountsSection(companion, step), connectionsSection(companion, step), journalSection(companion));
+  const trouble = portraitNote(companion);
+  view.replaceChildren(...[link("/", "back", "All companions"), head, trouble, tools,
+    accountsSection(companion, step), connectionsSection(companion, step), journalSection(companion)].filter(Boolean));
   loadCompanionJournal(companion);
 }
 
@@ -688,30 +786,54 @@ function accountsSection(companion, step) {
     return section;
   }
   const list = element("ul", "rows");
-  for (const entry of lobby.kinds) list.append(accountRow(companion, entry, step === "sign-in" && entry === lobby.kinds[0]));
+  for (const entry of lobby.kinds) list.append(accountRow(companion, entry, step === "sign-in" && entry === lobby.kinds[0], step === "sign-in-again"));
   section.append(list);
   return section;
 }
 
-function accountRow(companion, entry, primary) {
+// The words of an account row: its label, its kind, and its key kept for the
+// details.
+function accountWords(credential, entry) {
+  const words = element("div", "row-words");
+  words.append(element("strong", "", credential.label), element("span", "kind", entry.title + " account"));
+  const details = disclosure("details", "Details", "details-" + credential.id);
+  const facts = element("dl");
+  facts.append(element("dt", "", "Account key"), element("dd", "mono", credential.account));
+  details.append(facts);
+  words.append(details);
+  return { words, details };
+}
+
+function accountRow(companion, entry, primary, again) {
   const row = element("li", "row");
   row.id = "account-" + entry.kind;
   const credential = readyCredential(companion, entry.kind);
   const waiting = waitingSignIn(companion, entry.kind);
+  const stale = waitingCredential(companion, entry.kind);
   if (credential) {
-    const words = element("div", "row-words");
-    words.append(element("strong", "", credential.label), element("span", "kind", entry.title + " account"));
-    const details = disclosure("details", "Details", "details-" + credential.id);
-    const facts = element("dl");
-    facts.append(element("dt", "", "Account key"), element("dd", "mono", credential.account));
-    details.append(facts);
-    words.append(details);
+    const { words } = accountWords(credential, entry);
     const revoke = button("Revoke", "danger");
     revoke.dataset.key = "revoke-" + credential.id;
-    const derived = connectionsOf(companion).filter(connection => connection.credential === credential.id && connection.state === "ready").length;
-    const question = "Revoke " + credential.label + " for " + companion.displayName + "?" + (derived ? " Its connections are revoked too." : "");
-    confirmInPlace(revoke, question, "Revoke", () => revokeCredential(companion, credential));
+    revoke.dataset.signIn = "";
+    confirmInPlace(revoke, revokeQuestion(companion, credential), "Revoke", () => revokeCredential(companion, credential));
     row.append(words, element("span", "word ok", "Signed in"), revoke);
+    return row;
+  }
+  if (stale && !waiting) {
+    // The one action is signing the same account in again; revoking it
+    // instead waits in its details.
+    const { words, details } = accountWords(stale, entry);
+    const instead = button("Revoke instead", "quiet");
+    instead.dataset.key = "revoke-" + stale.id;
+    confirmInPlace(instead, revokeQuestion(companion, stale), "Revoke", () => revokeCredential(companion, stale));
+    const insteadBox = element("div", "actions");
+    insteadBox.append(instead);
+    details.append(insteadBox);
+    const signIn = button("Sign in again", again ? "primary" : "");
+    signIn.dataset.key = "again-" + stale.id;
+    signIn.dataset.signIn = "";
+    signIn.addEventListener("click", () => signInAgain(companion, stale, signIn));
+    row.append(words, element("span", "word warn", "Sign in needed"), signIn);
     return row;
   }
   if (waiting) {
@@ -719,6 +841,7 @@ function accountRow(companion, entry, primary) {
     words.append(element("strong", "", waiting.account || "An account of your choice"), element("span", "kind", entry.title + " account"));
     const follow = link(companionPath(companion, "/sign-in/" + encodeURIComponent(waiting.id)), "button" + (primary ? " primary" : ""), "Continue");
     follow.dataset.key = "continue-" + waiting.id;
+    follow.dataset.signIn = "";
     row.append(words, element("span", "word", "Signing in"), follow);
     return row;
   }
@@ -740,7 +863,16 @@ function disclosure(className, summary, key) {
   return details;
 }
 
-async function revokeCredential(companion, credential) {
+// What the provider said, in the sponsor's words, after the lobby revoked
+// an account on its side.
+const AT_PROVIDER = {
+  confirmed: title => " " + title + " confirmed it is revoked there too.",
+  not_offered: title => " " + title + " offers no way to revoke it there, so it ends there when it expires.",
+  not_confirmed: title => " " + title + " did not confirm it, so it ends there when it expires.",
+  not_asked: () => "",
+};
+
+async function revokeCredential(companion, credential, focusKey) {
   const result = await call("/api/credentials/" + encodeURIComponent(credential.id) + "/revoke", "POST", {});
   if (!result.ok) {
     note(sentence(result), true);
@@ -751,8 +883,9 @@ async function revokeCredential(companion, credential) {
   for (const connection of lobby.connections.values()) {
     if (connection.credential === credential.id) lobby.connections.set(connection.id, Object.assign({}, connection, { state: "revoked" }));
   }
-  note(credential.label + " is revoked for " + companion.displayName + ".");
-  refresh(true, "sign-in:" + companion.id + ":" + credential.kind);
+  const said = AT_PROVIDER[result.body.provider] || AT_PROVIDER.not_asked;
+  note(credential.label + " is revoked for " + companion.displayName + "." + said(kindTitle(credential.kind)));
+  refresh(true, focusKey || "sign-in:" + companion.id + ":" + credential.kind);
 }
 
 function signInForm(companion, entry, primary) {
@@ -811,8 +944,8 @@ function renderSignIn(companionId, signInId) {
   if (!companion) { notHere("No companion has that id; it may have been removed."); return; }
   const back = link(companionPath(companion), "back", companion.displayName);
   if (!signIn || signIn.companion !== companionId) {
-    view.replaceChildren(back, element("h1", "", "This sign-in has ended"),
-      element("p", "", "The lobby does not remember this sign-in. Nothing was signed in by it."),
+    view.replaceChildren(back, element("h1", "", "This sign-in is not remembered"),
+      element("p", "", "The lobby does not remember this sign-in, so it cannot say how it ended. The accounts of " + companion.displayName + " show what is signed in."),
       link(companionPath(companion), "button primary", "Back to " + companion.displayName));
     return;
   }
@@ -957,7 +1090,7 @@ function connectionRow(companion, connection) {
 
 function focusSignIn(kind) {
   const row = document.getElementById("account-" + kind);
-  const target = row && row.querySelector("input, a, button");
+  const target = row && (row.querySelector("[data-sign-in]") || row.querySelector("input"));
   if (target) { row.scrollIntoView({ block: "center" }); target.focus(); }
 }
 
@@ -998,7 +1131,7 @@ function labelFrom(companion, service, address) {
   try { host = new URL(address.includes("://") ? address : "https://" + address).hostname; } catch { host = ""; }
   let base = /^[a-z][a-z0-9-]*$/.test(host.split(".")[0] || "") && !/^\d/.test(host) ? host.split(".")[0] : service;
   base = monikerFrom(base) || service;
-  const taken = new Set(connectionsOf(companion).filter(connection => connection.service === service && connection.state === "ready").map(connection => connection.label));
+  const taken = new Set(connectionsOf(companion).filter(connection => connection.service === service && connection.state !== "revoked").map(connection => connection.label));
   if (!taken.has(base)) return base;
   for (let n = 2; ; n++) if (!taken.has(base + "-" + n)) return base + "-" + n;
 }
@@ -1008,6 +1141,11 @@ function grantPanel(companion, service, primary) {
   const heading = element("h3", "", "Open a connection to " + service.title);
   panel.append(heading);
   const usable = service.accepts.map(kind => readyCredential(companion, kind)).filter(Boolean);
+  const stale = service.accepts.map(kind => waitingCredential(companion, kind)).find(Boolean);
+  if (usable.length === 0 && stale) {
+    panel.append(element("p", "muted", "Sign " + stale.label + " in again above to open another connection to " + service.title + "."));
+    return panel;
+  }
   if (usable.length === 0) {
     const titles = service.accepts.map(kindTitle).join(" or ");
     panel.append(element("p", "muted", service.title + " takes " + (titles ? "a " + titles + " account" : "an account this lobby cannot sign in") + ". Sign " + companion.displayName + " in above first."));
@@ -1056,7 +1194,7 @@ function grantPanel(companion, service, primary) {
     const where = typed && !typed.includes("://") ? "https://" + typed : typed;
     const name = label.input.value.trim() || (where ? labelFrom(companion, service.name, where) : "");
     if (!where) { formSays(form, "Type where this " + service.title + " is first."); return; }
-    const same = connectionsOf(companion).find(connection => connection.service === service.name && connection.state === "ready" && placeText(connection.address).replace(/\/$/, "") === placeText(where.toLowerCase()).replace(/\/$/, ""));
+    const same = connectionsOf(companion).find(connection => connection.service === service.name && connection.state !== "revoked" && placeText(connection.address).replace(/\/$/, "") === placeText(where.toLowerCase()).replace(/\/$/, ""));
     if (same) { formSays(form, companion.displayName + " already reaches this " + service.title + " as " + same.label + "."); return; }
     const credential = account ? usable.find(entry => entry.id === account.value) : usable[0];
     await submitting(form, open, async () => {
@@ -1134,7 +1272,7 @@ function portraitControls(companion) {
   choose.input.addEventListener("change", async () => {
     const file = choose.input.files && choose.input.files[0];
     if (!file) return;
-    const updated = await uploadPortrait(companion, file);
+    const updated = await uploadPortrait(companion, file, false);
     if (updated) { note("The portrait is changed."); editing = false; refresh(true, choose.input.dataset.key); }
   });
   box.append(choose.wrapper);
