@@ -1,3 +1,4 @@
+recorded against manager.js sha256 e99cb8b690585052a953a540cc8ac06e30536217e24739a7e2abb38804d05dfe
 All companions
 A
 Ada
@@ -19,7 +20,7 @@ Signed in
 Revoke
 CONNECTIONS
 board
-Board at 127.0.0.1:56252
+Board at 127.0.0.1:54590
 Ready
 Revoke
 Open a connection to Board
@@ -27,4 +28,10 @@ Address
 Where this Board is, such as board.example.
 Name
 What Ada calls this Board when it has more than one.
+Open connection
+Open a connection to Tangent Space
+Address
+Where this Tangent Space is, such as tangent.example.
+Name
+What Ada calls this Tangent Space when it has more than one.
 Open connection

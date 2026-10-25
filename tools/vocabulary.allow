@@ -41,3 +41,5 @@ crates/daemon/tests/space_journey.rs	provider-atproto	The journey signs the comp
 crates/daemon/tests/space_journey.rs	provider-atproto-wire	The journey checks the proof the fake PDS minted.
 crates/testkit/src/hosts.rs	provider-tangent	A recorded mind calls the Tangent adapter's tools by the names its host saw.
 crates/testkit/fixtures/hosts/claude-code-2.1.303-space.jsonl	provider-tangent	The frames a real host exchanged with the lobby while its mind used the Tangent adapter's tools.
+crates/testkit/fixtures/manager/companion-accounts.txt	provider-tangent	The page's recorded text names the installed service by its title.
+crates/testkit/fixtures/manager/companion-trouble.txt	provider-tangent	The page's recorded text names the installed service by its title.

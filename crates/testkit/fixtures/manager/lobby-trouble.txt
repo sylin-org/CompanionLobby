@@ -1,3 +1,4 @@
+recorded against manager.js sha256 e99cb8b690585052a953a540cc8ac06e30536217e24739a7e2abb38804d05dfe
 Companions
 A
 Ada
@@ -6,6 +7,10 @@ No mind attached · 1 connection needs a sign-in
 
 ada · Passbook · Sign in needed
 Sign in again
-ada.example.test · Atmosphere
 Revoke
+B
+Bea
+
+No mind attached · No account yet
+
 Add a companion

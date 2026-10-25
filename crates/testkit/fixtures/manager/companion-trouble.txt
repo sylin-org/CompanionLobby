@@ -1,3 +1,4 @@
+recorded against manager.js sha256 e99cb8b690585052a953a540cc8ac06e30536217e24739a7e2abb38804d05dfe
 All companions
 A
 Ada
@@ -12,6 +13,7 @@ Passbook account
 Details
 Sign in needed
 Sign in again
+Revoke
 
 ada.example.test was revoked. Sign Ada in again to lend an account.
 
@@ -20,10 +22,15 @@ Your handle, such as yourname.bsky.social. Leave it empty to choose the account 
 Sign in with Atmosphere
 CONNECTIONS
 board
-Board at 127.0.0.1:56252
+Board at 127.0.0.1:54590
 Sign in needed
 Sign in again
+Revoke
 Open a connection to Board
 
 Sign ada in again above to open another connection to Board.
+
+Open a connection to Tangent Space
+
+Tangent Space takes Atmosphere accounts. Sign Ada in above first.
 

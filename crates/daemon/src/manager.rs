@@ -124,7 +124,9 @@ mod tests {
     /// The page's text as a browser rendered it, walking the journey
     /// against the fake world `lobby-world` serves: the lobby, a companion's
     /// accounts with their details closed and with one opened, and both in
-    /// trouble. See docs/manager.md for how they are recorded again.
+    /// trouble. Each starts with a line naming the SHA-256 of the
+    /// manager.js it was recorded against. See docs/manager.md for how they
+    /// are recorded again.
     const RENDERED: [(&str, &str); 5] = [
         (
             "lobby",
@@ -148,11 +150,36 @@ mod tests {
         ),
     ];
 
+    /// What starts each recorded page, before the script's hash.
+    const RECORDED_AGAINST: &str = "recorded against manager.js sha256 ";
+
+    /// The hash a recorded page names, and the page's text after it.
+    fn recorded(text: &str) -> (&str, &str) {
+        let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
+        (first.strip_prefix(RECORDED_AGAINST).unwrap_or_default(), rest)
+    }
+
+    #[test]
+    fn every_rendered_page_was_recorded_against_this_manager_script() {
+        use sha2::{Digest, Sha256};
+        let hash: String = Sha256::digest(SCRIPT.0.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        for (page, text) in RENDERED {
+            assert_eq!(
+                recorded(text).0,
+                hash,
+                "the {page} fixture was recorded against another manager.js: walk the page again and record it (docs/manager.md)"
+            );
+        }
+    }
+
     #[test]
     fn a_rendered_page_shows_an_account_by_its_label_and_its_key_only_in_the_details() {
         use lobby_testkit::world::{DID, HANDLE};
         for (page, text) in RENDERED {
-            let lines: Vec<&str> = text.lines().collect();
+            let lines: Vec<&str> = recorded(text).1.lines().collect();
             let keyed: Vec<usize> = lines
                 .iter()
                 .enumerate()
@@ -176,7 +203,7 @@ mod tests {
         }
         let (_, lobby) = RENDERED[0];
         assert!(
-            lobby.contains(&format!("{HANDLE} · Atmosphere")),
+            recorded(lobby).1.contains(&format!("{HANDLE} · Atmosphere")),
             "the lobby names the account by its label"
         );
     }

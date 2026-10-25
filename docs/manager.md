@@ -159,7 +159,9 @@ daemon with `companion-lobby-synthetic stop` and the same environment.
 
 The page's text, as the browser rendered it on such a walk, is kept in
 `crates/testkit/fixtures/manager/`: the lobby and a companion's accounts,
-with an account's details closed and opened, and both in trouble. A test
-holds the account key to its place in that text; record the files again,
-from the text of the page's main region, when the page changes what it
-shows.
+with an account's details closed and opened, and both in trouble. Each
+file starts with a line naming the SHA-256 of the `manager.js` it was
+recorded against, and a test fails as soon as the script differs, so a
+change to the page is always walked again; record the files again, from
+the text of the page's main region up to its journal, with that line
+first. A test holds the account key to its place in that text.
