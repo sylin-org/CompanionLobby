@@ -96,8 +96,9 @@ pub fn claude_code() -> Recording {
 /// you can go, read what is new, and reply to the newest conversation in
 /// one friendly sentence.
 ///
-/// The mind calls `reach`, arrives at the Space, reads the Topic of the
-/// newest Post and replies to it with a request id of its own choosing, with
+/// The mind calls `reach`, asks the Space what is new, reads the Topic of
+/// the newest Post and replies to it with a request id of its own choosing,
+/// with
 /// no refused call and no guessed name or argument. The Space's origin in
 /// the frames is the one that walk ran against; a replay puts its own in
 /// its place.
@@ -141,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn the_space_recording_reaches_arrives_reads_and_replies_with_no_wrong_turn() {
+    fn the_space_recording_reaches_hears_what_is_new_reads_and_replies_with_no_wrong_turn() {
         let recording = claude_code_in_a_space();
         let calls: Vec<&str> = recording
             .sent()
@@ -152,7 +153,7 @@ mod tests {
             calls,
             [
                 "reach",
-                "tangent_arrive",
+                "tangent_updates",
                 "tangent_read_topic",
                 "tangent_post"
             ]

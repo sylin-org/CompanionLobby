@@ -494,38 +494,49 @@ fn the_recorded_claude_code_mind_in_a_space_replays_through_the_shim() {
             answer["error"]["code"], expected["error"]["code"],
             "{answer}"
         );
+        // What the mind read is what it reads now: a change to any of it
+        // is recorded again on purpose, by walking a real mind again.
         if frame["method"] == "tools/list" {
-            let listed = |tools: &Value| -> Vec<String> {
+            let read = |tools: &Value| -> Vec<Value> {
                 tools
                     .as_array()
                     .expect("tools")
                     .iter()
-                    .map(|tool| tool["name"].as_str().expect("name").to_owned())
+                    .map(|tool| {
+                        json!({
+                            "name": tool["name"],
+                            "title": tool["title"],
+                            "description": tool["description"],
+                            "inputSchema": tool["inputSchema"],
+                            "annotations": tool["annotations"],
+                        })
+                    })
                     .collect()
             };
             assert_eq!(
-                listed(&answer["result"]["tools"]),
-                listed(&expected["result"]["tools"])
+                read(&answer["result"]["tools"]),
+                read(&expected["result"]["tools"]),
+                "the tools as the mind read them"
             );
         }
         if frame["method"] == "tools/call" {
             assert_eq!(answer["result"]["isError"], false, "{answer}");
             let name = frame["params"]["name"].as_str().expect("name");
+            assert_eq!(
+                answer["result"]["content"], expected["result"]["content"],
+                "{name} reads as it did when it was recorded"
+            );
             let (got, want) = (
                 &answer["result"]["structuredContent"],
                 &expected["result"]["structuredContent"],
             );
-            match name {
-                "reach" => assert_eq!(got["tools"], want["tools"]),
-                "tangent_arrive" => {
-                    assert_eq!(got["attention"]["items"], want["attention"]["items"])
+            if name == "reach" {
+                // The companion's id is this install's own.
+                for field in ["tools", "connections", "waiting"] {
+                    assert_eq!(got[field], want[field], "reach's {field}");
                 }
-                "tangent_read_topic" => assert_eq!(got["posts"], want["posts"]),
-                "tangent_post" => assert_eq!(
-                    got["post"], want["post"],
-                    "the same Post as when it was recorded"
-                ),
-                other => panic!("the recording calls {other}"),
+            } else {
+                assert_eq!(got, want, "{name} answers as it did when it was recorded");
             }
         }
     }

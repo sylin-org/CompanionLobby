@@ -19,10 +19,13 @@ against the shim on every test run: `hosts::claude_code`, which calls
 `reach` once, and `hosts::claude_code_in_a_space`, a headless mind on the
 haiku model attached to a lobby whose only connection is `lobby-world`'s
 fake Space, asked to find out where it can go, read what is new and reply
-to the newest conversation in one sentence. It called `reach`, arrived, read
-the newest Post's Topic and replied with a request id of its own, with no
-refused call; the replay moves the Space's origin to the fresh world's and
-checks each answer's substance and that one reply landed.
+to the newest conversation in one sentence. It called `reach`, asked what
+is new, read the newest Post's Topic and replied with a request id of its
+own, with no refused call; the replay moves the Space's origin to the fresh
+world's and checks that every tool description and schema and every answer
+reads as it did when it was recorded, and that one reply landed. A change to
+anything a mind reads there is recorded again on purpose, with a mind
+walking it again.
 
 So far a mind is shown to list and call `reach` through the shim from Claude
 Code on Windows only. Claude Desktop and Codex stay open until each is
