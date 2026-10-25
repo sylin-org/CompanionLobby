@@ -1290,9 +1290,9 @@ fn conflict_sentence(
         |companion| companion.display_name.to_string(),
     );
     match conflict {
-        SignInConflict::AnotherCompanion => "Nothing was signed in: that account is signed in for another companion, and an account belongs to one companion. Revoke it there first, or sign in with another account.".to_owned(),
+        SignInConflict::AnotherCompanion => "Nothing was signed in: that account is signed in for another companion, and an account belongs to one companion. Revoke it under Accounts on the page of the companion that holds it first, or sign in with another account.".to_owned(),
         SignInConflict::AlreadyHeld => format!(
-            "Nothing was signed in: {name} already holds an account of this kind. Revoke it on the companion's page first to sign in another."
+            "Nothing was signed in: {name} already holds an account of this kind. Revoke it under Accounts on {name}'s page first to sign in another."
         ),
         SignInConflict::AnotherWaits => {
             let waiting = companion.and_then(|companion| {
@@ -1307,11 +1307,11 @@ fn conflict_sentence(
             });
             match waiting {
                 Some(credential) => format!(
-                    "Nothing was signed in: that is another account than {label}, which waits for {name} to sign it in again. Sign in as {label} instead, or revoke it first.",
+                    "Nothing was signed in: that is another account than {label}, which waits for {name} to sign it in again. Sign in as {label} instead, or revoke it under Accounts on {name}'s page first.",
                     label = credential.label
                 ),
                 None => format!(
-                    "Nothing was signed in: that is another account than the one that waits for {name} to sign it in again. Sign in as that account instead, or revoke it first."
+                    "Nothing was signed in: that is another account than the one that waits for {name} to sign it in again. Sign in as that account instead, or revoke it under Accounts on {name}'s page first."
                 ),
             }
         }

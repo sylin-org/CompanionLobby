@@ -290,6 +290,8 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
     assert!(!text(&taken).contains(ADA));
     assert!(
         text(&taken).contains("that account is signed in for another companion")
+            && text(&taken)
+                .contains("Revoke it under Accounts on the page of the companion that holds it")
             && !text(&taken).contains("already holds"),
         "the page names the one conflict it met: {}",
         text(&taken)

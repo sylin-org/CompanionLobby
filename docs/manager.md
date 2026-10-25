@@ -83,8 +83,8 @@ gave. It shows no ids, codes, secrets or content, leaves out the entries
 written before an outcome was known, and pages back with *Older entries*.
 New entries arrive as they are written. On a companion's page the renewals
 that kept an account signed in are routine: the journal keeps them, and
-the page shows them only after *Show routine entries*, which *Hide routine
-entries* undoes. The whole journal at `/journal` shows them all.
+the page shows them only while *Show routine entries* is pressed; the
+control keeps its name and says whether it is pressed. The whole journal at `/journal` shows them all.
 
 **Trouble.** When a provider refuses to renew an account, or the lobby
 cannot tell whether a renewal landed, the account says *Sign in needed* on
@@ -100,8 +100,13 @@ place, never in a dialog. Revoking an account revokes every connection made
 with it, and the page says so before it happens; afterwards it says whether
 the provider confirmed the revocation, offers none, or could not be
 reached, that it cannot tell for an account that waited for a sign-in,
-whose last key a renewal may already have replaced, and that the provider
-was not asked when the lobby held no key for the account.
+whose last key a renewal may already have replaced, and where to check
+and remove it at the provider then, and that the provider was not asked
+when the lobby held no key for the account. Revoking a connection says
+that the lobby deleted what the service issued for it, and that the
+service may still honor that until it expires there. A sign-in that met a
+conflict says where to revoke the account that stands in its way: under
+Accounts on the page of the companion that holds it.
 
 ## The rules the page keeps
 

@@ -1,4 +1,4 @@
-recorded against manager.js sha256 5169c256906f18cf4ede09daf68c1365738e6c26c56c8c793b65744940553c06
+recorded against manager.js sha256 416ce515697bd7b7bfd30069a62e6397f77fff6447309bbb1ee02a3835757414
 All companions
 A
 Ada
@@ -22,7 +22,7 @@ Your handle, such as yourname.bsky.social. Leave it empty to choose the account 
 Sign in with Atmosphere
 CONNECTIONS
 board
-Board at 127.0.0.1:52247
+Board at 127.0.0.1:56188
 Sign in needed
 Sign in again
 Revoke

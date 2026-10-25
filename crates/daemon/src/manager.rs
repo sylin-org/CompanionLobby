@@ -214,6 +214,20 @@ mod tests {
     }
 
     #[test]
+    fn what_the_sponsor_reads_after_pulling_a_key_says_what_is_left_and_where() {
+        let script = SCRIPT.0;
+        // The routine entries keep one control with one name, pressed or not.
+        assert!(script.contains("button(\"Show routine entries\", \"quiet\")"));
+        assert!(!script.contains("Hide routine entries"));
+        // A revoked connection says what the service may still honor, and
+        // an account that waited says where to check at the provider.
+        assert!(script.contains("may still honor that until it expires there."));
+        assert!(script.contains(
+            "To be sure, open the account's own settings at \" + title + \", find Companion Lobby among the apps it allows, and remove it there."
+        ));
+    }
+
+    #[test]
     fn the_page_loads_only_its_own_files() {
         let page = PAGE.0;
         assert!(page.contains("<script src=\"/manager.js\" defer></script>"));

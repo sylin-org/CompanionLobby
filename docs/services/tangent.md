@@ -170,7 +170,7 @@ Each establishment, a 401's included, leaves the Space a new participant
 credential named `Companion Lobby` that lives 7 days; the lobby keeps only
 the newest. Revoking the connection deletes the lobby's copy; the Space
 may still take its credentials until they expire there, within 7 days, and
-the manager page does not say so.
+the manager page says so when the connection is revoked.
 
 ## Walking it against the fakes
 

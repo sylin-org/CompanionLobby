@@ -878,7 +878,7 @@ const AT_PROVIDER = {
   confirmed: title => " " + title + " confirmed it is revoked there too.",
   not_offered: title => " " + title + " offers no way to revoke it there, so it ends there when it expires.",
   not_confirmed: title => " " + title + " did not confirm it, so it ends there when it expires.",
-  sent_last_known: title => " It waited for a sign-in, so " + title + " was sent the last key the lobby held, which may already have been replaced: the lobby cannot tell whether it is revoked there. The apps your " + title + " account allows are listed in its own settings.",
+  sent_last_known: title => " It waited for a sign-in, so " + title + " was sent the last key the lobby held, which may already have been replaced: the lobby cannot tell whether it is revoked there. To be sure, open the account's own settings at " + title + ", find Companion Lobby among the apps it allows, and remove it there.",
   not_asked: title => " The lobby held no key for it, so " + title + " was not asked to revoke it; it ends there when it expires.",
 };
 
@@ -1120,7 +1120,8 @@ async function revokeConnection(companion, connection) {
     return;
   }
   lobby.connections.set(connection.id, result.body.connection);
-  note(connection.label + " is revoked for " + companion.displayName + ".");
+  const service = serviceTitle(connection.service);
+  note(connection.label + " is revoked for " + companion.displayName + ". The lobby deleted what " + service + " issued for it; " + service + " may still honor that until it expires there.");
   refresh(true, "connection-" + connection.id);
 }
 
@@ -1441,12 +1442,12 @@ function journalSection(companion) {
   const state = journalView;
   state.redraw = () => { if (holder.isConnected) holder.replaceChildren(journalBlock(state)); };
   holder.append(journalBlock(state));
-  const toggle = button(state.routine ? "Hide routine entries" : "Show routine entries", "quiet");
+  // One control with one name: pressed while the routine entries show.
+  const toggle = button("Show routine entries", "quiet");
   toggle.dataset.key = "routine-" + companion.id;
   toggle.setAttribute("aria-pressed", state.routine ? "true" : "false");
   toggle.addEventListener("click", () => {
     state.routine = !state.routine;
-    toggle.textContent = state.routine ? "Hide routine entries" : "Show routine entries";
     toggle.setAttribute("aria-pressed", state.routine ? "true" : "false");
     state.entries = [];
     state.next = null;
