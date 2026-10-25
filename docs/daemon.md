@@ -61,13 +61,15 @@ writes a new one.
 | `daemon.lock` | the daemon | Nothing; the running daemon holds an exclusive OS lock on it, and the shim, `open` and `stop` learn whether a daemon runs by taking it for an instant. The daemon waits out such a probe when it starts. The OS releases both locks when the process dies, so a daemon killed outright never blocks the next start. |
 | `daemon.json` | the lock holder | `pid`, `port` and `buildId` of the process holding the lock. Read only while the lock is held. |
 | `trace.log`, `trace.1.log` | the daemon | Its own operational log: start, stop, refusals, attachments, journal failures, panics. Rotated at 1 MiB, two generations. No secrets, no content. |
-| `<credential id>.material` | the daemon | One credential's material, as its credential adapter encoded it, sealed. Deleted when the credential is revoked or its companion removed, and swept when the daemon starts if no ready credential names it. |
-| `<connection id>.issued` | the daemon | What a service issued for one connection, as its service adapter encoded it, sealed. Deleted when the connection is revoked or its companion removed, and swept when the daemon starts if no ready connection names it. |
+| `<credential id>.material` | the daemon | One credential's material, as its credential adapter encoded it, sealed. Replaced when a renewal commits or the same account signs in again, kept while the credential needs signing in again, deleted when it is revoked or its companion removed, and swept when the daemon starts if no credential that is not revoked names it. |
+| `<connection id>.issued` | the daemon | What a service issued for one connection, as its service adapter encoded it, sealed. Kept while the connection waits for a sign-in, deleted when it is revoked or its companion removed, and swept when the daemon starts if no connection that is not revoked names it. |
+| `<credential id>.rotating` | the daemon | A rotating mark, holding nothing secret: written and synced before a credential adapter spends the provider's single-use secret, deleted once the new material is kept. A mark the daemon finds when it starts is a renewal that never finished. |
 
 The record lives beside the lock rather than in it because, on Windows, an
 exclusive lock also stops other processes from reading the locked file.
-Files the daemon replaces (`lobby.json`, `attach.secret`, `daemon.json`, and
-the material and issued files) are written to a temporary file named
+Files the daemon replaces (`lobby.json`, `attach.secret`, `daemon.json`, the
+material and issued files and the rotating marks) are written to a temporary
+file named
 `<file>.<pid>-<n>.tmp` first; such a file left by a crash counts as the
 lobby's own. The daemon reads no other file in the directory.
 
@@ -93,12 +95,12 @@ never decodes either: only the adapter that encoded a blob reads it.
     { "id": "<32 hex digits>", "companion": "<companion id>", "kind": "<provider kind>",
       "account": "<account key>", "label": "<what the sponsor knows it by>",
       "permissions": ["<what the provider granted>"],
-      "state": "ready" }
+      "state": "needsSignIn" }
   ],
   "connections": [
     { "id": "<32 hex digits>", "companion": "<companion id>", "credential": "<credential id>",
       "service": "<service name>", "address": "https://service.test", "label": "front",
-      "state": "ready", "revision": 1 }
+      "state": "needsSignIn", "revision": 2 }
   ]
 }
 ```
@@ -112,12 +114,14 @@ beside the file as `<companion id>.portrait`, not sealed, since it is no
 secret, and is deleted with the companion. A credential's `account` is the
 provider's stable key for the account and its `label` what the sponsor
 knows the account by, as the provider's adapter reported it at sign-in: a
-handle or an account name. A credential is `ready` or `revoked`, and its
-`permissions` are what
-the provider granted at sign-in, in the provider's own words; only a new
-sign-in widens them. A connection is `ready` or
-`revoked`, and its `revision` advances on every change, so a call pinned to
-one revision can tell that the connection changed while it ran. Material and
+handle or an account name. A credential is `ready`, `needsSignIn` (the
+provider refused to renew it, or the lobby cannot tell whether a renewal
+landed) or `revoked`, and its `permissions` are what the provider granted at
+sign-in, in the provider's own words; a renewal may narrow them and only a
+new sign-in widens them. A connection is `ready`, `needsSignIn` (its
+credential needs signing in again) or `revoked`, and its `revision` advances
+on every change, so a call pinned to one revision can tell that the
+connection changed while it ran. Material and
 what services issued are kept beside the file, never in it. Live
 attachments and the sign-ins the lobby waits on are runtime facts and are
 not written.
@@ -127,9 +131,11 @@ not written.
   one it has (a credential without `permissions`, say), or holds
   a value its rules refuse (a duplicate id or moniker, an identifier of the
   wrong shape, a credential of a companion the file does not hold, one
-  account signed in for two companions, two ready credentials of one kind
-  for one companion, a ready connection through a revoked credential, or one
-  label naming two ready connections of a service) stops the daemon with the
+  account signed in for two companions, two credentials of one kind for one
+  companion that are not revoked, a ready connection through a credential
+  that is not ready, a waiting connection through one that does not need a
+  sign-in, or one label naming two connections of a service that are not
+  revoked) stops the daemon with the
   reason, and the file stays exactly as it was. There is no decoder for any
   file this product did not write.
 - **Forward policy.** Each release reads its own schema and the predecessors
@@ -153,10 +159,14 @@ not written.
 The journal is append-only JSON lines, one entry per line, written
 synchronously: an append returns once its line is on the disk. An entry
 holds no content and no secrets; every field is an identifier, a validated
-name, a fixed lobby word or an outcome code:
+name, a fixed lobby word or an outcome code. Beside the identifiers an entry
+keeps the names the sponsor read when it was written (`companionName`,
+`kindTitle`, `accountLabel`, `serviceTitle`, `connectionLabel`), so its
+sentence reads the same after a rename and a removed companion keeps its
+history by name:
 
 ```json
-{"id":"<storeId>:7","seq":7,"at":1767225600000,"initiator":"mind","attachment":"<32 hex digits>","companion":"<32 hex digits>","kind":"command","command":"attach","outcome":"done"}
+{"id":"<storeId>:7","seq":7,"at":1767225600000,"initiator":"mind","attachment":"<32 hex digits>","companion":"<32 hex digits>","kind":"command","command":"attach","outcome":"done","companionName":"Ada"}
 ```
 
 `initiator` is `sponsor` (the manager page), `mind` (with the attachment it
@@ -171,7 +181,7 @@ arguments or the answer. Commands on a connection name it and its service
 too. Fields that do not apply are absent:
 
 ```json
-{"id":"<storeId>:9","seq":9,"at":1767225600000,"initiator":"mind","attachment":"<32 hex digits>","companion":"<32 hex digits>","connection":"<32 hex digits>","service":"board","tool":"post","kind":"settled","outcome":"done"}
+{"id":"<storeId>:9","seq":9,"at":1767225600000,"initiator":"mind","attachment":"<32 hex digits>","companion":"<32 hex digits>","connection":"<32 hex digits>","service":"board","tool":"post","kind":"settled","outcome":"done","companionName":"Ada","serviceTitle":"Board","connectionLabel":"front"}
 ```
 
 - **Numbers.** `seq` only grows: a daemon that opens the journal continues
@@ -221,8 +231,11 @@ entry under the lobby again. What changed while the adapter ran wins.
 
 The event pipeline runs every event through small handlers, in order, before
 the next command starts. The feed handler turns it into an item of the live
-feed. The catalog handler tells every attachment of a companion whose
-connections changed that its tools changed (see the notice stream below).
+feed. The catalog handler notes each companion whose connections changed and,
+once the drain is over, tells every attachment of it, once, that its tools
+changed (see the notice stream below), however many connections changed
+together. The keep-alive handler wakes the loop that keeps credentials alive
+whenever a credential changes.
 The cascade handler ends the attachments of a removed companion, each
 journaled as a `detach` initiated by the lobby, pending and then settled. The
 companion is already gone, so an attachment ends even when its pending entry
@@ -231,13 +244,15 @@ adapter.
 
 The commands are `create_companion`, `rename_companion`,
 `remove_companion`, `begin_sign_in`, `cancel_sign_in`, `complete_sign_in`,
-`revoke_credential`, `grant_connection` and `revoke_connection`, which only
-the sponsor issues through the operator API, and `attach` and `detach`, which
-a mind issues through its shim; the lobby itself issues `detach` in the
-cascade, and `renew_attach_secret` and `sweep_keyring` when it starts, the
-second only when a material or issued-data file no ready record names is
-left from a daemon that stopped between writing the file and committing
-its record. Removing a companion
+`revoke_credential`, `revoke_at_provider`, `grant_connection` and
+`revoke_connection`, which only the sponsor issues through the operator API,
+and `attach` and `detach`, which a mind issues through its shim; the lobby
+itself issues `detach` in the cascade, `renew_credential` whenever it keeps
+a credential alive, and `renew_attach_secret`, `end_unfinished_renewal` and
+`sweep_keyring` when it starts, the last only when a material or
+issued-data file no live record names, or a rotating mark no ready
+credential holds, is left from a daemon that stopped between writing the
+file and committing its record. Removing a companion
 removes its credentials and connections and deletes what they kept. A rename or
 removal that names a revision the companion has moved past is refused with
 409. A removal while minds are attached as the companion is refused with 409
@@ -278,6 +293,13 @@ beside it with every test feature on, carries no passbook material tag.
   another companion is refused with 409, and signing the same companion in
   again creates a new credential while the revoked one stays as history. The
   material is sealed into the keyring before the credential is committed.
+  When the companion holds a credential of the kind that needs signing in
+  again, the sign-in is for that account: the adapter starts it from that
+  credential's material, whatever the hint says, and completing it restores
+  the credential under its own id, with new material, and every connection
+  that waited for it, without a new grant. Another account is refused with
+  409 while one waits. A sign-in that ends without coming back is let go
+  of by its adapter at once.
 - **Connecting.** `POST /api/connections` names a companion, one of its
   credentials, a service, an address and a label. The lobby checks that the
   credential is ready and of a kind the service accepts, that the address is
@@ -292,10 +314,40 @@ beside it with every test feature on, carries no passbook material tag.
   connection is refused with that outcome. The connection is committed only
   when the credential is still ready and the label still free; it keeps only
   what the service issued.
+- **Keeping alive.** A loop beside the listener asks each ready credential's
+  adapter to renew it, one at a time on a blocking thread with nothing held,
+  whenever the adapter said it would want to be asked (at once after a
+  sign-in, at least every five minutes, and 30 seconds after a renewal that
+  could not finish). Material that is not due changes nothing and is not
+  journaled. A renewal is journaled `renew_credential` from the moment the
+  adapter marks the material rotating, which the lobby does only while the
+  material is still what the adapter read: the pending entry is written and
+  the rotating mark is synced to the disk before the adapter spends the
+  provider's single-use secret. Committing the new material lands only on
+  top of exactly what the adapter read, never twice, and never with more
+  permissions than the credential holds; it replaces the material file and
+  then deletes the mark. A provider that asks for fewer requests, or that
+  could not be reached, changes nothing and is asked again later. A renewal
+  the provider refused (`needs_sign_in`), or one that ended with its mark in
+  place, since the provider may have rotated the secret with nothing new
+  kept (`outcome_unknown`), leaves the credential and every ready connection
+  made from it waiting for a sign-in in one commit; their tools leave the
+  catalog, every attachment of the companion hears so once, and the old
+  material is never renewed again. A daemon that starts and finds a mark on
+  a ready credential does the same, journaled `end_unfinished_renewal`
+  before anything else runs, and does not start when it cannot. A stop waits
+  for a renewal under way to finish. An authorization a service asks for
+  while it establishes a connection may renew the material first, through
+  the same slot, and a refusal there leaves the credential waiting the same
+  way.
 - **Revoking.** Revoking a connection deletes what the service issued for it.
   Revoking a credential revokes every connection made from it in the same
   commit, under one `revoke_credential` entry, and deletes the material and
-  everything those connections kept.
+  everything those connections kept. Then, with nothing held, its adapter
+  revokes it at the provider from the material the lobby held in memory, a
+  step journaled `revoke_at_provider`: `done` when the provider confirmed
+  it, `unsupported` when the provider offers no revocation, and the outcome
+  otherwise; the answer says which.
 - **Calls.** A service tool call resolves the connection the mind named with
   `at` among its companion's ready connections to that service, journals the
   call as invoked, and pins the connection's revision. The call runs with no
@@ -304,7 +356,11 @@ beside it with every test feature on, carries no passbook material tag.
   answers `revoked`, and a write, which the service may have carried out,
   answers `outcome_unknown` so the mind reads before it retries. A tool the
   companion cannot use is not in its catalog, and calling it is "Unknown
-  tool" (-32602) without reaching any service.
+  tool" (-32602) without reaching any service, except a tool whose
+  connections wait for a sign-in: calling it is an error result with the
+  outcome `needs_sign_in` and a sentence saying the tool comes back once the
+  sponsor signs the account in again. `reach` names the connections that
+  wait.
 
 ## The manager page and the live feed
 
@@ -399,12 +455,12 @@ state file and the journal before it answers.
 | `PATCH /api/companions/<id>` | operator write | Renames from `{"expectedRevision", "moniker", "displayName"}` (either name may be left out): 200 with `{"companion"}`, or 400, 404, or 409 for a moved revision or a moniker in use. |
 | `PUT /api/companions/<id>/portrait` | operator write | Gives the companion a portrait from `{"expectedRevision", "image"}`, `image` being a `data:` URL of a PNG, JPEG, WebP or GIF image of at most 512 KiB, recognized by its own bytes, or `null` to go back to initials: 200 with `{"companion"}`, or 400 for anything else, 404, or 409 for a moved revision. |
 | `DELETE /api/companions/<id>` | operator write | Removes from `{"expectedRevision", "cascade"}`: 200 with `{"removed", "endedAttachments"}`, or 404, or 409 for a moved revision or live attachments without `"cascade": true`. |
-| `POST /api/sign-ins` | operator write | Starts a sign-in from `{"companion", "kind", "hint"}`: 201 with `{"signIn": {"id", "companion", "kind", "account", "status", "expiresAt"}, "url"}`, `url` being where the sponsor's browser goes; or 404 for an unknown companion or kind, 409 when the companion already holds a ready credential of that kind or already waits on a sign-in of it. |
+| `POST /api/sign-ins` | operator write | Starts a sign-in from `{"companion", "kind", "hint"}`: 201 with `{"signIn": {"id", "companion", "kind", "account", "status", "expiresAt"}, "url"}`, `url` being where the sponsor's browser goes; or 404 for an unknown companion or kind, 409 when the companion already holds a ready credential of that kind or already waits on a sign-in of it. When the companion holds a credential of the kind that needs signing in again, the sign-in is for that account and `account` is its label. |
 | `POST /api/sign-ins/<id>/cancel` | operator write | Cancels a sign-in while it waits: 200 with `{"signIn"}`, or 404 when none with that id waits. |
-| `GET /signin/<kind>/return` | Host | Where a provider sends the browser back. Completes a sign-in the lobby waits for, once, and answers 303 to `/signin/done?outcome=<outcome>` with no body, so the code and the `state` leave the address bar at once and nothing the provider sent rides on. |
-| `GET /signin/done` | Host | The page that says how a sign-in ended, from the outcome alone: 200 when the account is signed in, 404 when the lobby was not waiting for it (cancelled, expired, finished or never started), 409 for an account another companion holds or a kind the companion already holds, 403 for a return that did not prove the sign-in, 503 when the provider could not be reached. It loads only the manager page's stylesheet, echoes nothing, and offers one link, back to the lobby. |
-| `POST /api/credentials/<id>/revoke` | operator write | Revokes the credential and every connection made from it: 200 with `{"credential"}`, or 404, or 409 when it is already revoked. |
-| `POST /api/connections` | operator write | Establishes a connection from `{"companion", "credential", "service", "address", "label"}`: 201 with `{"connection"}`; or 400 for an address or label the rules refuse, 404, 409 for a label in use or a revoked credential, or the outcome the adapters answered (`unsupported` is 403). |
+| `GET /signin/<kind>/return` | Host | Where a provider sends the browser back. Completes a sign-in the lobby waits for, once, and answers 303 to `/signin/done?outcome=<outcome>&companion=<id>` with no body, the companion named only when the lobby knew the sign-in, so the code and the `state` leave the address bar at once and nothing the provider sent rides on. |
+| `GET /signin/done` | Host | The page that says how a sign-in ended, from the outcome alone: 200 when the account is signed in, 404 when the lobby does not remember a sign-in waiting for this answer (cancelled, expired, finished or never started), 409 for an account another companion holds, a kind the companion already holds or another account than the one that waits to be signed in again, 403 for a return that did not prove the sign-in, 503 when the provider could not be reached. It loads only the manager page's stylesheet, echoes nothing, and offers one link: back to the companion's page, by its display name, when the lobby knows the companion, and back to the lobby otherwise. |
+| `POST /api/credentials/<id>/revoke` | operator write | Revokes the credential and every connection made from it, then at the provider: 200 with `{"credential", "provider"}`, `provider` being `confirmed`, `not_offered`, `not_confirmed` or `not_asked` (no material to name the account with); or 404, or 409 when it is already revoked. |
+| `POST /api/connections` | operator write | Establishes a connection from `{"companion", "credential", "service", "address", "label"}`: 201 with `{"connection"}`; or 400 for an address or label the rules refuse, 404, 409 for a label in use, 403 for a credential that was revoked (`revoked`) or needs signing in again (`needs_sign_in`), or the outcome the adapters answered (`unsupported` is 403). |
 | `POST /api/connections/<id>/revoke` | operator write | Revokes the connection: 200 with `{"connection"}`, or 404, or 409 when it is already revoked. |
 | `POST /api/stop` | operator write | 202, then the daemon stops accepting connections, ends every live feed, lets accepted requests finish (at most 10 seconds), closes its listener, releases the lock and exits. |
 | `POST /mcp/attach` | attachment, install secret | Attaches as `{"companion": "<id or moniker>"}`: 201 with `{"attachment", "token", "companion"}`, or 404 for an unknown companion. |

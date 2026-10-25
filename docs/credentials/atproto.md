@@ -2,9 +2,10 @@
 
 The atproto credential adapter (`crates/credentials/atproto`) signs a
 companion's account in with atproto OAuth, as the client the protocol allows
-a program on the sponsor's own machine to be. It is the only reader of the
-material it hands the daemon. This page says what it sends, what it keeps,
-what it refuses, and how the owner checks it against the real network.
+a program on the sponsor's own machine to be, keeps the grant alive, and
+revokes it at the provider. It is the only reader of the material it hands
+the daemon. This page says what it sends, what it keeps, what it refuses,
+and how the owner checks it against the real network.
 
 ## Signing in
 
@@ -70,6 +71,14 @@ tab.
    turn, and the first that names the DID back is the account's label.
 
 The access token is never parsed: an opaque token signs in as well as a JWT.
+When it expires is read from the token answer's `expires_in` (five minutes
+when the answer does not say, thirty days at most).
+
+When the companion holds an atproto credential that needs signing in again,
+**Sign in again** starts a sign-in for that account from the credential's
+own material: the account is its DID, resolved as in step 1, and only that
+account can complete the sign-in, which restores the credential and its
+connections.
 
 ## What the lobby keeps
 
@@ -81,8 +90,11 @@ the account's details), the permissions (the granted scope's
 words, `atproto`), and its state. The material, sealed beside it as
 `<credential id>.material` (DPAPI in the user's scope on Windows, mode 0600
 elsewhere), is one JSON object tagged `atproto-oauth-1`: `subject`, `access`,
-`refresh`, `pds`, `authserver`, `clientId` (a refresh must present the same
-one), `dpopKey` (the P-256 scalar) and `permissions`. Nothing of the material
+`accessExpiresAt` (seconds since the Unix epoch), `refresh`, `pds`,
+`authserver`, `clientId` (a refresh must present the same one), `dpopKey`
+(the P-256 scalar) and `permissions`. Material without every one of these,
+or with one out of its shape, is not the adapter's: a credential whose
+material it cannot read needs signing in again. Nothing of the material
 reaches the state file, a projection, the journal, the trace log or a page.
 
 An account belongs to one companion. Revoking the credential keeps it as
@@ -90,6 +102,50 @@ history and keeps the account reserved to that companion; signing the
 companion in again makes a new credential. Removing the companion deletes
 its credentials and their material here; the grant at the provider stays
 until the sponsor revokes the app's access in the provider's settings.
+
+## Keeping the grant alive
+
+The daemon asks the adapter to renew the credential, and the adapter
+refreshes the grant a minute before the access token expires; until then it
+answers that the material is fresh and reaches nothing.
+
+1. **The server first.** The authorization server's metadata is read and
+   checked as for a sign-in. A server that cannot be read, or answers 429,
+   spent nothing: the lobby asks again later.
+2. **The mark.** The slot marks the material rotating, which the daemon
+   writes to the disk, synced, before the adapter goes on. Nothing is sent
+   until it did.
+3. **The refresh.** The token endpoint receives `grant_type=refresh_token`,
+   the refresh token and the client id stored at sign-in, with a proof made
+   with the grant's own key. The first refresh carries the nonce the server
+   issued to that key last (at the sign-in, or at the refresh before), kept
+   per server origin and per key for five minutes, 64 at most; a
+   `use_dpop_nonce` answer issues a fresh one and the request is made once
+   more, never a third time.
+4. **The answer.** A 200 that keeps the profile (a `DPoP` token type, an
+   access and a rotated refresh token, the same `sub`, and a scope inside the
+   one the grant held) is committed through the slot on top of exactly the
+   material it was made from, which clears the mark. 429 spent nothing; the
+   mark is cleared and the lobby asks again later. Any other 4xx is the
+   server ending the grant: nothing was spent, the mark is cleared, and the
+   credential needs signing in again. Anything else (no answer read whole, a
+   5xx, an answer that breaks the profile, another `sub`, a wider scope, or
+   new material the daemon could not keep) may have spent the refresh token
+   with nothing new kept: the mark stays, and the credential needs signing in
+   again without that token ever being presented again.
+
+One grant refreshes once at a time: the adapter holds a lock of its own per
+credential across the whole refresh, and a second renewal of the same
+credential waits for it and reads the new material.
+
+## Revoking at the provider
+
+When the sponsor revokes the credential, the adapter presents the grant's
+refresh token (`token_type_hint=refresh_token`, with the client id and a
+proof) to the revocation endpoint the authorization server's metadata names
+on its own origin. A 200 is the provider confirming it. A server that names
+no revocation endpoint cannot be asked: the grant ends there when it
+expires, and the sponsor reads so.
 
 ## Permissions
 
@@ -99,10 +155,9 @@ sponsor to sign the companion in again with the wider scope; nothing but a
 new sign-in widens a credential's permissions, and a refresh of the OAuth
 grant keeps them as they are.
 
-The adapter answers no authorization ask: a service that asks for a bearer
-token or a proof for an audience is refused as unsupported before the
-material is read. Refreshing the grant, revoking it at the provider and
-minting proofs for services come with the service adapters that need them.
+The adapter answers no authorization ask yet: a service that asks for a
+proof for an audience is refused as unsupported before the material is read.
+Minting proofs for services comes with the service adapter that needs one.
 
 ## Reaching the network
 
@@ -161,13 +216,16 @@ whose redirect URI carries the return route's path.
 7. Start another sign-in for a second companion with the same account: the
    tab ends on a page saying nothing was signed in, because the account
    belongs to the first companion.
-8. Revoke the credential on the manager page; it stays listed as revoked.
-   Sign the first companion in again, this time with the account's handle
-   typed in the account field, to check resolution through the handle
-   resolver and the DID directory: a new credential is listed beside the
-   revoked one.
-9. Revoke that credential too, then revoke the app's access in the
-   provider's settings, stop the daemon, and delete the check's data
-   directory.
+8. Leave the daemon running past the access token's expiry (about two
+   hours covers it) and look at the companion's journal: it says the lobby
+   kept the account signed in, and the account still reads **signed in**.
+9. Revoke the credential on the manager page; the note says whether the
+   provider confirmed it, and the provider's connected-apps settings
+   show the grant gone. Sign the first companion in again, this time with
+   the account's handle typed in the account field, to check resolution
+   through the handle resolver and the DID directory: a new credential is
+   listed beside the revoked one.
+10. Revoke that credential too, check the provider's settings once more,
+    stop the daemon, and delete the check's data directory.
 
 Record what each step showed in the slice's notes.

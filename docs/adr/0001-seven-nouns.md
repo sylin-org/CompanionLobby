@@ -22,7 +22,7 @@ reach, and keeps an attributed record of everything that happened.
 | Credential | An account the sponsor signed in to for a companion. The record never holds material. | `Credential`, `CredentialId` |
 | Service | Something a companion reaches, spoken to by a service adapter in its own words. | `ServiceName` |
 | Connection | The sponsor's decision that a companion may use one credential to reach a service at an address. | `Connection`, `ConnectionId` |
-| Journal | Attribution: who did what, when, through which connection, with which outcome. | `JournalEntry` |
+| Journal | Attribution: who did what, when, through which connection, with which outcome, named as the sponsor read it then. | `JournalEntry` |
 
 These words are the whole product vocabulary. The mind-facing surface is
 exactly `reach`, `<service>_<tool>` with an optional `at` argument for services
@@ -35,10 +35,13 @@ provider text.
 `lobby-contracts` declares the nouns and two synchronous, `Send + Sync`
 contracts:
 
-- `CredentialAdapter`: kind, begin and complete sign-in, and authorize an
-  ask (a bearer token, or a proof for an audience and method) against a
-  `MaterialSlot`. A proof of one request joins with the first service
-  adapter that asks for it.
+- `CredentialAdapter`: kind, begin and complete sign-in (signing an account
+  in again from its own material), let go of a sign-in the lobby stopped
+  waiting for, authorize an ask (a proof for an audience and method) against
+  a `MaterialSlot`, renew the material when it is due, and revoke at the
+  provider. Each ask shape joins the contract with the first adapter that
+  answers it; a proof of one request joins with the first service adapter
+  that asks for it.
 - `ServiceAdapter`: name, describe (the provider kinds it accepts and the
   addresses it may reach), establish a connection at an `Address` through an
   `Authority`, catalog, and call.
@@ -47,13 +50,20 @@ The daemon implements `MaterialSlot` and `Authority`. Material is a
 sealed blob only its own adapter decodes; a service adapter never holds it,
 and asks the `Authority` for an `Authorization` in the shape it needs, which
 the credential adapter mints on demand. A connection keeps only what the
-service issued. The contracts grow as the slices that need more arrive:
-refreshing and revoking at the provider, portraits, the tools a connection's
-authority allows, and pushed events each join with their first user. The nouns themselves are declared
-with the crate: `Companion` with its moniker and display name, `Attachment`,
-`JournalEntry` with its kinds, its initiator and the `ConnectionId` it went
-through, `Outcome`, `ToolDescriptor`, and `ToolResult`, whose text marks
-quoted third-party passages and renders within a fixed budget.
+service issued. Through the slot an adapter reads its material, marks it
+rotating durably before it spends a provider's single-use secret, clears
+the mark when nothing was spent, and commits a `MaterialUpdate`, which lands
+only on top of the material it was made from, once, and never with more
+permissions than the credential holds; a renewal that ends with its mark in
+place leaves the credential needing sign-in, and its old secret is never
+offered again. The contracts grow as the slices that need more arrive:
+portraits read from a provider, the tools a connection's authority allows,
+and pushed events each join with their first user. The nouns themselves are
+declared with the crate: `Companion` with its moniker and display name,
+`Attachment`, `JournalEntry` with its kinds, its initiator, the
+`ConnectionId` it went through and the names of what it concerns as of the
+moment it was written, `Outcome`, `ToolDescriptor`, and `ToolResult`, whose
+text marks quoted third-party passages and renders within a fixed budget.
 Beyond them, a type enters the contracts crate only when both synthetic
 adapters in the test kit need it in the same change; there is no shared
 vocabulary of service nouns, and service adapters may duplicate each other.
@@ -149,16 +159,21 @@ path and the shim can start the daemon from its own executable.
   external call (no entry, no call); a `settled` entry follows it. Every
   command writes a `pending` entry before it changes anything and an entry
   with its outcome after; a failure of the second never reports a landed
-  change as an error. Entries hold no content and no secrets.
+  change as an error. Entries hold no content and no secrets. Each carries
+  the names the sponsor read when it was written (the companion's display
+  name, the account's label and its kind's title, the connection's label and
+  its service's title), so its sentence reads the same after a rename and a
+  removed companion keeps its history by name.
 
 ### The ship line
 
 v0.1.0 is the Tangent service adapter (reading, creating a post and starting a
 topic; edit, delete, membership, watch and read position included; moderation
 and management tools last within the slice) reached through Claude Desktop,
-Claude Code and Codex on Windows with the owner's real atproto account. The
-Bluesky service adapter, the `attention` tool, portraits and the Windows tray
-come after v0.1.0.
+Claude Code and Codex on Windows with the owner's real atproto account.
+Portraits the sponsor uploads exist. The Bluesky service adapter, the
+`attention` tool, portraits read from an account's profile and the Windows
+tray come after v0.1.0.
 
 ## Consequences
 
@@ -202,8 +217,8 @@ decision.
    Windows, each recorded on day 1 of slice 1; the protocol revision they
    speak first is built first and the other is added later. Every host
    attaches through the shim; none attaches over HTTP directly.
-8. **Ship line.** v0.1.0 as described above; Bluesky, the `attention` tool,
-   portraits and the tray come after.
+8. **Ship line.** v0.1.0 as described above; sponsor portraits exist, and
+   Bluesky, the `attention` tool, profile portraits and the tray come after.
 9. **Tangent connection defaults.** Request the server's default grants
    (welcome, read, post) with a 7-day lifetime; the `manage` grant and the
    lifetime are per-connection sponsor choices in the manager. The derived

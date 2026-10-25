@@ -4,17 +4,17 @@ The manager page is where the sponsor keeps the keys. It is served by the
 daemon at `http://127.0.0.1:<port>/` as three embedded files, holds no truth,
 and follows the lobby through the live feed (see [daemon.md](daemon.md)). It
 serves the sponsor's moments in [participants.md](participants.md): first
-run, lending an identity, opening a connection, the glance, and pulling the
-key.
+run, lending an identity, opening a connection, the glance, trouble, and
+pulling the key.
 
 ## Routes
 
 | Route | What the sponsor sees |
 | --- | --- |
-| `/` | With no companion, the first run: a form that names the first companion. Otherwise the companion cards, each with its portrait or initials, how many minds are attached, the accounts it is signed in as and how many connections are ready, and one primary action, *Add a companion*. |
+| `/` | With no companion, the first run: a form that names the first companion. Otherwise the companion cards, each with its portrait or initials, how many minds are attached, how many connections are ready or need a sign-in, and each account it holds by its label and kind, with that account's one action: *Revoke*, confirmed in place, or *Sign in again* when it needs it. One primary action, *Add a companion*. |
 | `/companion/<id>/attach` | What just happened and what comes next: the companion's `mcpServers` block, keyed by the companion's moniker and naming it by its immutable id, with *Copy block*. The page says whether a mind is attached yet, and once one is, offers lending the companion an account. |
 | `/companion/<id>` | The companion's page: its name, portrait and attachments, then three sections in this order: Accounts, Connections, Journal. *Host configuration* leads back to the block; *Name and portrait* opens the rename form, the portrait and the removal, each confirmed in place. |
-| `/companion/<id>/sign-in/<sign-in id>` | The handoff between the lobby and the provider's sign-in page. |
+| `/companion/<id>/sign-in/<sign-in id>` | The handoff between the lobby and the provider's sign-in page. One the lobby does not remember says so, says it cannot tell how it ended, and leads back to the companion, whose accounts show what is signed in. |
 | `/journal` | The whole journal as sentences, newest first, with paging. |
 
 ## The moments
@@ -22,7 +22,11 @@ key.
 **First run.** The page asks for a display name, suggests a moniker from
 it, and takes an optional portrait: a PNG, JPEG, WebP or GIF image of at most
 512 KiB, previewed before it is sent. Without one the companion shows its
-initials. Creating the companion leads to its attach page.
+initials. Creating the companion leads to its attach page. A portrait the
+lobby did not keep leaves a note there and on the companion's page, saying
+why, with *Choose a portrait*, which opens *Name and portrait* at the
+portrait field, and *Keep the initials*; it stays until one of them is
+chosen or a portrait is kept.
 
 **Lending an identity.** Accounts lists one row per kind of account the
 lobby can sign in, by the title the kind's adapter gives it. A row is one of:
@@ -30,6 +34,10 @@ lobby can sign in, by the title the kind's adapter gives it. A row is one of:
 - signed in: the account by its label (a handle, or an account name), the
   word *Signed in*, and *Revoke*. The provider's stable key for the account
   shows only inside the row's *Details*;
+- needing a sign-in: the account by its label, the words *Sign in needed*,
+  and *Sign in again*, the page's primary action, which starts a sign-in
+  for that same account without anything typed and leads to the handoff;
+  *Revoke instead* waits in the row's *Details*;
 - signing in: the account the sponsor meant, the word *Signing in*, and
   *Continue*, which leads to the handoff;
 - otherwise a field for the account, with the hint the kind's adapter gives
@@ -47,6 +55,8 @@ again here* instead, which ends the waiting one and starts the same sign-in
 anew. The handoff follows the sign-in to its end and
 says it plainly: signed in, with the account's label; cancelled; expired; or
 not completed by the provider's answer. Nothing on it ever says connected.
+The page the provider's tab lands on says how the sign-in ended and offers
+one link, back to the companion's page.
 
 **Opening a connection.** Connections lists the companion's connections,
 each by the sponsor's name for it, its service and its address, with one
@@ -55,7 +65,7 @@ word and one action:
 | Word | When | Action |
 | --- | --- | --- |
 | Ready | The connection and its account are ready. | *Revoke*, confirmed in place. |
-| Sign in needed | The connection stands but its account cannot be used. | *Sign in again*, which leads to the account's row. |
+| Sign in needed | The connection stands but its account needs signing in again. | *Sign in again*, which leads to the account's own *Sign in again*. |
 | Revoked | The sponsor revoked it, or its account. | *Open again* with a ready account the service takes, or *Sign in* when there is none. |
 
 A revoked connection is shown only while nothing ready or newer holds its
@@ -72,10 +82,20 @@ gave. It shows no ids, codes, secrets or content, leaves out the entries
 written before an outcome was known, and pages back with *Older entries*.
 New entries arrive as they are written.
 
-**Pulling the key.** *Revoke* appears wherever an account or a connection
-is shown and is confirmed in place, never in a dialog. Revoking an account
-revokes every connection made with it, and the page says so before it
-happens.
+**Trouble.** When a provider refuses to renew an account, or the lobby
+cannot tell whether a renewal landed, the account says *Sign in needed* on
+the companion's card and in its row, with *Sign in again* as its one
+action, and each of its connections says *Sign in needed*. Nothing else on
+the page changes, except that the forms for new connections to a service
+that takes that account say to sign it in again first. Signing the same
+account in again brings the account and every connection back as they were.
+
+**Pulling the key.** *Revoke* appears wherever a signed-in account or a
+connection is shown, the companion's card included, and is confirmed in
+place, never in a dialog. Revoking an account revokes every connection made
+with it, and the page says so before it happens; afterwards it says whether
+the provider confirmed the revocation, offers none, or could not be
+reached.
 
 ## The rules the page keeps
 
@@ -108,8 +128,12 @@ cargo run -p lobby-testkit --bin lobby-world
 ```
 
 It prints one `name=value` line each for `LOBBY_AUTHSERVER`, `passbook`,
-`passbook-holder`, `board`, `second-board` and `atmosphere-handle`, and runs
-until its input closes or Enter is pressed. In another terminal, run the
+`passbook-holder`, `board`, `second-board`, `atmosphere-handle` and
+`control`, and runs until its input closes or Enter is pressed. Opening a
+path on the printed `control` origin turns the passbook authority's knobs:
+`/keys/brief` (keys issued from then on live two seconds, so the lobby
+renews them over and over), `/keys/long` (an hour), `/renewals/refuse` and
+`/renewals/allow`. In another terminal, run the
 test-only command with the printed `LOBBY_AUTHSERVER`, a data directory of
 its own and a free port, and open the page it serves:
 
@@ -121,5 +145,16 @@ LOBBY_AUTHSERVER=<printed origin> LOBBY_DATA_DIR=<an empty directory> LOBBY_PORT
 Then walk the moments: name a companion; sign it in with Atmosphere as the
 printed handle and with Passbook by typing the printed `passbook` origin;
 open a connection to the printed `board`; revoke it; read the journal.
-Every sign-in is approved at once as the printed account. Stop the daemon
-with `companion-lobby-synthetic stop` and the same environment.
+Every sign-in is approved at once as the printed account. For trouble, open
+`control/keys/brief` before signing in with Passbook, open a connection,
+then open `control/renewals/refuse`: within a second or two the card says
+*Sign in again*. Open `control/renewals/allow` and `control/keys/long`, then
+sign in again from the card. Revoke an account from its card. Stop the
+daemon with `companion-lobby-synthetic stop` and the same environment.
+
+The page's text, as the browser rendered it on such a walk, is kept in
+`crates/testkit/fixtures/manager/`: the lobby and a companion's accounts,
+with an account's details closed and opened, and both in trouble. A test
+holds the account key to its place in that text; record the files again,
+from the text of the page's main region, when the page changes what it
+shows.
