@@ -96,6 +96,9 @@ pub const TITLE: &str = "Atmosphere";
 /// The scope every sign-in asks for: the account's identity.
 pub const SCOPE: &str = "atproto";
 
+/// How many of the handles a document claims are tried as its label.
+const LABEL_HANDLES: usize = 3;
+
 /// The longest token, code or state accepted.
 const TOKEN_LIMIT: usize = 4096;
 
@@ -152,20 +155,23 @@ impl Atproto {
         Ok((authserver, Some((did, document.pds))))
     }
 
-    /// What the sponsor knows the account `did` by: the first of `handles`,
-    /// claimed by its document, that resolves back to `did`, or `did` when
-    /// none does.
+    /// What the sponsor knows the account `did` by: the first of the first
+    /// [`LABEL_HANDLES`] `handles`, claimed by its document, that resolves
+    /// back to `did`, or `did` when none does. The label only names the
+    /// account, so a handle whose host cannot be reached is passed over and
+    /// never fails a sign-in the provider already completed.
     fn label(&self, did: &str, handles: &[String]) -> Result<AccountLabel, Outcome> {
-        for handle in handles {
-            match identity::resolve_handle(&self.world, &self.outbound, handle) {
-                Ok(resolved) if resolved == did => {
-                    return AccountLabel::new(handle).ok_or(Outcome::Refused);
-                }
-                Ok(_) | Err(Outcome::NotFound | Outcome::Refused) => {}
-                Err(other) => return Err(other),
-            }
-        }
-        AccountLabel::new(did).ok_or(Outcome::Refused)
+        let named = handles
+            .iter()
+            .take(LABEL_HANDLES)
+            .find(|handle| {
+                identity::resolve_handle(&self.world, &self.outbound, handle)
+                    .is_ok_and(|resolved| resolved == did)
+            })
+            .and_then(|handle| AccountLabel::new(handle));
+        named
+            .or_else(|| AccountLabel::new(did))
+            .ok_or(Outcome::Refused)
     }
 
     /// Exchanges `code` for the session `flight` started, and checks what

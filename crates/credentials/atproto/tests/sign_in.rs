@@ -191,6 +191,31 @@ fn the_account_the_provider_authenticated_is_signed_in_and_the_wire_keeps_the_pr
 }
 
 #[test]
+fn the_account_is_labelled_by_its_handle_and_by_its_did_when_no_handle_answers() {
+    let world = world();
+    world.sign_in_as(ADA);
+    let adapter = adapter(&world);
+    let first = request("", "state-label-1");
+    let start = adapter.begin_sign_in(&first).expect("a sign-in starts");
+    let signed = adapter
+        .complete_sign_in(&first, &returned(&world.approve(&start.url)))
+        .expect("signed in");
+    assert_eq!(signed.label.as_str(), "ada.example.test");
+
+    // The resolver is down after the code is spent: the sign-in still
+    // completes, labelled by the account's DID.
+    let second = request("", "state-label-2");
+    let start = adapter.begin_sign_in(&second).expect("a sign-in starts");
+    let back = returned(&world.approve(&start.url));
+    world.resolver_unavailable();
+    let signed = adapter
+        .complete_sign_in(&second, &back)
+        .expect("signed in all the same");
+    assert_eq!(signed.account.as_str(), ADA);
+    assert_eq!(signed.label.as_str(), ADA);
+}
+
+#[test]
 fn a_named_account_is_resolved_before_the_push_and_must_be_the_one_signed_in() {
     let world = world();
     world.sign_in_as(ADA);

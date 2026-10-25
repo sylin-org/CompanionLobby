@@ -94,6 +94,7 @@ struct Book {
     flaws: Vec<Flaw>,
     pds_names: Option<String>,
     opaque: bool,
+    resolver_down: bool,
     pushed: HashMap<String, Pushed>,
     codes: HashMap<String, (Pushed, String)>,
     jtis: HashSet<String>,
@@ -209,6 +210,12 @@ impl AtprotoWorld {
         locked(&self.book).opaque = true;
     }
 
+    /// Makes the handle resolver answer 503 from now on, as one that cannot
+    /// be reached for a while.
+    pub fn resolver_unavailable(&self) {
+        locked(&self.book).resolver_down = true;
+    }
+
     /// Every token issued so far, for tests that look for secrets where none
     /// may be.
     pub fn issued(&self) -> Vec<String> {
@@ -245,6 +252,9 @@ fn answer_server(book: &Mutex<Book>, origin: &str, pds: &str, request: &Received
     let mut book = locked(book);
     let route = request.route().to_owned();
     match (request.method.as_str(), route.as_str()) {
+        ("GET", "/xrpc/com.atproto.identity.resolveHandle") if book.resolver_down => {
+            error(503, "TemporarilyUnavailable")
+        }
         ("GET", "/xrpc/com.atproto.identity.resolveHandle") => {
             let handle = request.query("handle").unwrap_or_default();
             match book
