@@ -1,4 +1,4 @@
-recorded against manager.js sha256 416ce515697bd7b7bfd30069a62e6397f77fff6447309bbb1ee02a3835757414
+recorded against manager.js sha256 d26031f28a19fd1287fb8570241a52dd8aa43de2bf8626dffdf84d31286f0e5c
 All companions
 A
 Ada

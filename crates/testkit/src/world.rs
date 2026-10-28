@@ -19,7 +19,11 @@
 //! makes them live an hour, `/renewals/refuse` refuses every renewal and
 //! `/renewals/allow` allows them again; `/space/locked` makes the Space
 //! refuse every new Post in its welcome Topic, and `/space/tokens-end` ends
-//! every token the Space issued, so the next call exchanges a fresh proof.
+//! every token the Space issued, so the next call exchanges a fresh proof;
+//! `/atmosphere/older` makes Atmosphere sign-ins grant only identity and
+//! the Space's leave, as an account signed in before the lobby's other
+//! services needed more, and `/atmosphere/asked` makes them grant what they
+//! ask for again.
 //! Each answers with a short page saying what it did.
 
 use serde_json::json;
@@ -38,6 +42,9 @@ pub const HOLDER: &str = "ada";
 pub const HANDLE: &str = "ada.example.test";
 /// That account's DID.
 pub const DID: &str = "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa";
+/// What an Atmosphere sign-in grants after `/atmosphere/older`: identity
+/// and the leave the Space needs, and nothing a later service asks for.
+pub const OLDER_SCOPE: &str = "atproto rpc:org.sylin.tangent.exchangeIdentity?aud=*";
 /// The DID of Bea, who posts at the same PDS.
 pub const BEA_DID: &str = "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb";
 /// The DID of Cy, who posts there too.
@@ -122,8 +129,17 @@ impl LobbyWorld {
         );
         let knobs = passbook.controls();
         let knobs_space = space.clone();
+        let knobs_atproto = atproto.knobs();
         let control = Listener::start(move |request| {
             let did = match request.route() {
+                "/atmosphere/older" => {
+                    knobs_atproto.grants_scope(OLDER_SCOPE);
+                    "Atmosphere sign-ins from now on grant only identity and the Space's leave, as one made before the lobby's other services needed more."
+                }
+                "/atmosphere/asked" => {
+                    knobs_atproto.grants_what_is_asked();
+                    "Atmosphere sign-ins from now on grant what they ask for."
+                }
                 "/space/locked" => {
                     knobs_space.refuse_writes_in("welcome");
                     "The Space refuses every new Post in its welcome Topic."

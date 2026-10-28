@@ -285,6 +285,22 @@ impl Proofs {
     }
 }
 
+/// The knobs of one world, kept apart from its listeners.
+#[derive(Debug, Clone)]
+pub struct Knobs(Arc<Mutex<Book>>);
+
+impl Knobs {
+    /// Makes the code exchange say it granted `scope`, whatever was asked.
+    pub fn grants_scope(&self, scope: &str) {
+        locked(&self.0).granted_scope = Some(scope.to_owned());
+    }
+
+    /// Makes the code exchange grant what was asked again.
+    pub fn grants_what_is_asked(&self) {
+        locked(&self.0).granted_scope = None;
+    }
+}
+
 /// A fake authorization server and PDS on their own loopback listeners.
 pub struct AtprotoWorld {
     server: Listener,
@@ -325,6 +341,12 @@ impl AtprotoWorld {
             book,
             proofs,
         }
+    }
+
+    /// A handle on this world's knobs that another thread may keep, such as
+    /// a control page.
+    pub fn knobs(&self) -> Knobs {
+        Knobs(self.book.clone())
     }
 
     /// Every proof this world's PDS minted, shared with whoever checks them.

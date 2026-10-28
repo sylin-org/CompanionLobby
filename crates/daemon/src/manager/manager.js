@@ -340,6 +340,42 @@ function connectionsOf(companion) {
   return [...lobby.connections.values()].filter(connection => connection.companion === companion.id);
 }
 
+// Whether a ready account was granted everything a service needs of it.
+function grantsAll(credential, service) {
+  return (service.needs || []).every(permission => (credential.permissions || []).includes(permission));
+}
+
+// The services of a ready account's kind that need more than it holds, so
+// signing the same account in again would widen it.
+function widenedBy(credential) {
+  return lobby.services.filter(service => service.accepts.includes(credential.kind) && !grantsAll(credential, service));
+}
+
+// The titles of the services an account's ready connections reach, each once.
+function reachedThrough(credential) {
+  const titles = [];
+  for (const connection of lobby.connections.values()) {
+    if (connection.credential !== credential.id || connection.state !== "ready") continue;
+    const title = serviceTitle(connection.service);
+    if (!titles.includes(title)) titles.push(title);
+  }
+  return titles;
+}
+
+// Joins words as a sentence lists them: "A", "A and B", "A, B and C".
+function listed(words) {
+  return words.length < 2 ? words.join("") : words.slice(0, -1).join(", ") + " and " + words[words.length - 1];
+}
+
+// What signing a ready account in again does, in one or two sentences:
+// what the companion can then do, and the connections that stay.
+function widenSentence(companion, credential, services) {
+  const name = companion.displayName;
+  const staying = reachedThrough(credential);
+  const stays = staying.length ? " " + listed(staying) + (staying.length === 1 ? " stays" : " stay") + " connected." : "";
+  return "Sign " + name + " in again so " + name + " can " + listed(services.map(service => service.lets || "use " + service.title)) + "." + stays;
+}
+
 // The one honest word for a connection, and the one action beside it.
 function connectionWord(connection) {
   if (connection.state === "revoked") return "revoked";
@@ -963,7 +999,11 @@ function renderSignIn(companionId, signInId) {
   const parts = [back, element("h1", "", "Sign " + companion.displayName + " in with " + title)];
   const meant = element("p", "lede");
   meant.append(document.createTextNode("The account: "), element("strong", "", placeText(signIn.account) || "the one you choose on the sign-in page"), document.createTextNode("."));
-  parts.push(meant, element("p", "", companion.displayName + " receives this account's identity and nothing more. No connection opens until you grant one."));
+  const widening = waitingNow(signIn) ? readyCredential(companion, signIn.kind) : null;
+  const wider = widening ? widenedBy(widening) : [];
+  parts.push(meant, element("p", "", wider.length
+    ? widenSentence(companion, widening, wider) + " Nothing else changes, and nothing opens until you grant it."
+    : companion.displayName + " receives this account's identity and nothing more. No connection opens until you grant one."));
   const status = element("p", "status");
   status.setAttribute("role", "status");
   status.tabIndex = -1;
@@ -1057,7 +1097,7 @@ function connectionsSection(companion, step) {
   } else {
     section.append(element("p", "muted", companion.displayName + " reaches no service yet."));
   }
-  lobby.services.forEach((service, index) => section.append(grantPanel(companion, service, step === "connect" && index === 0)));
+  lobby.services.map((service, index) => grantPanel(companion, service, step === "connect" && index === 0)).filter(Boolean).forEach(panel => section.append(panel));
   return section;
 }
 
@@ -1065,7 +1105,10 @@ function connectionRow(companion, connection) {
   const row = element("li", "row");
   const word = connectionWord(connection);
   const words = element("div", "row-words");
-  words.append(element("strong", "", connection.label), element("span", "kind", serviceTitle(connection.service) + " at " + placeText(connection.address)));
+  const service = lobby.services.find(entry => entry.name === connection.service);
+  const through = lobby.credentials.get(connection.credential);
+  const where = service && service.home && through ? " through " + through.label : " at " + placeText(connection.address);
+  words.append(element("strong", "", connection.label), element("span", "kind", serviceTitle(connection.service) + where));
   const shownWord = element("span", "word" + (word === "ready" ? " ok" : word === "revoked" ? " off" : " warn"), WORDS[word]);
   let action;
   if (word === "ready") {
@@ -1084,13 +1127,12 @@ function connectionRow(companion, connection) {
     row.append(words, shownWord, actions);
     return row;
   } else {
-    const service = lobby.services.find(entry => entry.name === connection.service);
-    const usable = service && service.accepts.map(kind => readyCredential(companion, kind)).find(Boolean);
+    const usable = service && service.accepts.map(kind => readyCredential(companion, kind)).find(credential => credential && grantsAll(credential, service));
     if (usable) {
       action = button("Open again");
       action.addEventListener("click", async () => {
         action.disabled = true;
-        const granted = await grant(companion, usable, connection.service, connection.address, connection.label);
+        const granted = await grant(companion, usable, connection.service, service.home ? "" : connection.address, connection.label);
         action.disabled = false;
         if (granted) refresh(true, "connection-" + granted.id);
         else action.focus();
@@ -1178,6 +1220,7 @@ function grantPanel(companion, service, primary) {
     panel.append(element("p", "muted", service.title + " takes " + (titles ? titles + " accounts" : "accounts this lobby cannot sign in") + ". Sign " + companion.displayName + " in above first."));
     return panel;
   }
+  if (service.home) return homePanel(companion, service, usable, panel, primary);
   const form = element("form", "fields");
   form.setAttribute("aria-label", "Open a connection for " + companion.displayName + " to " + service.title);
   const key = "grant:" + companion.id + ":" + service.name;
@@ -1227,6 +1270,55 @@ function grantPanel(companion, service, primary) {
     await submitting(form, open, async () => {
       const granted = await grant(companion, credential, service.name, where, name, form);
       if (granted) { drafts.clear(key); editing = false; refresh(true, "connection-" + granted.id); }
+    });
+  });
+  panel.append(form);
+  return panel;
+}
+
+// A service that lives where the account lives: no address to type, one
+// connection per account, so no panel once it stands, and an account
+// signed in before the service needed more of it is offered one thing,
+// signing it in again.
+function homePanel(companion, service, usable, panel, primary) {
+  const credential = usable.find(entry => grantsAll(entry, service)) || usable[0];
+  const standing = connectionsOf(companion).find(connection => connection.service === service.name && connection.credential === credential.id && connection.state !== "revoked");
+  if (standing) return null;
+  const form = element("form", "fields");
+  const key = "grant:" + companion.id + ":" + service.name;
+  const actions = element("div", "actions");
+  if (!grantsAll(credential, service)) {
+    form.setAttribute("aria-label", "Sign " + companion.displayName + " in again for " + service.title);
+    form.append(element("p", "", widenSentence(companion, credential, [service])));
+    const again = element("button", primary ? "primary" : "", "Sign " + companion.displayName + " in again");
+    again.type = "submit";
+    again.dataset.key = key + ":again";
+    actions.append(again);
+    form.append(actions);
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      await submitting(form, again, async () => {
+        const handoff = await startSignIn(companion, credential.kind, "", form);
+        if (!handoff) return;
+        editing = false;
+        navigate(handoff);
+      });
+    });
+    panel.append(form);
+    return panel;
+  }
+  form.setAttribute("aria-label", "Open a connection for " + companion.displayName + " to " + service.title);
+  form.append(element("p", "muted", service.title + " lives where the account lives, so " + companion.displayName + " reaches it as " + credential.label + ". There is no address to type."));
+  const open = element("button", primary ? "primary" : "", "Open connection");
+  open.type = "submit";
+  open.dataset.key = key + ":open";
+  actions.append(open);
+  form.append(actions);
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    await submitting(form, open, async () => {
+      const granted = await grant(companion, credential, service.name, "", service.name, form);
+      if (granted) { editing = false; refresh(true, "connection-" + granted.id); }
     });
   });
   panel.append(form);

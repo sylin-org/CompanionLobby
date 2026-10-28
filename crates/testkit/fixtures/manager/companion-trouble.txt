@@ -1,4 +1,4 @@
-recorded against manager.js sha256 416ce515697bd7b7bfd30069a62e6397f77fff6447309bbb1ee02a3835757414
+recorded against manager.js sha256 d26031f28a19fd1287fb8570241a52dd8aa43de2bf8626dffdf84d31286f0e5c
 All companions
 A
 Ada
@@ -21,8 +21,12 @@ Atmosphere account
 Your handle, such as yourname.bsky.social. Leave it empty to choose the account on the sign-in page.
 Sign in with Atmosphere
 CONNECTIONS
+main
+Tangent Space at 127.0.0.1:59797
+Revoked
+Sign in
 board
-Board at 127.0.0.1:56188
+Board at 127.0.0.1:59793
 Sign in needed
 Sign in again
 Revoke
@@ -34,3 +38,6 @@ Open a connection to Tangent Space
 
 Tangent Space takes Atmosphere accounts. Sign Ada in above first.
 
+Open a connection to Bluesky
+
+Bluesky takes Atmosphere accounts. Sign Ada in above first.

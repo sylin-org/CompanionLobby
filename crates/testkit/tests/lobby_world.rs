@@ -55,6 +55,8 @@ fn lobby_world_prints_origins_that_answer_and_stops_when_its_input_closes() {
         "/keys/long",
         "/space/tokens-end",
         "/space/locked",
+        "/atmosphere/older",
+        "/atmosphere/asked",
     ] {
         let origin =
             Address::parse(&value("control"), AddressPolicy::LoopbackAllowed).expect("control");

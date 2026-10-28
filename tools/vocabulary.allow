@@ -60,3 +60,5 @@ crates/daemon/tests/bluesky_journey.rs	provider-bluesky	The journey connects a c
 crates/daemon/tests/bluesky_journey.rs	provider-tangent	The journey holds one account's Tangent connection beside its Bluesky one through the real daemon.
 crates/daemon/tests/bluesky_journey.rs	provider-atproto	The journey signs the companion in with the atproto adapter against the test kit's fake world and reads the records it wrote.
 crates/daemon/tests/bluesky_journey.rs	provider-atproto-wire	The journey checks that every request to the fake PDS carried the token under DPoP with a proof of its own.
+crates/testkit/fixtures/manager/companion-accounts.txt	provider-bluesky	The page's recorded text names the installed services by their titles.
+crates/testkit/fixtures/manager/companion-trouble.txt	provider-bluesky	The page's recorded text names the installed services by their titles.

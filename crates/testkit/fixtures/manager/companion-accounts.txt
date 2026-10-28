@@ -1,4 +1,4 @@
-recorded against manager.js sha256 416ce515697bd7b7bfd30069a62e6397f77fff6447309bbb1ee02a3835757414
+recorded against manager.js sha256 d26031f28a19fd1287fb8570241a52dd8aa43de2bf8626dffdf84d31286f0e5c
 All companions
 A
 Ada
@@ -20,7 +20,11 @@ Signed in
 Revoke
 CONNECTIONS
 board
-Board at 127.0.0.1:56188
+Board at 127.0.0.1:59793
+Ready
+Revoke
+main
+Tangent Space at 127.0.0.1:59797
 Ready
 Revoke
 Open a connection to Board
@@ -34,4 +38,9 @@ Address
 Its address, such as https://tangent.example.test, or http://localhost:8080 for one on this machine.
 Name
 What Ada calls this Tangent Space when it has more than one.
+Open connection
+Open a connection to Bluesky
+
+Bluesky lives where the account lives, so Ada reaches it as ada.example.test. There is no address to type.
+
 Open connection
