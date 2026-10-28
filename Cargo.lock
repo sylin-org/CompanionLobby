@@ -639,6 +639,7 @@ dependencies = [
  "lobby-credential-atproto",
  "lobby-daemon",
  "lobby-outbound",
+ "lobby-service-bluesky",
  "lobby-service-tangent",
  "lobby-testkit",
  "serde_json",
@@ -697,6 +698,15 @@ version = "0.0.0"
 dependencies = [
  "lobby-contracts",
  "ureq",
+]
+
+[[package]]
+name = "lobby-service-bluesky"
+version = "0.0.0"
+dependencies = [
+ "lobby-contracts",
+ "lobby-outbound",
+ "serde_json",
 ]
 
 [[package]]

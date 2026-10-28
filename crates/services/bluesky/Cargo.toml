@@ -1,0 +1,16 @@
+[package]
+name = "lobby-service-bluesky"
+description = "The Bluesky service adapter for Companion Lobby."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+lobby-contracts.workspace = true
+lobby-outbound.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -18,6 +18,7 @@ serde_json.workspace = true
 [dev-dependencies]
 lobby-credential-atproto.workspace = true
 lobby-service-tangent.workspace = true
+lobby-service-bluesky.workspace = true
 
 [lints]
 workspace = true

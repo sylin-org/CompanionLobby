@@ -6,6 +6,7 @@ members = [
     "crates/testkit",
     "crates/credentials/atproto",
     "crates/services/tangent",
+    "crates/services/bluesky",
     "crates/daemon",
     "crates/conformance",
 ]
@@ -25,6 +26,7 @@ lobby-outbound = { path = "crates/outbound" }
 lobby-testkit = { path = "crates/testkit" }
 lobby-credential-atproto = { path = "crates/credentials/atproto" }
 lobby-service-tangent = { path = "crates/services/tangent" }
+lobby-service-bluesky = { path = "crates/services/bluesky" }
 lobby-daemon = { path = "crates/daemon" }
 lobby-conformance = { path = "crates/conformance" }
 

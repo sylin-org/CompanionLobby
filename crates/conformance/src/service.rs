@@ -15,7 +15,15 @@
 //!   declare, are refused before the service is reached;
 //! * a service that stops taking what it issued is asked to establish the
 //!   connection again exactly once, with a proof minted fresh for it, and
-//!   the connection keeps what it issued anew through the slot.
+//!   the connection keeps what it issued anew through the slot;
+//! * a connection the service issued leave to read only is offered fewer
+//!   tools, and a write it is not allowed never reaches the service.
+//!
+//! The last two hold for a service that issues each connection something
+//! of its own; a service that lives on the account's own server, whose
+//! leave is the account's own permissions and which issues nothing that
+//! expires, says so through its fixture and keeps its own promises in its
+//! own tests.
 
 use std::collections::HashSet;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -49,6 +57,11 @@ pub trait ServiceFixture {
     /// A call that writes, which a connection that may only read is not
     /// allowed.
     fn write(&self) -> (ToolName, ToolArguments);
+    /// Whether the service issues each connection something of its own
+    /// that it may stop taking, and decides per connection what it allows.
+    fn issues_per_connection(&self) -> bool {
+        true
+    }
 }
 
 /// Text a third party might write to steer a mind.
@@ -199,6 +212,10 @@ pub fn run(adapter: &dyn ServiceAdapter, fixture: &dyn ServiceFixture) {
         Err(Outcome::InvalidInput)
     );
     assert_eq!(fixture.requests(), before, "the service was not reached");
+
+    if !fixture.issues_per_connection() {
+        return;
+    }
 
     // A service that stopped taking what it issued: the adapter establishes
     // the connection again once, with a fresh proof, keeps what the service
