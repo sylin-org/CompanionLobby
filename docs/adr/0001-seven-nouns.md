@@ -78,6 +78,7 @@ vocabulary of service nouns, and service adapters may duplicate each other.
 | `lobby-testkit` (unpublished) | `crates/testkit` | contracts, outbound |
 | `lobby-credential-atproto` | `crates/credentials/atproto` | contracts, outbound |
 | `lobby-service-tangent` | `crates/services/tangent` | contracts, outbound |
+| `lobby-service-bluesky` | `crates/services/bluesky` | contracts, outbound |
 | `lobby-daemon` (lib + `companion-lobby` binary) | `crates/daemon` | contracts, outbound, the adapters; the test kit only under the `synthetic` feature |
 | `lobby-conformance` (unpublished) | `crates/conformance` | contracts, daemon, testkit |
 
@@ -88,8 +89,8 @@ with a registry of its own composed from the test kit's synthetic adapters,
 so the conformance suite's host scenarios run them through a real binary.
 The product registry never names them, and `companion-lobby`, even built
 with every test feature on, contains neither. A second service
-adapter on the same atproto credential, `lobby-service-bluesky`, is created
-only after the first service adapter passes the conformance suite.
+adapter on the same atproto credential, `lobby-service-bluesky`, followed
+the first once it passed the conformance suite.
 
 ### One process, an event-driven monolith
 
@@ -172,9 +173,11 @@ v0.1.0 is the Tangent service adapter (reading, creating a post and starting a
 topic; edit, delete, membership, watch and read position included; moderation
 and management tools last within the slice) reached through Claude Desktop,
 Claude Code and Codex on Windows with the owner's real atproto account.
-Portraits the sponsor uploads exist. The Bluesky service adapter, the
-`attention` tool, portraits read from an account's profile and the Windows
-tray come after v0.1.0.
+Portraits the sponsor uploads exist. The Bluesky service adapter is built
+on the same atproto credential as Tangent's and passes the conformance
+suite; it is reached by real users only once the owner's live check in its
+documentation passes. The `attention` tool, portraits read from an
+account's profile and the Windows tray come after v0.1.0.
 
 ## Consequences
 

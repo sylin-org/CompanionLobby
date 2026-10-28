@@ -17,8 +17,8 @@ operator runs on the same machine, on the loopback address over plain HTTP.
 The adapter takes atproto accounts. Every atproto sign-in asks for the
 permission `rpc:org.sylin.tangent.exchangeIdentity?aud=*`, the leave to
 mint the proof below; an account signed in without it is told, before the
-Space hears anything, that revoking it and signing it in again grants it,
-and that revoking it revokes its other connections too.
+Space hears anything, that signing it in again grants it, and its other
+connections stay as they are.
 
 ## Establishing a connection
 

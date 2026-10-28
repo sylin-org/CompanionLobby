@@ -157,11 +157,14 @@ A sign-in asks for `atproto`, the account's identity, and for what the
 lobby's services need an account of this kind granted, each as one word of
 the scope (a service that proves the account to itself declares
 `rpc:<method>?aud=*`, the granular permission the PDS checks before it
-mints a proof). The loopback client id declares exactly that scope. The
-credential declares what was granted, so a service that needs more asks
-the sponsor to sign the companion in again with the wider scope; nothing
-but a new sign-in widens a credential's permissions, and a refresh of the
-OAuth grant keeps them as they are.
+mints a proof, and a service that lives on the account's PDS declares the
+`repo:`, `blob:` and `rpc:` permissions its requests need). The loopback
+client id declares exactly that scope. The credential declares what was
+granted, so a service that needs more asks the sponsor to sign the same
+account in again with the wider scope, which also asks for everything the
+credential held; nothing but a sign-in widens a credential's permissions,
+a sign-in that grants less than it held changes nothing, and a refresh of
+the OAuth grant keeps them as they are.
 
 ## Minting a service's proof
 
@@ -175,9 +178,9 @@ the audience it declared and an XRPC method. The adapter answers only:
   is read;
 - a method the credential was granted, as `rpc:<method>?aud=*` or for that
   very audience. Without it the answer is that the account was signed in
-  before the service needed it, that revoking it and signing it in again
-  grants that, and that revoking it revokes its other connections too,
-  before the PDS hears anything.
+  before the service needed it, and that signing it in again grants that
+  while its other connections stay as they are, before the PDS hears
+  anything.
 
 Holding the credential's lock, it renews the grant first when it is due,
 then asks the account's PDS:
@@ -189,12 +192,29 @@ with a fresh `DPoP-Nonce` that says `use_dpop_nonce`, in the body's
 `error` or in the `WWW-Authenticate` header, is answered once with the
 nonce; the nonce is kept per PDS origin and key for later proofs. The
 token of a 200 is the proof, which the service is presented under
-`Bearer`. A 403 is the PDS refusing the method (revoke the account and
-sign in again to grant it). Any other 401 is an access token the PDS
+`Bearer`. A 403 is the PDS refusing the method (sign the account in again
+to grant it). Any other 401 is an access token the PDS
 stopped taking, which can happen before it expires: the grant is renewed
 once, due or not, and the proof asked for once more. Only a renewal the
 authorization server refuses, or a second such 401, leaves the credential
 needing signing in again.
+
+## Proving one request to the PDS
+
+A service that lives on the account's own PDS sends its requests there
+itself and asks for a proof of each one: a method (`GET` or `POST`) and the
+whole URL, which must be one origin the world's address policy admits
+followed by `/xrpc/` and an NSID, at most 4096 bytes; anything else is
+refused as unsupported before the material is read. Holding the
+credential's lock, the adapter renews the grant when it is due, or at once
+when the service says the PDS did not take the token the previous proof
+carried. The URL's origin must be the PDS the material names, or the ask is
+refused: the access token goes to that origin and nowhere else. The answer
+is the access token under the `DPoP` scheme, never `Bearer`, with a proof
+made with the grant's key (`htm`, `htu` without the query, `ath`) carrying
+the nonce the service passed, which the adapter keeps, or else the last one
+it learned from that PDS for that key. The adapter names the PDS as the
+account's home, for a service that lives there.
 
 ## Reaching the network
 

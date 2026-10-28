@@ -139,11 +139,18 @@ cargo run -p lobby-testkit --bin lobby-world
 ```
 
 It prints one `name=value` line each for `LOBBY_AUTHSERVER`, `passbook`,
-`passbook-holder`, `board`, `second-board`, `atmosphere-handle`, `space`
-and `control`, and runs until its input closes or Enter is pressed. The
-`space` is a fake of the first service's Space, documented with that
-service under `docs/services`, with `/space/locked` and `/space/tokens-end`
-on the control page. Opening a
+`passbook-holder`, `board`, `second-board`, `atmosphere-handle`, `pds`,
+`space` and `control`, and runs until its input closes or Enter is pressed.
+The `pds` is the fake account server Atmosphere accounts live on, holding a
+timeline with two posts by other accounts, which the second service reaches
+with no address. The `space` is a fake of the first service's Space,
+documented with that service under `docs/services`, with `/space/locked`
+and `/space/tokens-end` on the control page. `/atmosphere/older` makes
+Atmosphere sign-ins from then on grant only identity and the Space's leave,
+as an account signed in before the second service needed more, and
+`/atmosphere/asked` makes them grant what they ask for again: sign in after
+the first, open a connection to the Space, open the second, and the page
+offers signing the companion in again. Opening a
 path on the printed `control` origin turns the passbook authority's knobs:
 `/keys/brief` (keys issued from then on live two seconds, so the lobby
 renews them over and over), `/keys/long` (an hour), `/renewals/refuse` and

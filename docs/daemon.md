@@ -266,9 +266,9 @@ host configuration that names the old moniker reaches nothing afterwards.
 The daemon runs with the adapters its registry lists, and nothing else: a
 credential or connection whose adapter is not installed stays in the state
 file, unused, and reaches no catalog. `companion-lobby` runs with the
-product's adapters: one credential adapter and one service adapter that
-takes its accounts, each documented on a page of its own under
-`docs/credentials` and `docs/services`. A sign-in of a provider kind
+product's adapters: one credential adapter and two service adapters that
+take its accounts, so one account serves both, each documented on a page
+of its own under `docs/credentials` and `docs/services`. A sign-in of a provider kind
 asks the provider for what every installed service that takes that kind
 declares it needs. The test build also makes `companion-lobby-synthetic`,
 the same command whose registry holds the test kit's passbook credential
@@ -305,18 +305,39 @@ beside it with every test feature on, carries no passbook material tag.
   that waited for it, without a new grant. Another account is refused with
   409 while one waits. A sign-in that ends without coming back is let go
   of by its adapter at once.
+- **Signing in again, wider.** A companion that holds a ready credential
+  is refused a second sign-in of its kind, unless the installed services
+  need permissions it was not granted: then the sign-in is for that same
+  account, started from its material, and asks for everything the services
+  need and everything it held. Completing it must sign in that account and
+  grant at least everything it held; then, in one commit, the credential
+  keeps its id with the new material and permissions, its rotating mark is
+  cleared and its renewal is asked for afresh. Its connections are not
+  touched: no state, revision or issued data of theirs changes, and their
+  tools never leave the catalog. Another account, or a narrower grant,
+  changes nothing and the sign-in page says so. A renewal never widens.
 - **Connecting.** `POST /api/connections` names a companion, one of its
   credentials, a service, an address and a label. The lobby checks that the
-  credential is ready and of a kind the service accepts, that the address is
-  one origin the service may reach, and that no ready connection of that
-  companion and service has the label; then the service adapter establishes
+  credential is ready, of a kind the service accepts and granted every
+  permission the service declares it needs (otherwise the answer is
+  `needs_permission`, saying the sponsor signs the companion in again and
+  its other connections stay), that the address is one origin the service
+  may reach, and that no ready connection of that companion and service has
+  the label. A service that lives where the account lives takes no address
+  and an empty label names the connection after the service: with nothing
+  held, the credential's adapter names the account's home, the address the
+  service may reach, and one credential holds at most one such connection,
+  checked again at the commit. Then the service adapter establishes
   the connection with no lock held. When it needs to prove who it acts for it
   asks the lobby's broker, which hands the ask to the credential's adapter
   with a slot that re-checks, at the read, that the credential is still ready
   and reads only its material; what the adapter mints goes back to the
   service adapter exactly as minted. A credential adapter refuses an ask it
   cannot answer before it reads anything or reaches the provider, and the
-  connection is refused with that outcome. The connection is committed only
+  connection is refused with that outcome. A service that lives on the
+  account's own server asks for a proof of each request it sends there,
+  and is answered with the token and the proof that goes beside it; the
+  credential adapter refuses one for any other origin. The connection is committed only
   when the credential is still ready and the label still free; it keeps only
   what the service issued.
 - **Keeping alive.** A loop beside the listener asks each ready credential's
@@ -477,7 +498,7 @@ state file and the journal before it answers.
 | `GET`, `OPTIONS /api/discovery` | Host | The discovery document; the only response with cross-origin headers. |
 | `GET /`, `/journal`, `/companion/<id>`, `/companion/<id>/attach`, `/companion/<id>/sign-in/<sign-in id>` | Host | The manager page; see [manager.md](manager.md). |
 | `GET /manager.css`, `/manager.js` | Host | Its stylesheet and script. |
-| `GET /api/lobby` | Host | `{"storeId", "feed": {"epoch", "position"}, "companions": [...], "credentials": [...], "connections": [...], "signIns": [...], "kinds": [...], "services": [...], "journal": {"healthy", "highWater"}}`, one consistent picture. `signIns` are the sign-ins the lobby waits on, then the last 64 it remembers ending, each `{"id", "companion", "kind", "account", "status", "expiresAt"}`, `account` being what the sponsor typed to name the account meant (empty when the provider's page chooses) and `status` one of `pending`, `signed_in`, `cancelled`, `expired` or `refused`; a sign-in past its time is ended as expired before the picture is taken. A credential is `{"id", "companion", "kind", "account", "label", "permissions", "state"}` and a connection `{"id", "companion", "credential", "service", "address", "label", "state", "revision"}`; neither ever carries material or what a service issued. `kinds` are the provider kinds the sponsor may sign in with, each `{"kind", "title", "hint"}`, the title being what the sponsor reads and the hint what the sponsor reads beside the field naming the account; `services` are the installed services, each `{"name", "title", "accepts"}`, `accepts` naming the kinds whose accounts can open a connection to it. |
+| `GET /api/lobby` | Host | `{"storeId", "feed": {"epoch", "position"}, "companions": [...], "credentials": [...], "connections": [...], "signIns": [...], "kinds": [...], "services": [...], "journal": {"healthy", "highWater"}}`, one consistent picture. `signIns` are the sign-ins the lobby waits on, then the last 64 it remembers ending, each `{"id", "companion", "kind", "account", "status", "expiresAt"}`, `account` being what the sponsor typed to name the account meant (empty when the provider's page chooses) and `status` one of `pending`, `signed_in`, `cancelled`, `expired` or `refused`; a sign-in past its time is ended as expired before the picture is taken. A credential is `{"id", "companion", "kind", "account", "label", "permissions", "state"}` and a connection `{"id", "companion", "credential", "service", "address", "label", "state", "revision"}`; neither ever carries material or what a service issued. `kinds` are the provider kinds the sponsor may sign in with, each `{"kind", "title", "hint"}`, the title being what the sponsor reads and the hint what the sponsor reads beside the field naming the account; `services` are the installed services, each `{"name", "title", "accepts", "home", "needs", "lets"}`, `accepts` naming the kinds whose accounts can open a connection to it, `home` whether it lives where the account lives and takes no address, `needs` the permissions an account must hold for it, in the provider's words, and `lets` what signing an account in again for it lets a companion do, as a clause after "can". |
 | `GET /api/companions` | Host | `{"companions": [{"id", "moniker", "displayName", "revision", "portrait", "attachments", "hostConfig"}]}`; `portrait` is the path of the companion's portrait, or `null`. |
 | `GET /api/companions/<id>/portrait` | Host | The companion's portrait, typed by its own leading bytes, or 404. |
 | `GET /api/journal?before=<cursor>&limit=<n>&companion=<id>&finished=1&routine=0` | Host | `{"entries", "upper", "next"}`, newest first; 409 for a cursor of another journal. With `companion`, only the entries about that companion; with `finished=1`, only the entries that say how something ended, leaving out the pending ones; with `routine=0`, none of the renewals that kept an account signed in, which the journal keeps all the same. Each entry carries its `sentence`: who, as which companion, did what, through which connection, and how it ended, named the way the sponsor named them. |

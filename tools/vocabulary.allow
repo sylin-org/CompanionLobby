@@ -62,3 +62,4 @@ crates/daemon/tests/bluesky_journey.rs	provider-atproto	The journey signs the co
 crates/daemon/tests/bluesky_journey.rs	provider-atproto-wire	The journey checks that every request to the fake PDS carried the token under DPoP with a proof of its own.
 crates/testkit/fixtures/manager/companion-accounts.txt	provider-bluesky	The page's recorded text names the installed services by their titles.
 crates/testkit/fixtures/manager/companion-trouble.txt	provider-bluesky	The page's recorded text names the installed services by their titles.
+docs/services/bluesky.md	provider-tangent	Bluesky's doc shows one atproto account serving Tangent and Bluesky at once, and walks both in its live check.
