@@ -62,7 +62,11 @@
 //!
 //! A service that asks for a proof of the account gets one minted at the
 //! account's PDS, for exactly the audience and method it declared, when
-//! the account was granted that method; see [`proofs`]. Every sign-in asks
+//! the account was granted that method; see [`proofs`]. A service that
+//! lives on the account's own PDS asks for a proof of each request it
+//! sends there instead, and presents the access token under `DPoP` beside
+//! it, never as a bearer token; see [`requests`]. The account's home is
+//! its PDS. Every sign-in asks
 //! for `atproto` and for what the lobby's services need an account of this
 //! kind granted.
 //!
@@ -77,6 +81,7 @@ pub mod identity;
 pub mod material;
 pub mod proofs;
 pub mod renewal;
+pub mod requests;
 pub mod server;
 pub mod tokens;
 pub mod wire;
@@ -397,6 +402,12 @@ impl CredentialAdapter for Atproto {
         ask: &AuthorizationAsk,
     ) -> Result<Authorization, Explained> {
         proofs::mint(&self.renewer(), &self.outbound, &self.nonces, slot, ask)
+    }
+
+    fn home(&self, slot: &dyn MaterialSlot) -> Result<Address, Outcome> {
+        let material =
+            Material::decode(&slot.read()?, self.world.policy).ok_or(Outcome::Refused)?;
+        Ok(material.pds)
     }
 
     fn renew(&self, slot: &dyn MaterialSlot) -> Result<Freshness, Outcome> {

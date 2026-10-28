@@ -466,6 +466,7 @@ impl ServiceAdapter for Board {
         ServiceDescription {
             accepts: vec![ProviderKind::new(KIND).unwrap_or_else(|| unreachable!("a kind"))],
             addresses: AddressPolicy::LoopbackAllowed,
+            home: false,
             permissions: vec![stamp_permission(ADMIT_METHOD)],
         }
     }

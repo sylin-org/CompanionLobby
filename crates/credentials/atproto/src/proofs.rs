@@ -17,8 +17,8 @@
 //! it is due, the material must have been granted the method: an
 //! `rpc:<lxm>?aud=*` permission, or one naming this very audience, as the
 //! PDS checks it. A session without it was signed in before a service
-//! needed it, and only a new sign-in grants it; the lobby says so before
-//! anything reaches the PDS.
+//! needed it, and only signing the account in again grants it; the lobby
+//! says so before anything reaches the PDS.
 //!
 //! The proof is asked for with `GET
 //! /xrpc/com.atproto.server.getServiceAuth?aud=..&lxm=..&exp=..` at the
@@ -64,10 +64,10 @@ const NONCE_LIMIT: usize = 1024;
 
 /// Why an account signed in without leave to prove itself to a service
 /// cannot give one, and what brings it.
-pub const NOT_GRANTED: &str = "The account was signed in before this service needed it, so it cannot prove itself here. The sponsor grants that by revoking the account on the manager page and signing it in again, which revokes its other connections too.";
+pub const NOT_GRANTED: &str = "The account was signed in before this service needed it, so it cannot prove itself here. The sponsor grants that by signing the account in again on the manager page; its other connections stay as they are.";
 
 /// What the PDS refusing the method says.
-pub const REFUSED_BY_PDS: &str = "The account's server refused to prove the account to this service. The sponsor can ask it for that leave anew by revoking the account on the manager page and signing it in again, which revokes its other connections too.";
+pub const REFUSED_BY_PDS: &str = "The account's server refused to prove the account to this service. The sponsor can ask it for that leave anew by signing the account in again on the manager page; its other connections stay as they are.";
 
 /// What a session the PDS does not take says.
 pub const NOT_TAKEN: &str = "The account's server stopped taking this sign-in, so the sponsor needs to sign the companion in again on the manager page.";
@@ -158,11 +158,31 @@ pub fn mint(
     slot: &dyn MaterialSlot,
     ask: &AuthorizationAsk,
 ) -> Result<Authorization, Explained> {
-    let AuthorizationAsk::ServiceProof {
-        audience,
-        method,
-        lifetime_secs,
-    } = ask;
+    let (audience, method, lifetime_secs) = match ask {
+        AuthorizationAsk::ServiceProof {
+            audience,
+            method,
+            lifetime_secs,
+        } => (audience, method, lifetime_secs),
+        AuthorizationAsk::ProvedRequest {
+            method,
+            url,
+            nonce,
+            refused_before,
+        } => {
+            return crate::requests::prove(
+                renewer,
+                nonces,
+                slot,
+                &crate::requests::Asked {
+                    method,
+                    url,
+                    nonce: nonce.as_deref(),
+                    refused_before: *refused_before,
+                },
+            );
+        }
+    };
     if !valid_audience(audience) || !valid_method(method) || *lifetime_secs == 0 {
         return Err(Outcome::Unsupported.into());
     }
@@ -267,6 +287,7 @@ fn ask_pds(
                 return Ok(Authorization {
                     scheme: "Bearer".to_owned(),
                     token: Secret::new(token),
+                    proof: None,
                 });
             }
             401 if asks_for_nonce(&response) && fresh.is_some() => {

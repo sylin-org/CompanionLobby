@@ -19,7 +19,8 @@ use std::fmt;
 use crate::companion::parse_hex_id;
 use crate::service::is_short_name;
 use crate::{
-    Authorization, AuthorizationAsk, CompanionId, Explained, MaterialSlot, Outcome, SealedMaterial,
+    Address, Authorization, AuthorizationAsk, CompanionId, Explained, MaterialSlot, Outcome,
+    SealedMaterial,
 };
 
 /// Identifier of a credential: a UUIDv7 rendered as 32 lowercase hex digits.
@@ -317,6 +318,16 @@ pub trait CredentialAdapter: Send + Sync {
         slot: &dyn MaterialSlot,
         ask: &AuthorizationAsk,
     ) -> Result<Authorization, Explained>;
+
+    /// Where the account in `slot` itself lives, for a service that lives
+    /// there (see [`ServiceDescription::home`](crate::ServiceDescription::home)):
+    /// the origin of the account's own server, read from its material.
+    /// An adapter whose accounts live nowhere a service reaches answers
+    /// [`Outcome::Unsupported`] without reading anything.
+    fn home(&self, slot: &dyn MaterialSlot) -> Result<Address, Outcome> {
+        let _ = slot;
+        Err(Outcome::Unsupported)
+    }
 
     /// Keeps the credential in `slot` alive: renews its material when it is
     /// due, in the order the contract lays down, and says when to ask again.

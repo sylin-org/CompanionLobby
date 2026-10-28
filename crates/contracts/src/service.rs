@@ -58,6 +58,12 @@ pub struct ServiceDescription {
     pub accepts: Vec<ProviderKind>,
     /// Which addresses a connection may name.
     pub addresses: AddressPolicy,
+    /// Whether the service lives where each account lives, on the
+    /// account's own server: a connection to it names no address of its
+    /// own, reaches the one the credential's adapter names as the
+    /// account's [`home`](crate::CredentialAdapter::home), which
+    /// [`Self::addresses`] must admit, and a credential holds at most one.
+    pub home: bool,
     /// What a credential of an accepted kind must have been granted to
     /// establish a connection, in that provider's own words. The lobby
     /// asks the provider for these whenever it signs an account of that

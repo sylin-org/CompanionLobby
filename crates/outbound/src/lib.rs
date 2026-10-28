@@ -23,7 +23,8 @@
 //! spoken with rustls and verified against the Mozilla root certificates the
 //! agent carries, never the machine's own store, so nothing installed locally
 //! widens what it trusts; plain HTTP is spoken only to this machine, the one
-//! place [`AddressPolicy`] lets it reach. A body is sent as JSON or as a form.
+//! place [`AddressPolicy`] lets it reach. A body is sent as JSON, as a form,
+//! or as bytes of a declared type.
 
 use std::io::{self, Read};
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -82,6 +83,14 @@ impl<'a> Request<'a> {
     #[must_use]
     pub fn json(mut self, body: Vec<u8>) -> Self {
         self.body = Some(("application/json", body));
+        self
+    }
+
+    /// Sends `body` as it is, declared as `content_type`, such as an image
+    /// a service keeps as a file.
+    #[must_use]
+    pub fn bytes(mut self, content_type: &'static str, body: Vec<u8>) -> Self {
+        self.body = Some((content_type, body));
         self
     }
 

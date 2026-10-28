@@ -46,19 +46,41 @@ impl CredentialFixture for AtprotoFixture {
     }
 
     fn supported_asks(&self) -> Vec<AuthorizationAsk> {
-        vec![AuthorizationAsk::ServiceProof {
-            audience: "did:web:localhost%3A5300#conformance".to_owned(),
-            method: METHOD.to_owned(),
-            lifetime_secs: 60,
-        }]
+        vec![
+            AuthorizationAsk::ServiceProof {
+                audience: "did:web:localhost%3A5300#conformance".to_owned(),
+                method: METHOD.to_owned(),
+                lifetime_secs: 60,
+            },
+            AuthorizationAsk::ProvedRequest {
+                method: "POST".to_owned(),
+                url: format!("{}/xrpc/{METHOD}?x=1", self.world.pds_origin()),
+                nonce: None,
+                refused_before: false,
+            },
+        ]
     }
 
     fn unsupported_asks(&self) -> Vec<AuthorizationAsk> {
-        vec![AuthorizationAsk::ServiceProof {
-            audience: "did:web:service.example.test".to_owned(),
-            method: METHOD.to_owned(),
-            lifetime_secs: 60,
-        }]
+        vec![
+            AuthorizationAsk::ServiceProof {
+                audience: "did:web:service.example.test".to_owned(),
+                method: METHOD.to_owned(),
+                lifetime_secs: 60,
+            },
+            AuthorizationAsk::ProvedRequest {
+                method: "DELETE".to_owned(),
+                url: format!("{}/xrpc/{METHOD}", self.world.pds_origin()),
+                nonce: None,
+                refused_before: false,
+            },
+            AuthorizationAsk::ProvedRequest {
+                method: "GET".to_owned(),
+                url: format!("{}/oauth/token", self.world.pds_origin()),
+                nonce: None,
+                refused_before: false,
+            },
+        ]
     }
 
     fn permissions(&self) -> Vec<String> {

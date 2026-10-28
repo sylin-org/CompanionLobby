@@ -73,7 +73,12 @@ impl CredentialFixture for PassbookFixture {
     }
 
     fn unsupported_asks(&self) -> Vec<AuthorizationAsk> {
-        Vec::new()
+        vec![AuthorizationAsk::ProvedRequest {
+            method: "GET".to_owned(),
+            url: "http://127.0.0.1:1/stamp".to_owned(),
+            nonce: None,
+            refused_before: false,
+        }]
     }
 
     fn permissions(&self) -> Vec<String> {

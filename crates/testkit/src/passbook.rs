@@ -65,7 +65,7 @@ pub fn stamp_permission(method: &str) -> String {
 
 /// What the adapter says when an account was not granted a stamp a service
 /// asks for.
-pub const NOT_GRANTED: &str = "This Passbook account was signed in without leave to be stamped for this service. The sponsor grants that by revoking it on the manager page and signing it in again, which revokes its other connections too.";
+pub const NOT_GRANTED: &str = "This Passbook account was signed in without leave to be stamped for this service. The sponsor grants that by signing it in again on the manager page; its other connections stay as they are.";
 
 /// How long a key lives when a test says nothing else, in seconds.
 pub const KEY_SECS: u64 = 3600;
@@ -646,7 +646,12 @@ impl CredentialAdapter for Passbook {
     ) -> Result<Authorization, Explained> {
         let AuthorizationAsk::ServiceProof {
             audience, method, ..
-        } = ask;
+        } = ask
+        else {
+            // A Passbook account proves itself to a service with a stamp
+            // and nothing else.
+            return Err(Outcome::Unsupported.into());
+        };
         let lock = self.lock_of(slot.credential());
         let _held = locked(&lock);
         // A stamp the account was not granted is refused before anything
@@ -671,6 +676,7 @@ impl CredentialAdapter for Passbook {
         Ok(Authorization {
             scheme: "Bearer".to_owned(),
             token: Secret::new(stamp),
+            proof: None,
         })
     }
 

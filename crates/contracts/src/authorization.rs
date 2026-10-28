@@ -3,11 +3,12 @@
 //! A service adapter never holds credential material. When it needs to prove
 //! who it acts for, it asks the daemon's [`Authority`](crate::Authority) for
 //! an authorization in the exact shape the service wants: a proof for one
-//! audience and method. The credential adapter of the connection's
-//! credential mints it from material only it can read, or refuses an ask it
-//! does not support before it reads anything. The answer is a scheme and a
-//! [`Secret`] token. A shape joins this enum with the first adapter that
-//! answers it.
+//! audience and method, or a proof of one request to the account's own
+//! server. The credential adapter of the connection's credential mints it
+//! from material only it can read, or refuses an ask it does not support
+//! before it reads anything. The answer is a scheme and a [`Secret`] token,
+//! and, for a proof of one request, the proof that goes beside it. A shape
+//! joins this enum with the first adapter that answers it.
 
 use std::fmt;
 
@@ -24,6 +25,23 @@ pub enum AuthorizationAsk {
         /// How long the proof may live, in seconds.
         lifetime_secs: u32,
     },
+    /// A proof of exactly one request to the account's own server, where
+    /// the account's token may be presented and nowhere else: `method` to
+    /// `url`. A credential adapter mints one only for a URL on the server
+    /// its material names, so a token never leaves for another origin.
+    ProvedRequest {
+        /// The request's method, such as `GET` or `POST`.
+        method: String,
+        /// The whole URL the request goes to, query included.
+        url: String,
+        /// The value the server last asked proofs to carry, when it asked
+        /// for one; the adapter may also know one of its own.
+        nonce: Option<String>,
+        /// Whether the server did not take the token the previous proof of
+        /// this request carried, as a server that stops taking one early
+        /// does: the adapter renews the material first, due or not.
+        refused_before: bool,
+    },
 }
 
 /// The authorization a credential adapter minted for one ask.
@@ -33,6 +51,9 @@ pub struct Authorization {
     pub scheme: String,
     /// The token.
     pub token: Secret,
+    /// For a proof of one request, the proof sent beside the token in the
+    /// header the scheme names; that request alone carries it.
+    pub proof: Option<Secret>,
 }
 
 impl Authorization {
@@ -83,9 +104,11 @@ mod tests {
         let authorization = Authorization {
             scheme: "Bearer".to_owned(),
             token: Secret::new("stamp-0123456789"),
+            proof: Some(Secret::new("proof-0123456789")),
         };
         let printed = format!("{authorization:?}");
         assert!(!printed.contains("stamp-0123456789"), "{printed}");
+        assert!(!printed.contains("proof-0123456789"), "{printed}");
         assert!(printed.contains("Secret(..)"));
         assert_eq!(authorization.header_value(), "Bearer stamp-0123456789");
     }

@@ -53,6 +53,33 @@
 //! [`Proofs`], which the fake services that trust this world consult
 //! instead of resolving the account's signing key.
 //!
+//! The PDS also keeps each account's repository and answers for the app
+//! view, the way the reference PDS does for an OAuth grant. Every such
+//! request presents the access token under `DPoP` with a proof of that very
+//! request (the same checks as above: a DPoP-bound token under `Bearer` is
+//! the "Malformed token" 400, and a proof without the PDS's nonce is
+//! challenged), and what the grant was given decides what it may do,
+//! answered 403 `ScopeMissingError` otherwise:
+//!
+//! * `GET /xrpc/com.atproto.server.getSession` names the account, its DID
+//!   and handle, to any grant;
+//! * `POST /xrpc/com.atproto.repo.createRecord` writes a record into the
+//!   grant's own repository only, and needs `repo:<collection>` (or
+//!   `repo:*`, or a `repo:<collection>?action=create` form); a record's
+//!   `$type` must be its collection, a post's text at most 300 characters,
+//!   and every strong reference it holds (a reply's root and parent, a like
+//!   or repost's subject, an image's blob) must name what exists, uri and
+//!   cid alike, or it is a 400 `InvalidRequest`;
+//! * `POST /xrpc/com.atproto.repo.uploadBlob` keeps the body as a blob of
+//!   the declared image type, at most [`BLOB_LIMIT`] bytes, and needs a
+//!   `blob:` permission whose pattern covers that type;
+//! * `GET /xrpc/app.bsky.feed.getTimeline` and `getPosts`, proxied with
+//!   `atproto-proxy:` [`APP_VIEW`], answer from the posts the world holds,
+//!   newest first, and need `rpc:<method>?aud=` that service, or `aud=*`;
+//!   without the proxy header the PDS does not implement them.
+//!
+//! Each answer carries the PDS's current nonce in `DPoP-Nonce`.
+//!
 //! Tokens are DPoP-bound and live [`AtprotoWorld::access_lifetime`] seconds,
 //! an hour unless a test says otherwise. An access token is JWT-shaped unless
 //! [`AtprotoWorld::opaque_tokens`] says otherwise; the adapter must not care.
@@ -74,6 +101,39 @@ use crate::{percent_decode, percent_encode, unique_token};
 
 /// The loopback client id's origin, before its query.
 pub const CLIENT_ORIGIN: &str = "http://localhost";
+/// The app view the PDS proxies reads to, as a request names it in its
+/// `atproto-proxy` header.
+pub const APP_VIEW: &str = "did:web:api.bsky.app#bsky_appview";
+/// The largest blob the PDS keeps, in bytes.
+pub const BLOB_LIMIT: usize = 1_000_000;
+
+/// A record in an account's repository.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepoRecord {
+    /// Its `at://` URI.
+    pub uri: String,
+    /// Its content identifier.
+    pub cid: String,
+    /// The account whose repository holds it.
+    pub did: String,
+    /// Its collection.
+    pub collection: String,
+    /// The record itself.
+    pub value: Value,
+}
+
+/// A blob an account uploaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoBlob {
+    /// Its content identifier.
+    pub cid: String,
+    /// The account that uploaded it.
+    pub did: String,
+    /// Its declared media type.
+    pub mime: String,
+    /// Its size in bytes.
+    pub size: usize,
+}
 
 /// A metadata promise the authorization server can be made to break.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +219,10 @@ struct Book {
     pds_nonce: String,
     pds_jtis: HashSet<String>,
     challenge_in_header: bool,
+    records: Vec<RepoRecord>,
+    blobs: Vec<RepoBlob>,
+    display_names: HashMap<String, String>,
+    sequence: u64,
 }
 
 impl Book {
@@ -416,6 +480,40 @@ impl AtprotoWorld {
         locked(&self.book).issued.clone()
     }
 
+    /// Writes a post by the account `did` into its repository, as if it
+    /// posted elsewhere, and answers its URI.
+    pub fn add_post(&self, did: &str, text: &str) -> String {
+        let mut book = locked(&self.book);
+        let record = json!({
+            "$type": "app.bsky.feed.post",
+            "text": text,
+            "createdAt": "2026-10-01T12:00:00.000Z",
+        });
+        keep_record(&mut book, did, "app.bsky.feed.post", record).uri
+    }
+
+    /// Makes the app view show `name` as the display name of `did`.
+    pub fn display_name(&self, did: &str, name: &str) {
+        locked(&self.book)
+            .display_names
+            .insert(did.to_owned(), name.to_owned());
+    }
+
+    /// Every record of `collection` in any repository, oldest first.
+    pub fn records(&self, collection: &str) -> Vec<RepoRecord> {
+        locked(&self.book)
+            .records
+            .iter()
+            .filter(|record| record.collection == collection)
+            .cloned()
+            .collect()
+    }
+
+    /// Every blob uploaded so far, oldest first.
+    pub fn blobs(&self) -> Vec<RepoBlob> {
+        locked(&self.book).blobs.clone()
+    }
+
     /// Follows the sponsor's browser to the authorize `url` and returns where
     /// the authorization server sends it back.
     pub fn approve(&self, url: &str) -> String {
@@ -521,6 +619,25 @@ fn answer_pds(
         ("GET", "/xrpc/com.atproto.server.getServiceAuth") => {
             service_auth(&mut book, proofs, pds, request)
         }
+        ("GET", "/xrpc/com.atproto.server.getSession")
+        | ("POST", "/xrpc/com.atproto.repo.createRecord")
+        | ("POST", "/xrpc/com.atproto.repo.uploadBlob")
+        | ("GET", "/xrpc/app.bsky.feed.getTimeline")
+        | ("GET", "/xrpc/app.bsky.feed.getPosts") => {
+            let reply = match authenticated(&mut book, pds, request) {
+                Ok(grant) => repository(&mut book, &grant, request),
+                Err(reply) => reply,
+            };
+            if reply
+                .headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("dpop-nonce"))
+            {
+                reply
+            } else {
+                reply.with_header("DPoP-Nonce", &book.pds_nonce)
+            }
+        }
         _ => error(404, "NotFound"),
     }
 }
@@ -621,6 +738,361 @@ fn service_auth(book: &mut Book, proofs: &Proofs, pds: &str, request: &Received)
         id,
     });
     Reply::json(200, &json!({ "token": token }))
+}
+
+/// The grant whose access token a resource request presents, checked the
+/// way the reference PDS checks one: see the module's documentation.
+fn authenticated(book: &mut Book, pds: &str, request: &Received) -> Result<Grant, Reply> {
+    let presented = request
+        .header("authorization")
+        .unwrap_or_default()
+        .to_owned();
+    let (scheme, token) = presented.split_once(' ').unwrap_or(("", ""));
+    let Some(grant) = book
+        .grants
+        .iter()
+        .find(|grant| grant.access == token && !grant.ended)
+        .cloned()
+    else {
+        return Err(xrpc_error(
+            401,
+            "InvalidToken",
+            "Token could not be verified",
+        ));
+    };
+    if scheme != "DPoP" {
+        return Err(xrpc_error(400, "InvalidToken", "Malformed token"));
+    }
+    let url = format!("{pds}{}", request.route());
+    let proof = request.header("dpop").unwrap_or_default().to_owned();
+    let nonce = book.pds_nonce.clone();
+    let Ok((key, claims)) = check_proof(&proof, &request.method, &url, &mut book.pds_jtis) else {
+        return Err(xrpc_error(401, "InvalidDpopProof", "DPoP proof invalid"));
+    };
+    if claims["nonce"].as_str() != Some(nonce.as_str()) {
+        let fresh = unique_token("pds-nonce");
+        book.pds_nonce = fresh.clone();
+        let reply = if book.challenge_in_header {
+            xrpc_error(401, "InvalidToken", "DPoP nonce mismatch").with_header(
+                "WWW-Authenticate",
+                r#"DPoP error="use_dpop_nonce", error_description="Resource server requires nonce in DPoP proof""#,
+            )
+        } else {
+            xrpc_error(401, "use_dpop_nonce", "DPoP nonce mismatch")
+        };
+        return Err(reply.with_header("DPoP-Nonce", &fresh));
+    }
+    if key != grant.key
+        || claims["ath"].as_str() != Some(base64url(&Sha256::digest(token.as_bytes())).as_str())
+    {
+        return Err(xrpc_error(
+            401,
+            "InvalidDpopProof",
+            "DPoP proof does not match the token",
+        ));
+    }
+    Ok(grant)
+}
+
+/// Whether `granted` holds a `repo:` permission to create in `collection`.
+fn grants_repo(granted: &str, collection: &str) -> bool {
+    granted.split(' ').any(|word| {
+        let Some(rest) = word.strip_prefix("repo:") else {
+            return false;
+        };
+        let (target, query) = rest.split_once('?').unwrap_or((rest, ""));
+        (target == collection || target == "*")
+            && (query.is_empty() || query.split('&').any(|pair| pair == "action=create"))
+    })
+}
+
+/// Whether `granted` holds a `blob:` permission whose pattern covers `mime`.
+fn grants_blob(granted: &str, mime: &str) -> bool {
+    let kind = mime.split('/').next().unwrap_or(mime);
+    granted.split(' ').any(|word| {
+        word.strip_prefix("blob:").is_some_and(|pattern| {
+            pattern == mime || pattern == "*/*" || pattern == format!("{kind}/*")
+        })
+    })
+}
+
+/// Whether `granted` lets the grant call `method` at `audience` through
+/// the PDS.
+fn grants_rpc(granted: &str, method: &str, audience: &str) -> bool {
+    granted.split(' ').any(|word| {
+        word == format!("rpc:{method}?aud=*")
+            || word == format!("rpc:{method}?aud={audience}")
+            || word == format!("rpc:{method}?aud={}", percent_encode(audience))
+    })
+}
+
+fn scope_missing(scope: &str) -> Reply {
+    xrpc_error(
+        403,
+        "ScopeMissingError",
+        &format!("Missing required scope {scope:?}"),
+    )
+}
+
+/// A content identifier for `bytes`, shaped like one.
+fn cid_of(prefix: &str, bytes: &[u8]) -> String {
+    let digest: String = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| char::from(b"abcdefghijklmnopqrstuvwxyz234567"[usize::from(byte % 32)]))
+        .collect();
+    format!("{prefix}{digest}")
+}
+
+/// Keeps `value` as a new record of `collection` in `did`'s repository.
+fn keep_record(book: &mut Book, did: &str, collection: &str, value: Value) -> RepoRecord {
+    const TID: &[u8; 32] = b"234567abcdefghijklmnopqrstuvwxyz";
+    book.sequence += 1;
+    let mut left = book.sequence;
+    let mut digits = Vec::new();
+    for _ in 0..11 {
+        digits.push(char::from(TID[(left % 32) as usize]));
+        left /= 32;
+    }
+    let rkey: String = "3l".chars().chain(digits.into_iter().rev()).collect();
+    let cid = cid_of(
+        "bafyrei",
+        format!("{did}/{collection}/{rkey}/{value}").as_bytes(),
+    );
+    let record = RepoRecord {
+        uri: format!("at://{did}/{collection}/{rkey}"),
+        cid,
+        did: did.to_owned(),
+        collection: collection.to_owned(),
+        value,
+    };
+    book.records.push(record.clone());
+    record
+}
+
+/// Whether `reference` is a strong reference to a record that exists.
+fn names_a_record(book: &Book, reference: &Value) -> bool {
+    book.records.iter().any(|record| {
+        reference["uri"].as_str() == Some(record.uri.as_str())
+            && reference["cid"].as_str() == Some(record.cid.as_str())
+    })
+}
+
+/// The app view's picture of one post.
+fn post_view(book: &Book, record: &RepoRecord) -> Value {
+    let handle = book.account(&record.did).map_or_else(
+        || "handle.invalid".to_owned(),
+        |account| account.handle.clone(),
+    );
+    let counted = |collection: &str| {
+        book.records
+            .iter()
+            .filter(|other| {
+                other.collection == collection
+                    && other.value["subject"]["uri"].as_str() == Some(record.uri.as_str())
+            })
+            .count()
+    };
+    let replies = book
+        .records
+        .iter()
+        .filter(|other| {
+            other.collection == "app.bsky.feed.post"
+                && other.value["reply"]["parent"]["uri"].as_str() == Some(record.uri.as_str())
+        })
+        .count();
+    let mut author = json!({ "did": record.did, "handle": handle });
+    if let Some(name) = book.display_names.get(&record.did) {
+        author["displayName"] = json!(name);
+    }
+    json!({
+        "uri": record.uri,
+        "cid": record.cid,
+        "author": author,
+        "record": record.value,
+        "replyCount": replies,
+        "repostCount": counted("app.bsky.feed.repost"),
+        "likeCount": counted("app.bsky.feed.like"),
+        "indexedAt": record.value["createdAt"],
+    })
+}
+
+/// What the app view answers to `method`, proxied through the PDS.
+fn app_view(book: &Book, grant: &Grant, method: &str, request: &Received) -> Reply {
+    if request.header("atproto-proxy") != Some(APP_VIEW) {
+        return xrpc_error(501, "MethodNotImplemented", "Method Not Implemented");
+    }
+    if !grants_rpc(&grant.granted, method, APP_VIEW) {
+        return scope_missing(&format!("rpc:{method}?aud={APP_VIEW}"));
+    }
+    let posts: Vec<&RepoRecord> = book
+        .records
+        .iter()
+        .filter(|record| record.collection == "app.bsky.feed.post")
+        .collect();
+    if method == "app.bsky.feed.getPosts" {
+        let wanted: Vec<String> = request
+            .target
+            .split_once('?')
+            .map(|(_, query)| query)
+            .unwrap_or_default()
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .filter(|(name, _)| *name == "uris")
+            .map(|(_, value)| percent_decode(value))
+            .collect();
+        if wanted.is_empty() || wanted.len() > 25 {
+            return xrpc_error(400, "InvalidRequest", "uris must name 1 to 25 posts");
+        }
+        let found: Vec<Value> = wanted
+            .iter()
+            .filter_map(|uri| posts.iter().find(|record| record.uri == *uri))
+            .map(|record| post_view(book, record))
+            .collect();
+        return Reply::json(200, &json!({ "posts": found }));
+    }
+    let limit = request
+        .query("limit")
+        .map_or(Some(50), |limit| limit.parse::<usize>().ok());
+    let Some(limit) = limit.filter(|limit| (1..=100).contains(limit)) else {
+        return xrpc_error(400, "InvalidRequest", "limit must be 1 to 100");
+    };
+    let start = request
+        .query("cursor")
+        .and_then(|cursor| cursor.strip_prefix("page-").map(str::to_owned))
+        .and_then(|skip| skip.parse::<usize>().ok())
+        .unwrap_or(0);
+    let page: Vec<Value> = posts
+        .iter()
+        .rev()
+        .skip(start)
+        .take(limit)
+        .map(|record| json!({ "post": post_view(book, record) }))
+        .collect();
+    let mut answer = json!({ "feed": page });
+    if start + limit < posts.len() {
+        answer["cursor"] = json!(format!("page-{}", start + limit));
+    }
+    Reply::json(200, &answer)
+}
+
+/// A resource request from `grant`, past its DPoP checks.
+fn repository(book: &mut Book, grant: &Grant, request: &Received) -> Reply {
+    let route = request.route().to_owned();
+    if let Some(method) = route
+        .strip_prefix("/xrpc/")
+        .filter(|method| method.starts_with("app."))
+    {
+        return app_view(book, grant, method, request);
+    }
+    match route.as_str() {
+        "/xrpc/com.atproto.server.getSession" => {
+            let handle = book.account(&grant.did).map_or_else(
+                || "handle.invalid".to_owned(),
+                |account| account.handle.clone(),
+            );
+            Reply::json(200, &json!({ "did": grant.did, "handle": handle }))
+        }
+        "/xrpc/com.atproto.repo.uploadBlob" => upload_blob(book, grant, request),
+        _ => create_record(book, grant, request),
+    }
+}
+
+/// `com.atproto.repo.uploadBlob` for the grant's account.
+fn upload_blob(book: &mut Book, grant: &Grant, request: &Received) -> Reply {
+    let mime = request
+        .header("content-type")
+        .unwrap_or_default()
+        .to_owned();
+    if !matches!(
+        mime.as_str(),
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+    ) {
+        return xrpc_error(400, "InvalidRequest", "unsupported blob type");
+    }
+    if !grants_blob(&grant.granted, &mime) {
+        return scope_missing(&format!("blob:{mime}"));
+    }
+    if request.body.is_empty() || request.body.len() > BLOB_LIMIT {
+        return xrpc_error(400, "BlobTooLarge", "blob is empty or too large");
+    }
+    let cid = cid_of("bafkrei", &request.body);
+    book.blobs.push(RepoBlob {
+        cid: cid.clone(),
+        did: grant.did.clone(),
+        mime: mime.clone(),
+        size: request.body.len(),
+    });
+    Reply::json(
+        200,
+        &json!({ "blob": {
+            "$type": "blob",
+            "ref": { "$link": cid },
+            "mimeType": mime,
+            "size": request.body.len(),
+        } }),
+    )
+}
+
+/// `com.atproto.repo.createRecord` into the grant's own repository.
+fn create_record(book: &mut Book, grant: &Grant, request: &Received) -> Reply {
+    let body = request.json();
+    let invalid = |message: &str| xrpc_error(400, "InvalidRequest", message);
+    let collection = body["collection"].as_str().unwrap_or_default().to_owned();
+    let record = body["record"].clone();
+    if body["repo"].as_str() != Some(grant.did.as_str()) {
+        return invalid("repo must be the account's own");
+    }
+    if !grants_repo(&grant.granted, &collection) {
+        return scope_missing(&format!("repo:{collection}?action=create"));
+    }
+    if record["$type"].as_str() != Some(collection.as_str())
+        || record["createdAt"].as_str().is_none_or(str::is_empty)
+    {
+        return invalid("record must be of its collection and say when it was made");
+    }
+    match collection.as_str() {
+        "app.bsky.feed.post" => {
+            let text = record["text"].as_str().unwrap_or_default();
+            if text.chars().count() > 300 || (text.is_empty() && record["embed"].is_null()) {
+                return invalid("text must be 1 to 300 characters");
+            }
+            if !record["reply"].is_null()
+                && !(names_a_record(book, &record["reply"]["root"])
+                    && names_a_record(book, &record["reply"]["parent"]))
+            {
+                return invalid("reply must name its root and parent");
+            }
+            if !record["embed"].is_null() {
+                let images = record["embed"]["images"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let known = images.iter().all(|image| {
+                    let link = image["image"]["ref"]["$link"].as_str().unwrap_or_default();
+                    image["alt"].is_string()
+                        && book
+                            .blobs
+                            .iter()
+                            .any(|blob| blob.cid == link && blob.did == grant.did)
+                });
+                if record["embed"]["$type"] != "app.bsky.embed.images"
+                    || images.is_empty()
+                    || images.len() > 4
+                    || !known
+                {
+                    return invalid("images must name blobs the account uploaded");
+                }
+            }
+        }
+        "app.bsky.feed.like" | "app.bsky.feed.repost" => {
+            if !names_a_record(book, &record["subject"]) {
+                return invalid("subject must name a record");
+            }
+        }
+        _ => return invalid("unknown collection"),
+    }
+    let kept = keep_record(book, &grant.did, &collection, record);
+    Reply::json(200, &json!({ "uri": kept.uri, "cid": kept.cid }))
 }
 
 /// The seconds since the Unix epoch.

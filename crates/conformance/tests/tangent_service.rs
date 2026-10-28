@@ -576,7 +576,10 @@ fn one_account_at_two_spaces_keeps_two_connections_that_never_leak() {
     let asked = fixture.minting.asked.lock().expect("asked").clone();
     let audiences: Vec<String> = asked
         .iter()
-        .map(|AuthorizationAsk::ServiceProof { audience, .. }| audience.clone())
+        .filter_map(|ask| match ask {
+            AuthorizationAsk::ServiceProof { audience, .. } => Some(audience.clone()),
+            AuthorizationAsk::ProvedRequest { .. } => None,
+        })
         .collect();
     assert_ne!(
         audiences[0], audiences[1],

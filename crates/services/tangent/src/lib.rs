@@ -188,6 +188,7 @@ impl ServiceAdapter for Tangent {
         ServiceDescription {
             accepts: vec![self.accepts.clone()],
             addresses: AddressPolicy::LoopbackAllowed,
+            home: false,
             permissions: vec![PERMISSION.to_owned()],
         }
     }
