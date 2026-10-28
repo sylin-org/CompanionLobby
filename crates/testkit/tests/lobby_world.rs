@@ -40,6 +40,7 @@ fn lobby_world_prints_origins_that_answer_and_stops_when_its_input_closes() {
         ("board", "/about"),
         ("second-board", "/about"),
         ("space", "/.well-known/tangent-auth"),
+        ("pds", "/.well-known/oauth-protected-resource"),
     ] {
         let origin = Address::parse(&value(name), AddressPolicy::LoopbackAllowed).expect(name);
         let answer = outbound

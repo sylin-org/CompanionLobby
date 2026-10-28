@@ -392,6 +392,12 @@ impl AtprotoWorld {
         locked(&self.book).granted_scope = Some(scope.to_owned());
     }
 
+    /// Makes the code exchange grant what was asked again, as it does
+    /// unless told otherwise.
+    pub fn grants_what_is_asked(&self) {
+        locked(&self.book).granted_scope = None;
+    }
+
     /// Makes the resolver answer `did` for `handle`, a handle the account's
     /// document does not claim.
     pub fn alias_handle(&self, handle: &str, did: &str) {

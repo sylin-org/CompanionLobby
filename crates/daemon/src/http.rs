@@ -960,11 +960,14 @@ fn snapshot_json(lobby: &Lobby) -> Value {
             .registry()
             .services()
             .iter()
-            .map(|(name, accepts)| {
+            .map(|(name, description)| {
                 json!({
                     "name": name.as_str(),
                     "title": lobby.registry().service_title(name),
-                    "accepts": accepts.iter().map(ProviderKind::as_str).collect::<Vec<_>>(),
+                    "accepts": description.accepts.iter().map(ProviderKind::as_str).collect::<Vec<_>>(),
+                    "home": description.home,
+                    "needs": description.permissions,
+                    "lets": lobby.registry().lets_for(name),
                 })
             })
             .collect::<Vec<_>>(),
@@ -1223,6 +1226,10 @@ fn sign_in_done(lobby: &Lobby, query: &str) -> Reply {
     let conflict_said =
         conflict.map(|conflict| conflict_sentence(lobby, companion.as_ref(), conflict));
     let (status, said) = match value("outcome").as_deref() {
+        Some("refused") if conflict_said.is_some() => (
+            StatusCode::CONFLICT,
+            conflict_said.as_deref().unwrap_or_default(),
+        ),
         Some("done") => (
             StatusCode::OK,
             "The account is signed in. The companion's page in the lobby shows it.",
@@ -1293,6 +1300,12 @@ fn conflict_sentence(
         SignInConflict::AnotherCompanion => "Nothing was signed in: that account is signed in for another companion, and an account belongs to one companion. Revoke it under Accounts on the page of the companion that holds it first, or sign in with another account.".to_owned(),
         SignInConflict::AlreadyHeld => format!(
             "Nothing was signed in: {name} already holds an account of this kind. Revoke it under Accounts on {name}'s page first to sign in another."
+        ),
+        SignInConflict::AnotherAccount => format!(
+            "Nothing changed: that is another account than the one {name} holds. Sign in again as {name}'s own account to grant it more; its connections stay as they are."
+        ),
+        SignInConflict::Narrower => format!(
+            "Nothing changed: the sign-in page granted {name}'s account less than it held, and signing in again never narrows it. Its connections stay as they are."
         ),
         SignInConflict::AnotherWaits => {
             let waiting = companion.and_then(|companion| {

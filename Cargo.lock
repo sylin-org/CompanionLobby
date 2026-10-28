@@ -680,6 +680,7 @@ dependencies = [
  "lobby-credential-atproto",
  "lobby-daemon",
  "lobby-outbound",
+ "lobby-service-bluesky",
  "lobby-service-tangent",
  "lobby-testkit",
  "netstat2",

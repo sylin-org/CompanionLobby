@@ -105,8 +105,21 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
     assert_eq!(
         lobby["services"],
         json!([
-            { "name": "board", "title": "Board", "accepts": ["passbook"] },
-            { "name": "tangent", "title": "Tangent Space", "accepts": ["atproto"] },
+            {
+                "name": "board", "title": "Board", "accepts": ["passbook"], "home": false,
+                "needs": [lobby_testkit::passbook::stamp_permission(lobby_testkit::board::ADMIT_METHOD)],
+                "lets": "use Board",
+            },
+            {
+                "name": "tangent", "title": "Tangent Space", "accepts": ["atproto"], "home": false,
+                "needs": [lobby_service_tangent::PERMISSION],
+                "lets": "use Tangent Space",
+            },
+            {
+                "name": "bluesky", "title": "Bluesky", "accepts": ["atproto"], "home": true,
+                "needs": lobby_service_bluesky::PERMISSIONS,
+                "lets": lobby_service_bluesky::LETS,
+            },
         ])
     );
     let page = get(&install, "/");

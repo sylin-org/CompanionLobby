@@ -11,8 +11,9 @@
 //! shown by its name, and one without a hint gets a plain one.
 //!
 //! [`Registry::product`] is what `companion-lobby` runs with: the atproto
-//! credential adapter and the Tangent service adapter, which takes atproto
-//! accounts and is shown as its makers name it. The credential adapter reaches the
+//! credential adapter, the Tangent service adapter and the Bluesky service
+//! adapter, which both take atproto accounts and are shown as their makers
+//! name them; one atproto account serves both. The credential adapter reaches the
 //! public network only; [`AUTHSERVER_ENV`] may name another public HTTPS
 //! origin for the authorization server a sign-in without a handle goes to,
 //! and a value that is not one stops the daemon from starting rather than
@@ -24,7 +25,9 @@
 
 use std::sync::Arc;
 
-use lobby_contracts::{CredentialAdapter, ProviderKind, ServiceAdapter, ServiceName};
+use lobby_contracts::{
+    AddressPolicy, CredentialAdapter, ProviderKind, ServiceAdapter, ServiceDescription, ServiceName,
+};
 
 /// The environment variable that names the default authorization server.
 pub const AUTHSERVER_ENV: &str = "LOBBY_AUTHSERVER";
@@ -37,6 +40,7 @@ pub struct Registry {
     titles: Vec<(ProviderKind, String)>,
     hints: Vec<(ProviderKind, String)>,
     service_titles: Vec<(ServiceName, String)>,
+    service_lets: Vec<(ServiceName, String)>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -74,7 +78,32 @@ impl Registry {
             titles: Vec::new(),
             hints: Vec::new(),
             service_titles: Vec::new(),
+            service_lets: Vec::new(),
         }
+    }
+
+    /// The same registry, saying what signing an account in again for the
+    /// service `name` lets a companion do, as a clause after "can", such as
+    /// `post to Bluesky`.
+    #[must_use]
+    pub fn lets(mut self, name: &str, clause: &str) -> Self {
+        if let Some(name) = ServiceName::new(name) {
+            self.service_lets.retain(|(named, _)| *named != name);
+            self.service_lets.push((name, clause.to_owned()));
+        }
+        self
+    }
+
+    /// What signing an account in again for the service `name` lets a
+    /// companion do: its own clause, or using it by its title.
+    pub fn lets_for(&self, name: &ServiceName) -> String {
+        self.service_lets
+            .iter()
+            .find(|(named, _)| named == name)
+            .map_or_else(
+                || format!("use {}", self.service_title(name)),
+                |(_, clause)| clause.clone(),
+            )
     }
 
     /// The same registry, showing the service `name` to the sponsor and to
@@ -157,12 +186,12 @@ impl Registry {
             .map_or_else(|| capitalized(kind.as_str()), |(_, title)| title.clone())
     }
 
-    /// The name of every service adapter, in the order listed, with the
-    /// provider kinds it accepts.
-    pub fn services(&self) -> Vec<(ServiceName, Vec<ProviderKind>)> {
+    /// The name of every service adapter, in the order listed, with what it
+    /// accepts.
+    pub fn services(&self) -> Vec<(ServiceName, ServiceDescription)> {
         self.services
             .iter()
-            .map(|adapter| (adapter.name(), adapter.describe().accepts))
+            .map(|adapter| (adapter.name(), adapter.describe()))
             .collect()
     }
 
@@ -173,9 +202,14 @@ impl Registry {
             .map_err(|problem| format!("{AUTHSERVER_ENV}: {problem}"))?;
         Ok(Self::new(
             vec![Arc::new(lobby_credential_atproto::Atproto::new(world))],
-            vec![Arc::new(Self::tangent())],
+            vec![
+                Arc::new(Self::tangent()),
+                Arc::new(Self::bluesky(AddressPolicy::PublicHttps)),
+            ],
         )
         .service_titled(lobby_service_tangent::NAME, lobby_service_tangent::TITLE)
+        .service_titled(lobby_service_bluesky::NAME, lobby_service_bluesky::TITLE)
+        .lets(lobby_service_bluesky::NAME, lobby_service_bluesky::LETS)
         .titled(
             lobby_credential_atproto::KIND,
             lobby_credential_atproto::TITLE,
@@ -192,6 +226,16 @@ impl Registry {
         lobby_service_tangent::Tangent::accepting(
             ProviderKind::new(lobby_credential_atproto::KIND)
                 .unwrap_or_else(|| unreachable!("atproto is a provider kind")),
+        )
+    }
+
+    /// The Bluesky service adapter, taking atproto accounts whose server
+    /// `policy` admits: the one line that composes the two.
+    pub fn bluesky(policy: AddressPolicy) -> lobby_service_bluesky::Bluesky {
+        lobby_service_bluesky::Bluesky::accepting(
+            ProviderKind::new(lobby_credential_atproto::KIND)
+                .unwrap_or_else(|| unreachable!("atproto is a provider kind")),
+            policy,
         )
     }
 
@@ -274,6 +318,17 @@ mod tests {
             registry.permissions(&ProviderKind::new(lobby_credential_atproto::KIND).expect("kind")),
             [lobby_service_tangent::PERMISSION]
         );
+        let both = Registry::new(
+            Vec::new(),
+            vec![
+                Arc::new(Registry::tangent()),
+                Arc::new(Registry::bluesky(AddressPolicy::PublicHttps)),
+            ],
+        );
+        let asked =
+            both.permissions(&ProviderKind::new(lobby_credential_atproto::KIND).expect("kind"));
+        assert_eq!(asked[0], lobby_service_tangent::PERMISSION);
+        assert_eq!(&asked[1..], lobby_service_bluesky::PERMISSIONS);
         assert!(
             registry
                 .permissions(&ProviderKind::new("passbook").expect("kind"))

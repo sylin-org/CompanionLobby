@@ -32,6 +32,7 @@ lobby-contracts.workspace = true
 lobby-outbound.workspace = true
 lobby-credential-atproto.workspace = true
 lobby-service-tangent.workspace = true
+lobby-service-bluesky.workspace = true
 lobby-testkit = { workspace = true, optional = true }
 bytes.workspace = true
 getrandom.workspace = true

@@ -3,7 +3,8 @@
 //! [`LobbyWorld`] starts a passbook authority that approves every sign-in as
 //! [`HOLDER`], two boards that trust it, each with a post from another
 //! member, a fake atproto world that knows one account, [`HANDLE`], and
-//! approves every sign-in as it, and a fake Space that takes the proofs
+//! approves every sign-in as it, whose PDS holds two posts by other
+//! accounts for its timeline, and a fake Space that takes the proofs
 //! that world's PDS mints, with one Tangent, two Topics and a short
 //! conversation between two other participants. `companion-lobby-synthetic`,
 //! run with `LOBBY_AUTHSERVER` naming [`LobbyWorld::authserver`], signs
@@ -37,6 +38,10 @@ pub const HOLDER: &str = "ada";
 pub const HANDLE: &str = "ada.example.test";
 /// That account's DID.
 pub const DID: &str = "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa";
+/// The DID of Bea, who posts at the same PDS.
+pub const BEA_DID: &str = "did:plc:bbbbbbbbbbbbbbbbbbbbbbbb";
+/// The DID of Cy, who posts there too.
+pub const CY_DID: &str = "did:plc:cccccccccccccccccccccccc";
 
 /// The fakes a sponsor's journey needs, each on its own loopback listener.
 pub struct LobbyWorld {
@@ -87,6 +92,14 @@ impl LobbyWorld {
             "Balconies, windowsills and pots.",
         );
         space.name_account(DID, "Ada", HANDLE);
+        // Bea and Cy post at the same PDS, so Ada's timeline has their
+        // posts in it.
+        atproto.add_account("bea.example.test", BEA_DID);
+        atproto.add_account("cy.example.test", CY_DID);
+        atproto.display_name(BEA_DID, "Bea");
+        atproto.display_name(CY_DID, "Cy");
+        atproto.add_post(BEA_DID, "Morning, everyone. The basil finally came up.");
+        atproto.add_post(CY_DID, "Repotting the fig this morning. Wish me luck.");
         let bea = space.add_participant("Bea", "bea.example.test");
         let cy = space.add_participant("Cy", "cy.example.test");
         let opening = space.add_post(
@@ -164,6 +177,7 @@ impl LobbyWorld {
             format!("board={}", self.board.origin()),
             format!("second-board={}", self.second_board.origin()),
             format!("atmosphere-handle={HANDLE}"),
+            format!("pds={}", self.atproto.pds_origin()),
             format!("space={}", self.space.origin()),
             format!("control={}", self.control.origin()),
         ]

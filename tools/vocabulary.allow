@@ -51,3 +51,12 @@ crates/conformance/Cargo.toml	provider-bluesky	The conformance suite's tests hol
 crates/conformance/tests/bluesky_service.rs	provider-bluesky	The service suite runs against the Bluesky adapter and the test kit's fake PDS.
 crates/conformance/tests/bluesky_service.rs	provider-atproto	The Bluesky adapter's records live in the fake PDS's repository, in their lexicon's own names.
 crates/conformance/tests/bluesky_service.rs	provider-atproto-wire	Every request the Bluesky adapter sends is proved with a DPoP proof the atproto adapter mints for the fake PDS.
+crates/daemon/tests/manager_journey.rs	provider-bluesky	The journey checks the services the page offers, the Bluesky adapter among them.
+crates/daemon/tests/sign_in_journey.rs	provider-bluesky	The journey checks the product offers the Bluesky adapter for atproto accounts and asks for what it needs.
+crates/daemon/Cargo.toml	provider-bluesky	The daemon composes the compiled-in Bluesky service adapter and depends on its crate.
+crates/daemon/src/registry.rs	provider-bluesky	The registry is the one place the daemon composes the Bluesky service adapter with the credential adapter its accounts come from.
+crates/daemon/src/bin/synthetic.rs	provider-bluesky	The test-only command composes the Bluesky service adapter for the test kit's fake account server.
+crates/daemon/tests/bluesky_journey.rs	provider-bluesky	The journey connects a companion to Bluesky through the real daemon and checks its tools by name.
+crates/daemon/tests/bluesky_journey.rs	provider-tangent	The journey holds one account's Tangent connection beside its Bluesky one through the real daemon.
+crates/daemon/tests/bluesky_journey.rs	provider-atproto	The journey signs the companion in with the atproto adapter against the test kit's fake world and reads the records it wrote.
+crates/daemon/tests/bluesky_journey.rs	provider-atproto-wire	The journey checks that every request to the fake PDS carried the token under DPoP with a proof of its own.

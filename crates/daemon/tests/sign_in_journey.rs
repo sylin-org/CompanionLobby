@@ -166,10 +166,12 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
         held[0]["label"], "ada.example.test",
         "the handle that resolves back to it, as the sponsor knows it"
     );
+    let mut asked = vec!["atproto", lobby_service_tangent::PERMISSION];
+    asked.extend(lobby_service_bluesky::PERMISSIONS);
     assert_eq!(
         held[0]["permissions"],
-        json!(["atproto", lobby_service_tangent::PERMISSION]),
-        "identity, and the leave the installed service needs"
+        json!(asked),
+        "identity, and the leave each installed service needs"
     );
     assert_eq!(held[0]["state"], "ready");
     let ended = install.json("/api/lobby")["signIns"].clone();
@@ -185,7 +187,11 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
         .collect();
     let par = pushes.last().expect("the PAR");
     let return_to = format!("http://127.0.0.1:{}/signin/atproto/return", install.port());
-    let scope = format!("atproto {}", lobby_service_tangent::PERMISSION);
+    let scope = format!(
+        "atproto {} {}",
+        lobby_service_tangent::PERMISSION,
+        lobby_service_bluesky::PERMISSIONS.join(" ")
+    );
     assert_eq!(
         par.field("client_id"),
         Some(format!(
@@ -418,10 +424,25 @@ fn companion_lobby_refuses_a_loopback_authorization_server_and_reaches_nothing()
         product.json("/api/lobby")["kinds"],
         json!([{ "kind": "atproto", "title": "Atmosphere", "hint": lobby_credential_atproto::HINT }])
     );
+    let services: Vec<(Value, Value, Value)> = product.json("/api/lobby")["services"]
+        .as_array()
+        .expect("services")
+        .iter()
+        .map(|service| {
+            (
+                service["name"].clone(),
+                service["accepts"].clone(),
+                service["home"].clone(),
+            )
+        })
+        .collect();
     assert_eq!(
-        product.json("/api/lobby")["services"],
-        json!([{ "name": "tangent", "title": "Tangent Space", "accepts": ["atproto"] }]),
-        "the product reaches Tangent Spaces with atproto accounts"
+        services,
+        [
+            (json!("tangent"), json!(["atproto"]), json!(false)),
+            (json!("bluesky"), json!(["atproto"]), json!(true)),
+        ],
+        "the product reaches Tangent Spaces and Bluesky with atproto accounts, Bluesky where the account lives"
     );
     product.stop();
 }

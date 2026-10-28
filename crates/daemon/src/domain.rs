@@ -92,12 +92,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use lobby_contracts::{
-    AccountLabel, Address, Attachment, AttachmentId, Authority, Companion, CompanionId, Connection,
-    ConnectionId, ConnectionState, Credential, CredentialAdapter, CredentialId, CredentialState,
-    DisplayName, Explained, Freshness, Initiator, IssuedSlot, JournalEntry, JournalKind,
-    JournalNames, Label, MaterialSlot, MaterialUpdate, Moniker, NameProblem, Outcome, ProviderKind,
-    Revocation, SealedIssued, SealedMaterial, ServiceAdapter, ServiceName, SignInRequest,
-    SignInReturn, SignInStart, SignedIn, Sponsor, ToolArguments, ToolName, ToolResult,
+    AccountLabel, Address, AddressPolicy, Attachment, AttachmentId, Authority, Companion,
+    CompanionId, Connection, ConnectionId, ConnectionState, Credential, CredentialAdapter,
+    CredentialId, CredentialState, DisplayName, Explained, Freshness, Initiator, IssuedSlot,
+    JournalEntry, JournalKind, JournalNames, Label, MaterialSlot, MaterialUpdate, Moniker,
+    NameProblem, Outcome, ProviderKind, Revocation, SealedIssued, SealedMaterial, ServiceAdapter,
+    ServiceName, SignInRequest, SignInReturn, SignInStart, SignedIn, Sponsor, ToolArguments,
+    ToolName, ToolResult,
 };
 use serde_json::{Map, Value};
 use tokio::sync::watch;
@@ -205,6 +206,12 @@ pub enum SignInConflict {
     AlreadyHeld,
     /// The companion waits for another account of the kind to sign in again.
     AnotherWaits,
+    /// A sign-in that widened the companion's account came back as another
+    /// account.
+    AnotherAccount,
+    /// A sign-in that widened the companion's account came back granted
+    /// less than the account held.
+    Narrower,
 }
 
 impl SignInConflict {
@@ -214,6 +221,8 @@ impl SignInConflict {
             Self::AnotherCompanion => "another_companion",
             Self::AlreadyHeld => "already_held",
             Self::AnotherWaits => "another_waits",
+            Self::AnotherAccount => "another_account",
+            Self::Narrower => "narrower",
         }
     }
 
@@ -223,6 +232,8 @@ impl SignInConflict {
             Self::AnotherCompanion,
             Self::AlreadyHeld,
             Self::AnotherWaits,
+            Self::AnotherAccount,
+            Self::Narrower,
         ]
         .into_iter()
         .find(|conflict| conflict.code() == code)
@@ -386,6 +397,9 @@ struct Awaited {
     request: SignInRequest,
     started: Instant,
     expires_at: u64,
+    /// The ready credential this sign-in widens: the same account, signed
+    /// in again to be granted what the lobby's services now need.
+    widening: Option<CredentialId>,
 }
 
 impl Awaited {
@@ -1140,7 +1154,7 @@ impl Lobby {
         origin: &str,
     ) -> Result<(SignInView, SignInStart), Refusal> {
         let limit = self.sign_in_limit;
-        let (adapter, kind, again, subject) = self.run(|core| {
+        let (adapter, kind, again, widening, subject) = self.run(|core| {
             core.expire_overdue(limit);
             let mut subject = core.named(Subject::new(
                 Initiator::Sponsor,
@@ -1153,22 +1167,27 @@ impl Lobby {
                     .companion(companion)
                     .ok_or_else(|| Refusal::new(Outcome::NotFound, "No companion has that id."))?;
                 let (adapter, kind) = self.credential_adapter(kind)?;
-                core.no_ready_credential(companion, &kind)?;
+                let widening =
+                    core.widening(companion, &kind, &self.registry.permissions(&kind))?;
                 core.no_sign_in_waiting(companion, &kind)?;
-                Ok((adapter, kind))
+                Ok((adapter, kind, widening))
             })();
-            if let Ok((_, kind)) = &validated {
+            if let Ok((_, kind, _)) = &validated {
                 subject = core.with_kind(subject, kind);
             }
-            let (adapter, kind) =
+            let (adapter, kind, widening) =
                 validated.map_err(|refusal| core.refused_as(&subject, refusal))?;
-            let again = core.waiting_credential(companion, &kind);
+            let again = core.waiting_credential(companion, &kind).or(widening);
             if let Some(credential) = &again {
                 subject = core.with_account(subject, credential);
             }
+            let widening = again
+                .as_ref()
+                .filter(|credential| credential.state == CredentialState::Ready)
+                .map(|credential| credential.id);
             core.begin_as(&subject)?;
             core.starting.push((companion, kind.clone()));
-            Ok((adapter, kind, again, subject))
+            Ok((adapter, kind, again, widening, subject))
         })?;
         let state = keyring::random_token();
         let meant = again.as_ref().map_or_else(
@@ -1192,12 +1211,20 @@ impl Lobby {
             .map_err(|_| Outcome::Internal)
             .and_then(|state| material.map(|material| (state, material)))
             .and_then(|(state, material)| {
+                // A sign-in again asks for everything the account held as
+                // well as what the services need, so it never narrows it.
+                let mut permissions = self.registry.permissions(&kind);
+                for held in again.iter().flat_map(|credential| &credential.permissions) {
+                    if !permissions.contains(held) {
+                        permissions.push(held.clone());
+                    }
+                }
                 let mut request = SignInRequest {
                     hint: hint.to_owned(),
                     state: state.clone(),
                     return_to: format!("{origin}/signin/{kind}/return"),
                     again: material,
-                    permissions: self.registry.permissions(&kind),
+                    permissions,
                 };
                 let start = adapter.begin_sign_in(&request)?;
                 // The adapter keeps what it needs; the lobby keeps no
@@ -1220,6 +1247,7 @@ impl Lobby {
                         request,
                         started: Instant::now(),
                         expires_at: epoch_millis().saturating_add(limit.as_millis() as u64),
+                        widening,
                     };
                     let view = awaited.view(SignInStatus::Pending);
                     core.awaited.insert(awaited.request.state.clone(), awaited);
@@ -1348,7 +1376,12 @@ impl Lobby {
             complete_refusal(outcome)
         })?;
         let state = core.store.state();
-        let waiting = core.waiting_credential(awaited.companion, &awaited.kind);
+        let widened = awaited
+            .widening
+            .and_then(|id| state.credential(id).cloned());
+        let waiting = core
+            .waiting_credential(awaited.companion, &awaited.kind)
+            .or_else(|| widened.clone());
         let checked = if !Credential::permissions_are_valid(&signed.permissions) {
             Err(Refusal::new(
                 Outcome::Internal,
@@ -1369,6 +1402,8 @@ impl Lobby {
                 "That account is signed in for another companion; an account belongs to one companion.",
             )
             .because(SignInConflict::AnotherCompanion))
+        } else if awaited.widening.is_some() {
+            core.widened_by(widened.as_ref(), &signed)
         } else if let Some(waiting) = waiting
             .as_ref()
             .filter(|waiting| waiting.account != signed.account)
@@ -1456,6 +1491,9 @@ impl Lobby {
                 credential.id
             ));
         }
+        // The new material is renewed on its own schedule, which its
+        // adapter says at the next pass.
+        core.due.remove(&credential.id);
         core.events
             .push_back(Event::CredentialChanged(credential.clone()));
         core.events
@@ -1596,9 +1634,34 @@ impl Lobby {
             credential_adapter,
             credential,
             address,
+            policy,
             label,
         } = pinned;
-        let broker = Broker::new(self, credential.id, credential_adapter);
+        let home = address.is_none();
+        let broker = Broker::new(self, credential.id, credential_adapter.clone());
+        // A service that lives where the account lives reaches the
+        // account's own server, which only its credential adapter can read.
+        let address = match address {
+            Some(address) => address,
+            None => match credential_adapter
+                .home(broker.slot())
+                .and_then(|home| Address::parse(home.as_str(), policy).ok_or(Outcome::Refused))
+            {
+                Ok(address) => address,
+                Err(outcome) => {
+                    return self.run(|core| {
+                        core.settle_as(&subject, outcome);
+                        Err(Refusal::new(
+                            outcome,
+                            format!(
+                                "The lobby could not read where {} lives, so nothing was connected; try again, or sign the companion in again.",
+                                credential.label
+                            ),
+                        ))
+                    });
+                }
+            },
+        };
         let established = adapter.establish(&address, &broker);
         // An authorization that renewed the credential, or found it needs
         // signing in again, settles that before the grant does.
@@ -1623,6 +1686,9 @@ impl Lobby {
                     Outcome::Revoked,
                     "The credential was revoked while the connection was being made.",
                 ))
+            } else if home {
+                core.home_free(&credential, &service)
+                    .and_then(|()| core.label_free(grant.companion, &service, &label))
             } else {
                 core.label_free(grant.companion, &service, &label)
             };
@@ -2528,15 +2594,58 @@ impl Lobby {
             ));
         }
         let (credential_adapter, _) = self.credential_adapter(credential.kind.as_str())?;
-        let address = Address::parse(grant.address, description.addresses).ok_or_else(|| {
-            Refusal::new(
-                Outcome::InvalidInput,
+        let title = self.registry.service_title(&service);
+        if let Some(missing) = description
+            .permissions
+            .iter()
+            .find(|permission| !credential.permissions.contains(permission))
+        {
+            trace::line(&format!(
+                "credential {} lacks {missing}, which {service} needs",
+                credential.id
+            ));
+            let name = state
+                .companion(grant.companion)
+                .map_or_else(String::new, |record| {
+                    record.companion.display_name.to_string()
+                });
+            return Err(Refusal::new(
+                Outcome::NeedsPermission,
                 format!(
-                    "That is not an address {service} can reach: one origin, such as https://example.test, and nothing after it."
+                    "{} was signed in before {title} needed more of it. Sign {name} in again to grant it; {name}'s other connections stay as they are.",
+                    credential.label
                 ),
+            ));
+        }
+        let address = if description.home {
+            if !grant.address.trim().is_empty() {
+                return Err(Refusal::new(
+                    Outcome::InvalidInput,
+                    format!(
+                        "{title} lives where the account lives, so a connection to it names no address; leave the address out."
+                    ),
+                ));
+            }
+            core.home_free(&credential, &service)?;
+            None
+        } else {
+            Some(
+                Address::parse(grant.address, description.addresses).ok_or_else(|| {
+                    Refusal::new(
+                        Outcome::InvalidInput,
+                        format!(
+                            "That is not an address {service} can reach: one origin, such as https://example.test, and nothing after it."
+                        ),
+                    )
+                })?,
             )
-        })?;
-        let label = Label::new(grant.label).map_err(|problem| name_refusal("label", problem))?;
+        };
+        let label = if description.home && grant.label.trim().is_empty() {
+            Label::new(service.as_str())
+        } else {
+            Label::new(grant.label)
+        }
+        .map_err(|problem| name_refusal("label", problem))?;
         core.label_free(grant.companion, &service, &label)?;
         Ok(Pinned {
             service,
@@ -2544,6 +2653,7 @@ impl Lobby {
             credential_adapter,
             credential,
             address,
+            policy: description.addresses,
             label,
         })
     }
@@ -2573,7 +2683,11 @@ struct Pinned {
     adapter: Arc<dyn ServiceAdapter>,
     credential_adapter: Arc<dyn CredentialAdapter>,
     credential: Credential,
-    address: Address,
+    /// Where the service is, or none for a service that lives where the
+    /// account lives, whose address the credential's adapter names.
+    address: Option<Address>,
+    /// Which addresses the service may reach.
+    policy: AddressPolicy,
     label: Label,
 }
 
@@ -2885,6 +2999,78 @@ impl Core {
         Ok(())
     }
 
+    /// The ready credential of `kind` that `companion` holds, when it
+    /// lacks some of `needed`, so signing the same account in again widens
+    /// it; a ready credential that holds everything is refused as held, and
+    /// none at all answers none.
+    fn widening(
+        &self,
+        companion: CompanionId,
+        kind: &ProviderKind,
+        needed: &[String],
+    ) -> Result<Option<Credential>, Refusal> {
+        let ready = self
+            .store
+            .state()
+            .credentials
+            .iter()
+            .find(|credential| {
+                credential.companion == companion
+                    && credential.kind == *kind
+                    && credential.state == CredentialState::Ready
+            })
+            .cloned();
+        match ready {
+            Some(credential)
+                if needed
+                    .iter()
+                    .any(|permission| !credential.permissions.contains(permission)) =>
+            {
+                Ok(Some(credential))
+            }
+            Some(_) => self.no_ready_credential(companion, kind).map(|()| None),
+            None => Ok(None),
+        }
+    }
+
+    /// Checks a sign-in that widened `widened`, as the store holds it now,
+    /// against what `signed` came back as: the same account, still ready,
+    /// granted at least everything it held.
+    fn widened_by(&self, widened: Option<&Credential>, signed: &SignedIn) -> Result<(), Refusal> {
+        let Some(widened) = widened.filter(|credential| credential.state == CredentialState::Ready)
+        else {
+            return Err(Refusal::new(
+                Outcome::Conflict,
+                "The account changed while it was signing in again, so nothing was signed in; its page shows where it stands.",
+            ));
+        };
+        if widened.account != signed.account {
+            return Err(Refusal::new(
+                Outcome::Conflict,
+                format!(
+                    "That is another account than {label}, which the companion holds; sign in as {label} to grant it more.",
+                    label = widened.label
+                ),
+            )
+            .because(SignInConflict::AnotherAccount));
+        }
+        if !widened
+            .permissions
+            .iter()
+            .all(|permission| signed.permissions.contains(permission))
+        {
+            return Err(Refusal::new(
+                Outcome::Refused,
+                format!(
+                    "The sign-in page granted {} less than it held, so nothing changed; signing in again never narrows what an account may do.",
+                    widened.label
+                ),
+            )
+            .because(SignInConflict::Narrower));
+        }
+        Ok(())
+    }
+
     /// Refuses a second ready credential of `kind` for `companion`.
     fn no_ready_credential(
         &self,
@@ -2900,6 +3086,26 @@ impl Core {
             return Err(Refusal::new(
                 Outcome::Conflict,
                 "This companion is already signed in with an account of this kind; revoke it first.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuses a second connection of `service`, a service that lives where
+    /// the account lives, through `credential`, which reaches it already.
+    fn home_free(&self, credential: &Credential, service: &ServiceName) -> Result<(), Refusal> {
+        let held = self.store.state().connections.iter().any(|connection| {
+            connection.credential == credential.id
+                && connection.service == *service
+                && connection.state != ConnectionState::Revoked
+        });
+        if held {
+            return Err(Refusal::new(
+                Outcome::Conflict,
+                format!(
+                    "{} already reaches {service}, where it lives; an account has one such connection.",
+                    credential.label
+                ),
             ));
         }
         Ok(())

@@ -43,6 +43,9 @@ use crate::wire::{Call, Nonces};
 pub const NAME: &str = "bluesky";
 /// What the sponsor and a mind call it.
 pub const TITLE: &str = "Bluesky";
+/// What signing an account in again for Bluesky lets a companion do, as a
+/// clause that follows "can".
+pub const LETS: &str = "post to Bluesky";
 /// What a connection lets the companion do there, as a clause that
 /// follows "lets it".
 pub const ALLOWS: &str = "read its timeline, post, reply, like and repost";
