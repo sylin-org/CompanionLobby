@@ -17,40 +17,43 @@
 //!    the exchange's method, living [`PROOF_SECS`] seconds; a fresh proof
 //!    every time, never one sent before;
 //! 3. the proof is presented once, in the `Authorization` header only, to
-//!    the exchange, asking for a participant credential named
-//!    [`CREDENTIAL_NAME`], living [`LIFETIME_DAYS`] days, with the grants
-//!    [`GRANTS`];
-//! 4. the participant's own card is read with the new token, within
-//!    [`tools::NAMES_WITHIN`], for the name the Space shows for the
-//!    companion; a card that cannot be read leaves the name out and fails
-//!    nothing;
+//!    the exchange, with no body, which answers `204` and cookies that sign
+//!    the account in as a browser's sign-in does;
+//! 4. the Space's door is read with those cookies, within [`DOOR_WITHIN`],
+//!    for who the Space says the companion is and whether it may post; a door
+//!    that cannot be read leaves those out and fails nothing, and a door that
+//!    reads as a visitor's means the exchange did not sign anyone in;
 //! 5. the connection keeps exactly what the Space issued (see [`issued`]).
 //!
-//! A call presents the token as `Bearer`. A token within
-//! [`RENEW_BEFORE_SECS`] of its expiry is replaced first, by establishing
-//! the connection again, unless that cannot be done just now and the token
-//! has not ended yet, when the call goes on with it; a call the Space answers 401 establishes it again
-//! once, with a fresh proof, and is made once more. What each answer means
-//! is decided once, in [`wire`]; the tools themselves are in [`tools`].
+//! A call goes with the connection's own cookies (see [`jar`]), and what the
+//! Space sets along the way is kept for its next call. Reading is the Space's
+//! pages as JSON, and writing the forms those pages carry (see [`tools`]). A
+//! Space that answers 401, or that answers a page as it answers a visitor,
+//! has ended what the cookies signed in: the adapter proves the account
+//! again, once, with a fresh proof, and makes the call once more. What each
+//! answer means is decided once, in [`wire`].
 //!
 //! Tangent's routes, wire names and tool names live here and in its own
 //! documentation, and nowhere else.
 
 pub mod issued;
+pub mod jar;
 pub mod profile;
 pub mod references;
 pub mod tools;
 pub mod wire;
 
 use lobby_contracts::{
-    Address, AddressPolicy, Authority, AuthorizationAsk, Explained, IssuedSlot, KnownAs, Outcome,
-    ProviderKind, SealedIssued, ServiceAdapter, ServiceDescription, ServiceName, ToolArguments,
-    ToolDescriptor, ToolName, ToolResult,
+    Address, AddressPolicy, Authority, AuthorizationAsk, Effect, Explained, IssuedSlot, KnownAs,
+    Outcome, ProviderKind, SealedIssued, ServiceAdapter, ServiceDescription, ServiceName,
+    ToolArguments, ToolDescriptor, ToolName, ToolResult,
 };
 use lobby_outbound::Outbound;
-use serde_json::json;
+use std::cell::RefCell;
+use std::time::Duration;
 
 use crate::issued::Issued;
+use crate::jar::Jar;
 use crate::profile::{EXCHANGE_METHOD, EXCHANGE_PATH, PROFILE_PATH, Profile};
 use crate::wire::{Call, Failed};
 
@@ -63,48 +66,33 @@ pub const TITLE: &str = "Tangent Space";
 pub const PERMISSION: &str = "rpc:org.sylin.tangent.exchangeIdentity?aud=*";
 /// How long a proof is asked to live, in seconds.
 pub const PROOF_SECS: u32 = 60;
-/// What the participant credential is named at the Space.
-pub const CREDENTIAL_NAME: &str = "Companion Lobby";
-/// How long the participant credential is asked to live, in days.
-pub const LIFETIME_DAYS: u32 = 7;
-/// The grants asked for: the Space's defaults.
-pub const GRANTS: [&str; 3] = ["welcome", "read", "post"];
-/// How long before its expiry a token is replaced.
-pub const RENEW_BEFORE_SECS: i64 = 300;
+/// How long reading the door may take as a connection is established.
+pub const DOOR_WITHIN: Duration = Duration::from_secs(3);
 
 /// The profile does not keep to the address.
 pub const PROFILE_MISMATCH: &str = "The Space's sign-in profile does not match its address, so the lobby sent it no proof. Check the address, or ask the Space's operator.";
 /// The address does not answer as a Space.
 pub const NOT_A_SPACE: &str =
     "Nothing at this address answers as a Tangent Space. Check the address.";
-/// The Space takes no proofs yet.
-pub const NOT_CONFIGURED: &str = "This Space does not take companions yet: its operator has not set up how accounts prove themselves there.";
+/// The Space has no address of its own, which a proof is addressed to.
+pub const NOT_CONFIGURED: &str = "This Space has no address of its own yet, and a proof is addressed to one, so it takes none. Its operator configures one, or someone signs in there in a browser, which gives it one.";
 /// The Space did not take the proof.
 pub const PROOF_REFUSED: &str = "The Space did not accept the account's proof. Try again; if it keeps refusing, ask the Space's operator.";
-/// The account is suspended at the Space.
-pub const SUSPENDED: &str = "The Space has suspended this account, so it issues it nothing. Only the Space's stewards can lift that.";
+/// The Space shows nothing to the account, however it signs in.
+pub const SUSPENDED: &str = wire::SUSPENDED;
 /// The exchange answered what the adapter does not trust.
 pub const EXCHANGE_BROKE: &str =
     "The Space's answer did not keep to Tangent's exchange, so nothing was connected.";
-/// The exchange refused the request itself.
-pub const EXCHANGE_REFUSED: &str = "The Space refused the request to connect.";
-/// A writing tool the connection's grants do not cover.
-pub const NOT_GRANTED: &str = "The Space did not grant this connection leave to post here; only the Space's operator changes what it grants. Reading still works.";
-/// A reading tool the connection's grants do not cover.
-pub const READ_NOT_GRANTED: &str = "The Space did not grant this connection leave to read here; only the Space's operator changes what it grants.";
+/// A writing tool on a connection whose door said the companion may not post.
+pub const NOT_GRANTED: &str = "The Space does not let this companion post here yet. Call tangent_arrive to read why and to look again; reading still works.";
+/// The Space could not read the account's document.
+pub const ISSUER_UNREACHABLE: &str = "The Space could not reach the account's server to check its proof. Try again in a little while.";
 
 /// The Tangent service adapter.
 #[derive(Debug)]
 pub struct Tangent {
     outbound: Outbound,
     accepts: ProviderKind,
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 impl Tangent {
@@ -118,18 +106,18 @@ impl Tangent {
         }
     }
 
-    fn exchange(&self, address: &Address, proof: &str) -> Result<SealedIssued, Explained> {
-        let body = json!({
-            "name": CREDENTIAL_NAME,
-            "lifetimeDays": LIFETIME_DAYS,
-            "grants": GRANTS,
-        });
+    /// Presents `proof` to the exchange, and answers what it signed in, as
+    /// the door shows it.
+    fn exchange(&self, address: &Address, proof: &str) -> Result<Issued, Explained> {
+        let jar = RefCell::new(Jar::default());
         let call = Call {
             method: "POST",
             path: EXCHANGE_PATH,
-            token: Some(proof),
-            body: Some(&body),
-            effect: lobby_contracts::Effect::Read,
+            proof: Some(proof),
+            jar: &jar,
+            token: None,
+            body: None,
+            effect: Effect::Read,
             within: None,
         };
         let response =
@@ -137,19 +125,22 @@ impl Tangent {
                 Failed::Ended(explained) => explained,
                 Failed::Unauthenticated => Explained::new(Outcome::Refused, PROOF_REFUSED),
             })?;
-        let code = wire::code(&response);
-        match (response.status, code.as_deref()) {
-            (200, _) => {}
-            (401, _) => return Err(Explained::new(Outcome::Refused, PROOF_REFUSED)),
-            (403, Some("participant_suspended")) => {
-                return Err(Explained::new(Outcome::Refused, SUSPENDED));
-            }
-            (403, _) => return Err(Explained::new(Outcome::Refused, EXCHANGE_REFUSED)),
-            (400, _) => return Err(Explained::new(Outcome::InvalidInput, EXCHANGE_REFUSED)),
-            (503, _) => {
+        match (response.status, wire::word(&response, "error").as_deref()) {
+            (204, _) if !jar.borrow().is_empty() => {}
+            (200..=299, _) => {
                 return Err(Explained::new(
                     Outcome::TemporarilyUnavailable,
-                    NOT_CONFIGURED,
+                    EXCHANGE_BROKE,
+                ));
+            }
+            (401, _) => return Err(Explained::new(Outcome::Refused, PROOF_REFUSED)),
+            (503, Some("exchange_unconfigured")) => {
+                return Err(Explained::new(Outcome::Refused, NOT_CONFIGURED));
+            }
+            (503, Some("exchange_unavailable")) => {
+                return Err(Explained::new(
+                    Outcome::TemporarilyUnavailable,
+                    ISSUER_UNREACHABLE,
                 ));
             }
             _ => {
@@ -159,14 +150,24 @@ impl Tangent {
                 ));
             }
         }
-        let answer: serde_json::Value = serde_json::from_slice(&response.body)
-            .map_err(|_| Explained::new(Outcome::TemporarilyUnavailable, EXCHANGE_BROKE))?;
-        let mut issued = Issued::from_exchange(&answer).ok_or(Explained::new(
-            Outcome::TemporarilyUnavailable,
-            EXCHANGE_BROKE,
-        ))?;
-        issued.name = tools::own_name(&self.outbound, address, &issued);
-        Ok(issued.encode())
+        let through =
+            tools::Through::new(&self.outbound, address, Issued::signed_in(jar.into_inner()));
+        match through.door_within(DOOR_WITHIN) {
+            Ok(_) => {}
+            // The cookies the exchange set do not sign anyone in.
+            Err(Failed::Unauthenticated) => {
+                return Err(Explained::new(
+                    Outcome::TemporarilyUnavailable,
+                    EXCHANGE_BROKE,
+                ));
+            }
+            Err(Failed::Ended(explained)) if explained.sentence == SUSPENDED => {
+                return Err(explained);
+            }
+            // A door that cannot be read says nothing yet; arriving asks again.
+            Err(Failed::Ended(_)) => {}
+        }
+        Ok(through.issued())
     }
 
     /// Establishes the connection at `address` again through `slot`, keeps
@@ -198,12 +199,15 @@ impl ServiceAdapter for Tangent {
         address: &Address,
         authority: &dyn Authority,
     ) -> Result<SealedIssued, Explained> {
+        let jar = RefCell::new(Jar::default());
         let call = Call {
             method: "GET",
             path: PROFILE_PATH,
+            proof: None,
+            jar: &jar,
             token: None,
             body: None,
-            effect: lobby_contracts::Effect::Read,
+            effect: Effect::Read,
             within: None,
         };
         let response =
@@ -211,11 +215,11 @@ impl ServiceAdapter for Tangent {
                 Failed::Ended(explained) => explained,
                 Failed::Unauthenticated => Explained::new(Outcome::Refused, NOT_A_SPACE),
             })?;
-        match (response.status, wire::code(&response).as_deref()) {
-            (200, _) => {}
-            (503, _) => return Err(Explained::new(Outcome::Refused, NOT_CONFIGURED)),
-            (404, _) => return Err(Explained::new(Outcome::NotFound, NOT_A_SPACE)),
-            (500..=599, _) => {
+        match response.status {
+            200 => {}
+            503 => return Err(Explained::new(Outcome::Refused, NOT_CONFIGURED)),
+            404 => return Err(Explained::new(Outcome::NotFound, NOT_A_SPACE)),
+            500..=599 => {
                 return Err(Explained::new(
                     Outcome::TemporarilyUnavailable,
                     wire::UNAVAILABLE,
@@ -236,7 +240,7 @@ impl ServiceAdapter for Tangent {
         if proof.scheme != "Bearer" {
             return Err(Outcome::Unsupported.into());
         }
-        self.exchange(address, proof.token.expose())
+        Ok(self.exchange(address, proof.token.expose())?.encode())
     }
 
     fn catalog(&self) -> Vec<ToolDescriptor> {
@@ -247,24 +251,21 @@ impl ServiceAdapter for Tangent {
         let issued = Issued::decode(issued)?;
         Some(KnownAs {
             name: issued.name.clone(),
-            reference: Some(issued.participant.clone()),
+            reference: issued.participant.clone(),
             reference_is: "participant",
-            allows: match (issued.grants("read"), issued.grants("post")) {
-                (true, true) => "read and post",
-                (true, false) => "read, but not post",
-                (false, true) => "post, but not read",
-                (false, false) => "neither read nor post",
+            allows: if issued.posts {
+                "read and post"
+            } else {
+                "read, but not post"
             },
         })
     }
 
     fn available(&self, issued: &SealedIssued) -> Vec<ToolName> {
-        let Some(issued) = Issued::decode(issued) else {
-            return Vec::new();
-        };
+        let posts = Issued::decode(issued).is_none_or(|issued| issued.posts);
         tools::TOOLS
             .iter()
-            .filter(|tool| issued.grants(tool.needs.grant()))
+            .filter(|tool| posts || tool.needs != tools::Needs::Post)
             .map(|tool| tool.descriptor().name)
             .collect()
     }
@@ -289,57 +290,47 @@ impl ServiceAdapter for Tangent {
                 "That tool was given an argument it does not take; its description names each one it takes.",
             ));
         }
-        let mut issued = Issued::decode(&slot.read()?).ok_or(Outcome::Internal)?;
-        if !issued.grants(found.needs.grant()) {
-            let sentence = match found.needs {
-                tools::Needs::Post => NOT_GRANTED,
-                tools::Needs::Read => READ_NOT_GRANTED,
-            };
-            return Err(Explained::new(Outcome::NeedsPermission, sentence));
-        }
-        let left = issued.expires_at - now_secs();
-        if left < RENEW_BEFORE_SECS {
-            // Renewing early is a courtesy while the token still works: a
-            // Space or a server that cannot answer just now leaves the call
-            // to the token it has, and only a token that has ended fails.
-            match self.again(address, slot) {
-                Ok(fresh) => issued = fresh,
-                Err(explained)
-                    if left > 0
-                        && matches!(
-                            explained.outcome,
-                            Outcome::TemporarilyUnavailable | Outcome::RateLimited
-                        ) => {}
-                Err(explained) => return Err(explained),
+        let mut kept = slot.read()?;
+        // What the lobby cannot read as this adapter's is proved anew, as is
+        // what the Space has ended.
+        let issued = match Issued::decode(&kept) {
+            Some(issued) => issued,
+            None => {
+                let fresh = self.again(address, slot)?;
+                kept = fresh.encode();
+                fresh
             }
-        }
-        let perform = |issued: &Issued| {
-            tools::perform(
-                found,
-                arguments,
-                &tools::Through {
-                    outbound: &self.outbound,
-                    address,
-                    issued,
-                },
-            )
         };
-        match perform(&issued) {
-            // The Space refused the token before acting on the request, so
-            // establishing the connection again and trying once more does
+        if found.needs == tools::Needs::Post && !issued.posts {
+            return Err(Explained::new(Outcome::NeedsPermission, NOT_GRANTED));
+        }
+        let through = tools::Through::new(&self.outbound, address, issued);
+        let answer = match tools::perform(found, arguments, &through) {
+            // The Space did not know the companion, so it acted on nothing,
+            // and proving the account again and trying once more does
             // nothing twice.
             Err(Failed::Unauthenticated) => {
                 let fresh = self.again(address, slot)?;
-                match perform(&fresh) {
-                    Ok(result) => Ok(result),
+                kept = fresh.encode();
+                through.replace(fresh);
+                match tools::perform(found, arguments, &through) {
                     Err(Failed::Unauthenticated) => {
                         Err(Explained::new(Outcome::Refused, wire::NOT_TAKEN))
                     }
                     Err(Failed::Ended(explained)) => Err(explained),
+                    Ok(result) => Ok(result),
                 }
             }
-            Ok(result) => Ok(result),
             Err(Failed::Ended(explained)) => Err(explained),
+            Ok(result) => Ok(result),
+        };
+        // What the Space set along the way goes with the next call. A
+        // connection revoked meanwhile keeps nothing, and that says nothing
+        // of this answer, which the lobby settles itself.
+        let settled = through.issued().encode();
+        if settled.as_bytes() != kept.as_bytes() {
+            let _ = slot.reissue(settled);
         }
+        answer
     }
 }

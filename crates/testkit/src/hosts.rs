@@ -90,25 +90,25 @@ pub fn claude_code() -> Recording {
     )
 }
 
-/// Claude Code 2.1.303 on Windows, run headless with `claude -p` and the
+/// Claude Code 2.1.311 on Windows, run headless with `claude -p` and the
 /// haiku model, attached as Ada to a lobby whose only connection is the
 /// test kit's fake Space in `lobby-world`, given the task: find out where
 /// you can go, read what is new, and reply to the newest conversation in
 /// one friendly sentence.
 ///
 /// The mind calls `reach`, which names its account and how the Space knows
-/// it, asks the Space what is new and learns who wrote each Post by name,
-/// reads the Topic of the newest Post, replies to Bea's Post there with a
-/// request id of its own choosing and marks the Topic read, with no refused
-/// call and every reference copied from an earlier answer. Its host
+/// it, asks the Space what is new, lists the Tangent's Topics and finds the
+/// one active last, reads it and learns who wrote each Post by name, and
+/// replies to Cy's Post there with a request id of its own choosing, with no
+/// refused call and every reference copied from an earlier answer. Its host
 /// showed it each result's structured content, which held
 /// the answer's text as `message`; [`claude_code_in_a_space_shown`] is what
 /// it showed. The Space's origin in the frames is the one that walk ran
 /// against; a replay puts its own in its place.
 pub fn claude_code_in_a_space() -> Recording {
     parse(
-        "claude-code 2.1.303",
-        include_str!("../fixtures/hosts/claude-code-2.1.303-space.jsonl"),
+        "claude-code 2.1.311",
+        include_str!("../fixtures/hosts/claude-code-2.1.311-space.jsonl"),
     )
 }
 
@@ -117,7 +117,7 @@ pub fn claude_code_in_a_space() -> Recording {
 /// the host handed the model, taken from the host's own `stream-json`
 /// output of the same walk, with nothing else of that stream kept.
 pub fn claude_code_in_a_space_shown() -> Vec<(String, String)> {
-    include_str!("../fixtures/hosts/claude-code-2.1.303-space-shown.jsonl")
+    include_str!("../fixtures/hosts/claude-code-2.1.311-space-shown.jsonl")
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
@@ -166,7 +166,8 @@ mod tests {
     }
 
     #[test]
-    fn the_space_recording_reaches_hears_what_is_new_reads_and_replies_with_no_wrong_turn() {
+    fn the_space_recording_reaches_hears_what_is_new_finds_the_newest_and_replies_with_no_wrong_turn()
+     {
         let recording = claude_code_in_a_space();
         let calls: Vec<&str> = recording
             .sent()
@@ -178,9 +179,10 @@ mod tests {
             [
                 "reach",
                 "tangent_updates",
+                "tangent_topics",
+                "tangent_tangents",
                 "tangent_read_topic",
                 "tangent_post",
-                "tangent_mark_read"
             ]
         );
         for frame in recording
@@ -205,14 +207,7 @@ mod tests {
                 Direction::Lobby => answered.push_str(&frame.frame.to_string()),
                 Direction::Host if frame.frame["method"] == "tools/call" => {
                     let arguments = &frame.frame["params"]["arguments"];
-                    for name in [
-                        "topic",
-                        "reply_to",
-                        "tangent",
-                        "read_cursor",
-                        "scope",
-                        "around",
-                    ] {
+                    for name in ["topic", "reply_to", "tangent", "scope", "around", "cursor"] {
                         if let Some(reference) = arguments[name].as_str() {
                             assert!(
                                 answered.contains(&Value::String(reference.to_owned()).to_string()),
@@ -235,14 +230,17 @@ mod tests {
             "reach told the mind the name the Space knows it by"
         );
         assert_eq!(connection["allows"], "read and post");
-        let updates = recording
+        let topic = recording
             .sent()
-            .find(|frame| frame["params"]["name"] == "tangent_updates")
+            .find(|frame| frame["params"]["name"] == "tangent_read_topic")
             .and_then(|frame| recording.answer_to(&frame["id"]))
-            .expect("what is new");
+            .expect("the Topic");
+        let posts = topic["result"]["structuredContent"]["posts"]
+            .as_array()
+            .expect("its Posts");
         assert_eq!(
-            updates["result"]["structuredContent"]["attention"]["items"][0]["quoted"]["actorName"],
-            "Bea",
+            posts.last().expect("the newest")["quoted"]["authorName"],
+            "Cy",
             "the mind read who wrote the newest Post by name"
         );
     }

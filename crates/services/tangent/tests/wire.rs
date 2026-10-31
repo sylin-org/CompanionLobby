@@ -1,26 +1,32 @@
 //! The Tangent adapter's requests on the wire and the answers it does not
 //! get, against loopback listeners that play a Space.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 
-use lobby_contracts::{Address, AddressPolicy, Effect, Outcome, Retry, Secret, ToolArguments};
+use lobby_contracts::{
+    Address, AddressPolicy, Authority, Authorization, AuthorizationAsk, Effect, Explained, Outcome,
+    ProviderKind, Retry, Secret, ServiceAdapter, ToolArguments,
+};
 use lobby_outbound::Outbound;
 use lobby_service_tangent::issued::Issued;
+use lobby_service_tangent::jar::Jar;
 use lobby_service_tangent::tools::{self, Through};
 use lobby_service_tangent::wire::{self, Failed};
+use lobby_service_tangent::{self as tangent, Tangent};
 use lobby_testkit::listener::{Listener, Reply};
 use serde_json::{Value, json};
 
+const COOKIE: &str = "signed=secret-cookie";
+
 fn issued() -> Issued {
-    Issued {
-        participant: "prt_1".to_owned(),
-        name: Some("Ada".to_owned()),
-        credential: "cred-1".to_owned(),
-        token: Secret::new("ts_secret"),
-        expires_at: i64::MAX,
-        grants: vec!["welcome".to_owned(), "read".to_owned(), "post".to_owned()],
-    }
+    let mut jar = Jar::default();
+    jar.absorb(&format!("{COOKIE}; path=/"), "/", false, 0);
+    let mut issued = Issued::signed_in(jar);
+    issued.participant = Some("prt_1".to_owned());
+    issued.name = Some("Ada".to_owned());
+    issued.posts = true;
+    issued
 }
 
 fn arguments(value: Value) -> ToolArguments {
@@ -29,17 +35,20 @@ fn arguments(value: Value) -> ToolArguments {
 
 fn perform(address: &Address, name: &str, value: Value) -> Result<String, Failed> {
     let outbound = Outbound::new(AddressPolicy::LoopbackAllowed);
-    let issued = issued();
     tools::perform(
         tools::tool(name).expect("a tool"),
         &arguments(value),
-        &Through {
-            outbound: &outbound,
-            address,
-            issued: &issued,
-        },
+        &Through::new(&outbound, address, issued()),
     )
     .map(|result| result.rendered())
+}
+
+fn who() -> Value {
+    json!({ "id": "prt_1", "name": "Ada", "handle": "ada.example.test", "signOut": "http://x/auth/logout" })
+}
+
+fn origin_of(request: &lobby_testkit::listener::Received) -> String {
+    format!("http://{}", request.header("host").unwrap_or_default())
 }
 
 /// A Space that reads one request whole and closes without answering, as
@@ -63,30 +72,93 @@ fn losing() -> Address {
     .expect("address")
 }
 
+/// A Space that answers every read with `page`, whose forms its `{origin}`
+/// names, and loses the answer to the first write.
+fn losing_writes(page: Value) -> Address {
+    let socket = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = socket.local_addr().expect("address").port();
+    let page = page
+        .to_string()
+        .replace("{origin}", &format!("http://127.0.0.1:{port}"));
+    std::thread::spawn(move || {
+        for stream in socket.incoming().flatten() {
+            let mut reader = BufReader::new(stream);
+            let mut method = String::new();
+            let mut length = 0;
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                if method.is_empty() {
+                    method = line.split(' ').next().unwrap_or_default().to_owned();
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+                line.clear();
+            }
+            let mut body = vec![0; length];
+            let _ = reader.read_exact(&mut body);
+            if method == "GET" {
+                let mut stream = reader.into_inner();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+                    page.len()
+                );
+            }
+        }
+    });
+    Address::parse(
+        &format!("http://127.0.0.1:{port}"),
+        AddressPolicy::LoopbackAllowed,
+    )
+    .expect("address")
+}
+
+fn form_page(field: &str) -> Value {
+    json!({
+        "who": who(),
+        "address": "{origin}/t/home/welcome",
+        field: {
+            "action": "{origin}/t/home/welcome/form",
+            "method": "POST",
+            "fields": [
+                { "name": "id", "holds": "An id.", "value": "3mz5acrpyshjl" },
+                { "name": "title", "holds": "A title." },
+                { "name": "body", "holds": "Words." },
+                { "name": "parent", "holds": "A parent.", "value": "" },
+            ],
+            "token": { "field": "__RequestVerificationToken", "value": "form-token" },
+        },
+    })
+}
+
 #[test]
-fn a_read_asks_its_route_with_the_token_in_the_header_only_and_a_bounded_page() {
+fn a_read_asks_for_the_page_as_json_with_the_cookies_and_shows_it_quoted() {
     let listener = Listener::start(|request| {
-        let origin = format!("http://{}", request.header("host").unwrap_or_default());
-        let topic = format!("{origin}::home::welcome");
+        let origin = origin_of(request);
+        let topic = format!("{origin}/t/home/welcome");
+        let post = |id: &str, text: &str| {
+            json!({
+                "id": id, "sequence": 1, "address": format!("{topic}/{id}"),
+                "author": { "id": "prt_2", "handle": "alex.example.test", "name": "Alex", "kind": "person" },
+                "body": text, "createdAt": "2026-09-27T00:00:00Z", "version": 1, "new": true,
+            })
+        };
         Reply::json(
             200,
             &json!({
-                "topicRef": topic, "title": "Welcome", "brief": "A place to start",
-                "position": "recent", "canWrite": true, "stewardship": false, "isLocked": false,
-                "allowPostEditing": true, "historyOlderCursor": "older-1",
-                "historyNewerCursor": null, "readCursor": "read-1",
-                "posts": [{
-                    "ref": format!("{topic}::p1"), "authorRef": "prt_2", "authorName": "Alex",
-                    "text": "Hello", "replyTo": null, "url": format!("{origin}/p/p1"),
-                    "createdAt": "2026-09-27T00:00:00Z", "editedAt": null, "removed": false,
-                    "facets": [], "source": { "service": "tangent", "uri": null, "recordId": "p1" },
-                }],
+                "address": topic, "title": "Welcome", "locked": false,
+                "root": post("root1", "Hello"),
+                "replies": [post("p1", "World")],
+                "older": format!("{topic}?before=1"),
+                "newer": null,
+                "who": who(),
             }),
         )
     });
     let address =
         Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
-    let topic = format!("{}::home::welcome", address);
+    let topic = format!("{address}/t/home/welcome");
     let said = perform(
         &address,
         "read_topic",
@@ -94,350 +166,431 @@ fn a_read_asks_its_route_with_the_token_in_the_header_only_and_a_bounded_page() 
     )
     .expect("read");
     let request = &listener.requests()[0];
-    assert_eq!(request.target, "/api/v1/experience/topics/welcome?limit=5");
-    assert_eq!(request.header("authorization"), Some("Bearer ts_secret"));
+    assert_eq!(request.target, "/t/home/welcome");
+    assert_eq!(request.header("accept"), Some("application/json"));
+    assert_eq!(request.header("cookie"), Some(COOKIE));
+    assert!(request.header("authorization").is_none());
     assert!(request.body.is_empty());
-    assert!(said.contains("\"Hello\""), "{said}");
-    assert!(said.contains("\"older-1\""), "{said}");
-    assert!(!said.contains("ts_secret"));
+    assert!(said.contains("\"World\""), "{said}");
+    assert!(said.contains(&format!("\"{topic}?before=1\"")), "{said}");
+    assert!(!said.contains("secret-cookie"));
+    assert!(
+        said.contains("You cannot post here."),
+        "no form, no post: {said}"
+    );
 }
 
 #[test]
 fn a_write_whose_answer_is_lost_is_unknown_and_a_lost_read_is_unavailable() {
-    let topic = |address: &Address| format!("{address}::home::welcome");
-    let address = losing();
+    let topic = |address: &Address| format!("{address}/t/home/welcome");
+    let address = losing_writes(form_page("reply"));
     assert_eq!(
         perform(
             &address,
             "post",
-            json!({ "topic": topic(&address), "text": "hi", "request_id": "r-1" })
+            json!({ "topic": topic(&address), "text": "Hello" })
         ),
-        Err(Failed::Ended(wire::lost(Effect::Write {
-            retry: Retry::Safe
-        })))
+        Err(Failed::Ended(Explained::new(
+            Outcome::Unknown,
+            wire::POST_UNKNOWN
+        )))
     );
-    let address = losing();
-    let edited = perform(
+
+    let address = losing_writes(form_page("start"));
+    let unknown = perform(
+        &address,
+        "start_topic",
+        json!({ "tangent": format!("{address}/t/home"), "title": "A", "text": "B" }),
+    );
+    let Err(Failed::Ended(explained)) = unknown else {
+        panic!("{unknown:?}");
+    };
+    assert_eq!(explained.outcome, Outcome::Unknown);
+    assert!(explained.sentence.contains("started this Topic"));
+
+    let address = losing_writes(form_page("edit"));
+    let unknown = perform(
         &address,
         "edit_post",
-        json!({ "post": format!("{}::p1", topic(&address)), "text": "edited" }),
+        json!({ "post": format!("{}/p1", topic(&address)), "text": "New" }),
     );
-    match edited {
-        Err(Failed::Ended(explained)) => {
-            assert_eq!(explained.outcome, Outcome::Unknown);
-            assert_eq!(
-                Some(explained.sentence),
-                tools::tool("edit_post").and_then(|tool| tool.unknown),
-                "said in the edit's own nouns"
-            );
-            assert!(explained.sentence.contains("edited this Post"));
-        }
-        other => panic!("a lost edit is unknown, not {other:?}"),
-    }
+    let Err(Failed::Ended(explained)) = unknown else {
+        panic!("{unknown:?}");
+    };
+    assert_eq!(explained.outcome, Outcome::Unknown);
+    assert!(explained.sentence.contains("edited this Post"));
+
     let address = losing();
-    match perform(&address, "read_topic", json!({ "topic": topic(&address) })) {
-        Err(Failed::Ended(explained)) => {
-            assert_eq!(explained.outcome, Outcome::TemporarilyUnavailable)
-        }
-        other => panic!("a lost read is unavailable, not {other:?}"),
-    }
-}
-
-#[test]
-fn a_write_answered_with_another_request_id_is_never_a_success() {
-    let listener = Listener::start(|request| {
-        let origin = format!("http://{}", request.header("host").unwrap_or_default());
-        Reply::json(
-            200,
-            &json!({ "postRef": format!("{origin}::home::welcome::p9"), "source": null, "url": null, "requestId": "someone-else" }),
-        )
-    });
-    let address =
-        Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
-    let answer = perform(
-        &address,
-        "post",
-        json!({ "topic": format!("{address}::home::welcome"), "text": "hi", "request_id": "mine" }),
-    );
-    match answer {
-        Err(Failed::Ended(explained)) => assert_eq!(explained.outcome, Outcome::Unknown),
-        other => panic!("an answer for another request is unknown, not {other:?}"),
-    }
-    let sent = listener.requests()[0].json();
-    assert_eq!(sent["requestId"], "mine");
     assert_eq!(
-        listener.requests()[0].header("content-type"),
-        Some("application/json")
+        perform(&address, "read_topic", json!({ "topic": topic(&address) })),
+        Err(Failed::Ended(Explained::new(
+            Outcome::TemporarilyUnavailable,
+            wire::UNAVAILABLE
+        )))
     );
 }
 
 #[test]
-fn what_is_new_names_each_person_from_their_card_and_goes_on_without_one() {
-    let listener = Listener::start(|request| {
-        let origin = format!("http://{}", request.header("host").unwrap_or_default());
-        let topic = format!("{origin}::home::welcome");
-        let item = |actor: &str, post: &str| {
-            json!({
-                "ref": format!("att_{post}"), "kind": "watched_activity", "actorRef": actor,
-                "scopeRef": topic, "sourceRef": format!("{topic}::{post}"),
-                "excerpt": "Hello there", "state": "new",
-            })
-        };
-        let card = |reference: &str, name: &str| {
-            Reply::json(
-                200,
-                &json!({
-                    "profile": { "participantRef": reference, "displayName": name },
-                    "recentPosts": [], "morePosts": false,
-                }),
-            )
-        };
-        match request.route() {
-            "/api/v1/experience/updates" => Reply::json(
-                200,
-                &json!({
-                    "scopeRef": origin,
-                    "attention": {
-                        "waitingCount": { "value": 0 }, "newActivityCount": { "value": 4 },
-                        "items": [item("prt_2", "p1"), item("prt_3", "p2"), item("prt_4", "p3"), item("prt_2", "p4")],
-                        "more": false,
-                    },
-                    "activityCheckpoint": "cp_1",
-                }),
-            ),
-            "/api/v1/experience/participants/prt_2" => card("prt_2", "Bea"),
-            // A card that names someone else names nobody.
-            "/api/v1/experience/participants/prt_4" => card("prt_9", "Mallory"),
-            _ => Reply::json(404, &json!({ "code": "not_found" })),
-        }
-    });
-    let address =
-        Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
-    let said = perform(&address, "updates", json!({})).expect("what is new");
-    assert!(
-        said.contains("A new Post by \"Bea\" (participant \"prt_2\")"),
-        "{said}"
-    );
-    assert!(
-        said.contains("by participant \"prt_3\" (tangent_participant names them)"),
-        "{said}"
-    );
-    assert!(
-        said.contains("by participant \"prt_4\" (tangent_participant names them)"),
-        "{said}"
-    );
-    assert!(!said.contains("Mallory"), "{said}");
-    assert_eq!(
-        listener.count("/api/v1/experience/participants/prt_2"),
-        1,
-        "each card is read once"
-    );
-}
-
-#[test]
-fn a_card_that_never_answers_leaves_names_out_within_a_few_seconds() {
-    let listener = Listener::start(|request| {
-        let origin = format!("http://{}", request.header("host").unwrap_or_default());
-        let topic = format!("{origin}::home::welcome");
-        let item = |actor: &str, post: &str| {
-            json!({
-                "ref": format!("att_{post}"), "kind": "watched_activity", "actorRef": actor,
-                "scopeRef": topic, "sourceRef": format!("{topic}::{post}"),
-                "excerpt": "Hello there", "state": "new",
-            })
-        };
-        match request.route() {
-            "/api/v1/experience/updates" => Reply::json(
-                200,
-                &json!({
-                    "scopeRef": origin,
-                    "attention": {
-                        "waitingCount": { "value": 0 }, "newActivityCount": { "value": 2 },
-                        "items": [item("prt_2", "p1"), item("prt_3", "p2")],
-                        "more": false,
-                    },
-                    "activityCheckpoint": "cp_1",
-                }),
-            ),
-            route => {
-                let reference = route.rsplit('/').next().unwrap_or_default();
+fn a_form_that_posts_elsewhere_or_lacks_a_field_is_never_followed() {
+    for (name, broken) in [
+        (
+            "another origin",
+            json!({ "action": "http://elsewhere.test/steal", "method": "POST", "fields": [
+            { "name": "id", "holds": "" }, { "name": "body", "holds": "" }, { "name": "parent", "holds": "" }
+        ], "token": { "value": "t" } }),
+        ),
+        (
+            "another method",
+            json!({ "action": "{origin}/t/home/welcome", "method": "PUT", "fields": [
+            { "name": "id", "holds": "" }, { "name": "body", "holds": "" }, { "name": "parent", "holds": "" }
+        ], "token": { "value": "t" } }),
+        ),
+        (
+            "no token",
+            json!({ "action": "{origin}/t/home/welcome", "method": "POST", "fields": [
+            { "name": "id", "holds": "" }, { "name": "body", "holds": "" }, { "name": "parent", "holds": "" }
+        ], "token": { "value": "" } }),
+        ),
+        (
+            "no body field",
+            json!({ "action": "{origin}/t/home/welcome", "method": "POST", "fields": [
+            { "name": "id", "holds": "" }
+        ], "token": { "value": "t" } }),
+        ),
+    ] {
+        let listener = Listener::start({
+            let broken = broken.clone();
+            move |request| {
+                let origin = origin_of(request);
+                let page = json!({ "who": who(), "reply": broken }).to_string();
                 Reply::json(
                     200,
-                    &json!({
-                        "profile": { "participantRef": reference, "displayName": "Someone" },
-                        "recentPosts": [], "morePosts": false,
-                    }),
+                    &serde_json::from_str(&page.replace("{origin}", &origin)).expect("JSON"),
                 )
             }
-        }
-    });
-    let stalled = listener.hold_answers("/api/v1/experience/participants/prt_2");
-    let address =
-        Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
-    let began = std::time::Instant::now();
-    let said = perform(&address, "updates", json!({})).expect("what is new");
-    let took = began.elapsed();
-    assert!(
-        took < std::time::Duration::from_secs(6),
-        "the names gave up in time: {took:?}"
-    );
-    for actor in ["prt_2", "prt_3"] {
+        });
+        let address =
+            Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
+        let refused = perform(
+            &address,
+            "post",
+            json!({ "topic": format!("{address}/t/home/welcome"), "text": "Hello" }),
+        );
+        let Err(Failed::Ended(explained)) = refused else {
+            panic!("{name}: {refused:?}");
+        };
+        assert_eq!(explained.outcome, Outcome::Unknown, "{name}");
         assert!(
-            said.contains(&format!(
-                "by participant \"{actor}\" (tangent_participant names them)"
-            )),
-            "{said}"
+            listener
+                .requests()
+                .iter()
+                .all(|request| request.method == "GET"),
+            "{name}: nothing was posted"
         );
     }
-    assert_eq!(
-        listener.count("/api/v1/experience/participants/prt_3"),
-        0,
-        "no card is read once the time ran out"
-    );
-    drop(stalled);
 }
 
 #[test]
-fn there_being_more_is_said_in_the_structured_answer_as_in_the_text() {
+fn a_write_answered_with_another_id_is_never_a_success() {
     let listener = Listener::start(|request| {
-        let origin = format!("http://{}", request.header("host").unwrap_or_default());
-        let attention = json!({
-            "waitingCount": { "value": 0 }, "newActivityCount": { "value": 0 },
-            "items": [], "more": true,
-        });
-        match request.route() {
-            "/api/v1/experience/updates" => Reply::json(
-                200,
-                &json!({ "scopeRef": origin, "attention": attention, "activityCheckpoint": "cp_1" }),
-            ),
-            _ => Reply::json(
-                200,
-                &json!({
-                    "identity": { "participantRef": "prt_1", "displayName": "Ada" },
-                    "authority": { "canPost": true },
-                    "place": { "label": "Home" },
-                    "attention": attention,
-                    "tangents": [],
-                    "continuation": "next-1",
-                }),
-            ),
+        let origin = origin_of(request);
+        if request.method == "GET" {
+            let page = form_page("reply").to_string().replace("{origin}", &origin);
+            return Reply::json(200, &serde_json::from_str(&page).expect("JSON"));
         }
+        Reply::json(
+            201,
+            &json!({ "id": "3zzzzzzzzzzzz", "address": format!("{origin}/t/home/welcome/3zzzzzzzzzzzz") }),
+        )
     });
     let address =
         Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
-    let outbound = Outbound::new(AddressPolicy::LoopbackAllowed);
-    let issued = issued();
-    let through = Through {
-        outbound: &outbound,
-        address: &address,
-        issued: &issued,
-    };
-    let structured = |name: &str| {
-        let result = tools::perform(
-            tools::tool(name).expect("a tool"),
-            &arguments(json!({})),
-            &through,
-        )
-        .unwrap_or_else(|_| panic!("{name} answers"));
-        (result.rendered(), result.structured.expect("structured"))
-    };
-    let (said, updates) = structured("updates");
-    assert!(said.contains("There is more"), "{said}");
-    assert_eq!(updates["attention"]["more"]["readWith"], "tangent_updates");
-    let (said, arrived) = structured("arrive");
-    assert!(said.contains("There are more Tangents"), "{said}");
-    assert_eq!(arrived["moreTangents"]["readWith"], "tangent_tangents");
-    assert_eq!(arrived["attention"]["more"]["readWith"], "tangent_updates");
+    let answered = perform(
+        &address,
+        "post",
+        json!({ "topic": format!("{address}/t/home/welcome"), "text": "Hello" }),
+    );
+    assert_eq!(
+        answered,
+        Err(Failed::Ended(Explained::new(
+            Outcome::Unknown,
+            wire::POST_UNKNOWN
+        )))
+    );
 }
 
 #[test]
-fn a_participant_whose_posts_do_not_all_fit_says_how_many_it_left_out_in_both_forms() {
-    let long = "\u{4e2d}".repeat(tools::POST_SHOWN);
-    let listener = Listener::start(move |request| {
-        let origin = format!("http://{}", request.header("host").unwrap_or_default());
-        let posts: Vec<Value> = (1..=10)
-            .map(|n| {
-                json!({
-                    "ref": format!("{origin}::home::welcome::p{n}"),
-                    "authorRef": "prt_2",
-                    "authorName": "Bea",
-                    "createdAt": "2026-09-21T14:13:20Z",
-                    "text": long,
-                })
-            })
-            .collect();
+fn a_page_that_reads_as_a_visitors_or_a_401_is_the_space_not_knowing_the_cookies() {
+    for (status, body) in [
+        (200, json!({ "address": "x", "who": null, "signIn": "x" })),
+        (200, json!({ "address": "x" })),
+        (401, json!({ "status": 401, "gate": "sign-in" })),
+    ] {
+        let listener = Listener::start({
+            let body = body.clone();
+            move |_| Reply::json(status, &body)
+        });
+        let address =
+            Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
+        assert_eq!(
+            perform(&address, "tangents", json!({})),
+            Err(Failed::Unauthenticated),
+            "{status} {body}"
+        );
+    }
+}
+
+#[test]
+fn what_is_new_names_each_person_as_the_door_does_and_a_door_of_another_participant_is_not_trusted()
+{
+    let listener = Listener::start(|request| {
+        let origin = origin_of(request);
         Reply::json(
             200,
             &json!({
-                "profile": {
-                    "participantRef": "prt_2",
-                    "displayName": "Bea",
-                    "handle": "bea.example.test",
-                    "classification": "human",
-                    "description": "Grows basil.",
+                "name": "A Space",
+                "can": ["View", "Post"],
+                "who": who(),
+                "tangents": [],
+                "moreTangents": true,
+                "news": {
+                    "first": false,
+                    "replies": { "count": 7, "posts": [{
+                        "who": { "id": "prt_2", "name": "Bea" },
+                        "topic": "Welcome",
+                        "address": format!("{origin}/t/home/welcome/p1"),
+                        "line": "Hello there",
+                    }] },
+                    "perTangent": [{ "address": format!("{origin}/t/home"), "name": "Home", "topics": 1, "replies": 2 }],
+                    "watched": [{ "address": format!("{origin}/t/home/welcome"), "name": "Welcome", "new": 3 }],
+                    "caughtUp": { "action": origin, "method": "POST", "fields": [], "token": { "value": "t" } },
                 },
-                "recentPosts": posts,
             }),
         )
     });
     let address =
         Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
     let outbound = Outbound::new(AddressPolicy::LoopbackAllowed);
-    let issued = issued();
     let result = tools::perform(
-        tools::tool("participant").expect("a tool"),
-        &arguments(json!({ "participant": "prt_2" })),
-        &Through {
-            outbound: &outbound,
-            address: &address,
-            issued: &issued,
-        },
+        tools::tool("arrive").expect("a tool"),
+        &ToolArguments::default(),
+        &Through::new(&outbound, &address, issued()),
     )
-    .unwrap_or_else(|_| panic!("the card answers"));
+    .expect("arrived");
     let said = result.rendered();
-    let structured = result.structured.expect("structured");
-    let shown = structured["posts"].as_array().expect("posts").len();
-    assert!(shown > 0 && shown < 10, "{shown} Posts shown");
     assert!(
-        said.contains(&format!("{} more recent Posts are left out", 10 - shown)),
+        said.contains("A reply to you by \"Bea\" (participant \"prt_2\")"),
         "{said}"
     );
-    assert_eq!(structured["leftOut"], json!(10 - shown), "{structured}");
+    assert!(said.contains("which begins \"Hello there\""), "{said}");
+    assert!(said.contains("3 new Posts"), "{said}");
+    assert!(said.contains("1 new Topic and 2 new replies"), "{said}");
     assert!(
-        structured["readLeftOutIn"]
-            .as_str()
-            .is_some_and(|read| read.contains("tangent_read_topic")),
-        "{structured}"
+        said.contains("There are more Tangents; tangent_tangents lists them."),
+        "{said}"
     );
-    // Every field the description names is one the structured answer gives.
-    let quoted = &structured["quoted"];
-    for field in [
-        "participant",
-        "displayName",
-        "handle",
-        "kind",
-        "description",
-    ] {
-        assert!(quoted[field].is_string(), "{field}: {structured}");
-    }
+    let structured = result.structured.expect("structured");
+    assert_eq!(structured["moreTangents"]["readWith"], "tangent_tangents");
+    assert_eq!(
+        structured["attention"]["items"][0]["quoted"]["actorName"],
+        "Bea"
+    );
+    assert_eq!(structured["attention"]["catchUpWith"], "tangent_caught_up");
+    assert_eq!(structured["may"], json!(["read", "post"]));
+
+    let mut other = issued();
+    other.participant = Some("prt_9".to_owned());
+    let through = Through::new(&outbound, &address, other);
+    let untrusted = tools::perform(
+        tools::tool("arrive").expect("a tool"),
+        &ToolArguments::default(),
+        &through,
+    );
+    assert!(
+        matches!(untrusted, Err(Failed::Ended(explained)) if explained.outcome == Outcome::TemporarilyUnavailable),
+        "the door shows the participant the connection is"
+    );
 }
 
 #[test]
-fn a_post_the_space_answers_201_is_a_success() {
-    let listener = Listener::start(|request| {
-        let origin = format!("http://{}", request.header("host").unwrap_or_default());
+fn a_page_of_posts_past_its_budget_shows_what_fits_and_continues_from_there() {
+    let long = "\u{4e2d}".repeat(tools::POST_SHOWN);
+    let listener = Listener::start(move |request| {
+        let origin = origin_of(request);
+        let topic = format!("{origin}/t/home/welcome");
+        let post = |sequence: u64, text: &str| {
+            json!({
+                "sequence": sequence, "address": format!("{topic}/p{sequence}"),
+                "author": { "id": "prt_2", "name": "Alex" },
+                "body": text, "createdAt": "2026-09-27T00:00:00Z",
+            })
+        };
+        let replies: Vec<Value> = (1..=25).map(|sequence| post(sequence, &long)).collect();
         Reply::json(
-            201,
-            &json!({ "postRef": format!("{origin}::home::welcome::p9"), "requestId": "r-201" }),
+            200,
+            &json!({
+                "address": topic, "title": "Welcome",
+                "root": post(0, "It opens."),
+                "replies": replies,
+                "newer": format!("{topic}?after=25"),
+                "seen": { "action": format!("{topic}/seen"), "method": "POST", "fields": [], "token": { "value": "t" } },
+                "who": who(),
+            }),
         )
     });
     let address =
         Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
-    let said = perform(
-        &address,
-        "post",
-        json!({ "topic": format!("{address}::home::welcome"), "text": "hi", "request_id": "r-201" }),
+    let outbound = Outbound::new(AddressPolicy::LoopbackAllowed);
+    let topic = format!("{address}/t/home/welcome");
+    let result = tools::perform(
+        tools::tool("read_topic").expect("a tool"),
+        &arguments(json!({ "topic": topic, "limit": 25 })),
+        &Through::new(&outbound, &address, issued()),
     )
-    .expect("posted");
-    assert!(said.starts_with("Posted in Topic"), "{said}");
+    .expect("read");
+    let said = result.rendered();
+    assert!(
+        said.len() <= lobby_contracts::ToolResult::RENDERED_BUDGET,
+        "{} bytes of text",
+        said.len()
+    );
+    assert!(
+        !said.contains("cut this result short"),
+        "the page fits whole"
+    );
+    let structured = result.structured.expect("structured");
+    let posts = structured["posts"].as_array().expect("posts");
+    let last = posts.len() - 1;
+    assert!(last > 0 && last < 25, "{last} replies");
+    assert_eq!(
+        structured["cursor"],
+        format!("{topic}?after={last}"),
+        "the next read starts at the first left out"
+    );
+    assert_eq!(structured["through"], last, "and marking read stops here");
+    assert!(said.contains(&format!("through {last}")), "{said}");
+}
+
+struct Proving;
+
+impl Authority for Proving {
+    fn authorize(&self, _: &AuthorizationAsk) -> Result<Authorization, Explained> {
+        Ok(Authorization {
+            scheme: "Bearer".to_owned(),
+            token: Secret::new("a-proof"),
+            proof: None,
+        })
+    }
+}
+
+/// What establishing a connection comes to at a Space whose exchange answers
+/// with `answer`.
+fn establishing(answer: impl Fn() -> Reply + Send + Sync + 'static) -> Result<(), Explained> {
+    let listener = Listener::start(move |request| {
+        let origin = origin_of(request);
+        match request.route() {
+            "/.well-known/tangent-auth" => {
+                let port = origin.rsplit(':').next().unwrap_or_default();
+                Reply::json(
+                    200,
+                    &json!({
+                        "canonicalOrigin": origin,
+                        "serviceProof": {
+                            "method": "org.sylin.tangent.exchangeIdentity",
+                            "purpose": "org.sylin.tangent.exchangeIdentity",
+                            "audience": format!("did:web:localhost%3A{port}#tangent"),
+                            "algorithms": ["ES256"],
+                            "transport": "authorization_header",
+                            "endpoint": format!("{origin}/api/v1/identity/exchange"),
+                        },
+                    }),
+                )
+            }
+            "/api/v1/identity/exchange" => answer(),
+            _ => Reply::json(200, &json!({ "who": null })),
+        }
+    });
+    let address =
+        Address::parse(&listener.origin(), AddressPolicy::LoopbackAllowed).expect("address");
+    Tangent::accepting(ProviderKind::new("atproto").expect("a kind"))
+        .establish(&address, &Proving)
+        .map(|_| ())
+}
+
+#[test]
+fn only_204_and_a_cookie_that_signs_in_is_a_connection() {
+    let broke = Explained::new(Outcome::TemporarilyUnavailable, tangent::EXCHANGE_BROKE);
+    assert_eq!(
+        establishing(|| Reply {
+            status: 204,
+            headers: Vec::new(),
+            body: Vec::new()
+        }),
+        Err(broke),
+        "no cookie"
+    );
+    assert_eq!(
+        establishing(|| Reply::json(
+            200,
+            &json!({ "profile": "another", "credential": {}, "token": "x" })
+        )),
+        Err(broke),
+        "any other success"
+    );
+    assert_eq!(
+        establishing(|| Reply {
+            status: 204,
+            headers: vec![("Set-Cookie".to_owned(), "signed=in; path=/".to_owned())],
+            body: Vec::new()
+        }),
+        Err(broke),
+        "a cookie the door does not read as anyone"
+    );
+    assert_eq!(
+        establishing(|| Reply::json(401, &json!({ "error": "invalid_service_proof" }))),
+        Err(Explained::new(Outcome::Refused, tangent::PROOF_REFUSED))
+    );
+    assert_eq!(
+        establishing(|| Reply::json(503, &json!({ "error": "exchange_unconfigured" }))),
+        Err(Explained::new(Outcome::Refused, tangent::NOT_CONFIGURED))
+    );
+    assert_eq!(
+        establishing(|| Reply::json(503, &json!({ "error": "exchange_unavailable" }))),
+        Err(Explained::new(
+            Outcome::TemporarilyUnavailable,
+            tangent::ISSUER_UNREACHABLE
+        ))
+    );
+    assert_eq!(
+        establishing(|| Reply::json(500, &json!({}))),
+        Err(Explained::new(
+            Outcome::TemporarilyUnavailable,
+            wire::UNAVAILABLE
+        ))
+    );
+}
+
+#[test]
+fn every_write_is_said_to_be_safe_to_repeat_or_to_read_first() {
+    const SAFE: Effect = Effect::Write { retry: Retry::Safe };
+    const READ_FIRST: Effect = Effect::Write {
+        retry: Retry::ReadFirst,
+    };
+    for name in [
+        "post",
+        "start_topic",
+        "mark_read",
+        "watch",
+        "report_post",
+        "caught_up",
+    ] {
+        assert_eq!(tools::tool(name).expect("a tool").effect, SAFE, "{name}");
+    }
+    for name in ["edit_post", "remove_post"] {
+        assert_eq!(
+            tools::tool(name).expect("a tool").effect,
+            READ_FIRST,
+            "{name}"
+        );
+    }
 }

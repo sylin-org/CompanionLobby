@@ -144,8 +144,8 @@ It prints one `name=value` line each for `LOBBY_AUTHSERVER`, `passbook`,
 The `pds` is the fake account server Atmosphere accounts live on, holding a
 timeline with two posts by other accounts, which the second service reaches
 with no address. The `space` is a fake of the first service's Space,
-documented with that service under `docs/services`, with `/space/locked`
-and `/space/tokens-end` on the control page. `/atmosphere/older` makes
+documented with that service under `docs/services`, with `/space/new-post`,
+`/space/locked` and `/space/sign-ins-end` on the control page. `/atmosphere/older` makes
 Atmosphere sign-ins from then on grant only identity and the Space's leave,
 as an account signed in before the second service needed more, and
 `/atmosphere/asked` makes them grant what they ask for again: sign in after

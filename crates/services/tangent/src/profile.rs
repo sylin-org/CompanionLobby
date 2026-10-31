@@ -16,10 +16,10 @@
 //!
 //! The audience is derived the way Tangent derives its public DID: a
 //! loopback origin (`localhost`, `127.x`, `[::1]`) is
-//! `did:web:localhost`, with `%3A<port>` when the port is not the scheme's
-//! default; a DNS name with a dot, on the default port, is
-//! `did:web:<host>`; anything else has no derived DID, and a Space there
-//! cannot be reached. Either way the audience names the `#tangent` service.
+//! `did:web:localhost`, and a DNS name with a dot is `did:web:<host>`, each
+//! with `%3A<port>` when the port is not the scheme's default; anything else
+//! has no derived DID, and a Space there cannot be reached. Either way the
+//! audience names the `#tangent` service.
 
 use lobby_contracts::Address;
 use serde::Deserialize;
@@ -90,24 +90,23 @@ pub fn derived_audience(address: &Address) -> Option<String> {
     let host = address.host();
     let default_port = if address.is_https() { 443 } else { 80 };
     let loopback = host == "localhost" || host.starts_with("127.") || host == "[::1]";
-    let did = if loopback {
-        if address.port() == default_port {
-            "did:web:localhost".to_owned()
-        } else {
-            format!("did:web:localhost%3A{}", address.port())
-        }
-    } else if address.port() == default_port
-        && host.contains('.')
+    let named = if loopback {
+        "localhost"
+    } else if host.contains('.')
         && !host.starts_with('[')
         && !host
             .bytes()
             .all(|byte| byte.is_ascii_digit() || byte == b'.')
     {
-        format!("did:web:{host}")
+        host
     } else {
         return None;
     };
-    Some(format!("{did}#tangent"))
+    Some(if address.port() == default_port {
+        format!("did:web:{named}#tangent")
+    } else {
+        format!("did:web:{named}%3A{}#tangent", address.port())
+    })
 }
 
 #[cfg(test)]
@@ -189,6 +188,18 @@ mod tests {
     }
 
     #[test]
+    fn a_space_on_a_public_port_of_its_own_keeps_to_its_address() {
+        let space = address("https://space.example.test:8443");
+        let good = profile(space.as_str(), "did:web:space.example.test%3A8443#tangent");
+        assert_eq!(
+            good.audience_for(&space).as_deref(),
+            Some("did:web:space.example.test%3A8443#tangent")
+        );
+        let portless = profile(space.as_str(), "did:web:space.example.test#tangent");
+        assert_eq!(portless.audience_for(&space), None);
+    }
+
+    #[test]
     fn the_audience_is_derived_from_the_reviewed_address() {
         assert_eq!(
             derived_audience(&address("http://127.0.0.1:5220")).as_deref(),
@@ -203,8 +214,8 @@ mod tests {
             Some("did:web:space.example.test#tangent")
         );
         assert_eq!(
-            derived_audience(&address("https://space.example.test:8443")),
-            None
+            derived_audience(&address("https://space.example.test:8443")).as_deref(),
+            Some("did:web:space.example.test%3A8443#tangent")
         );
         assert_eq!(derived_audience(&address("https://1.1.1.1")), None);
     }

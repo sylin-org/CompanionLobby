@@ -17,9 +17,11 @@
 //! `/keys/brief` makes the keys the passbook authority issues from then on
 //! live two seconds, so the lobby renews them again and again, `/keys/long`
 //! makes them live an hour, `/renewals/refuse` refuses every renewal and
-//! `/renewals/allow` allows them again; `/space/locked` makes the Space
-//! refuse every new Post in its welcome Topic, and `/space/tokens-end` ends
-//! every token the Space issued, so the next call exchanges a fresh proof;
+//! `/renewals/allow` allows them again; `/space/locked` locks the Space's
+//! welcome Topic, `/space/sign-ins-end` ends every sign-in the Space made,
+//! so the next call exchanges a fresh proof, and `/space/new-post` has Cy post
+//! in the Space's gardens Topic, which is new to a companion that has already
+//! arrived;
 //! `/atmosphere/older` makes Atmosphere sign-ins grant only identity and
 //! the Space's leave, as an account signed in before the lobby's other
 //! services needed more, and `/atmosphere/asked` makes them grant what they
@@ -69,6 +71,18 @@ pub struct LobbyWorld {
 impl Default for LobbyWorld {
     fn default() -> Self {
         Self::start()
+    }
+}
+
+/// Has Cy post in the gardens Topic of the world's Space.
+pub fn new_post(space: &SpaceServer) {
+    if let Some(cy) = space.participant_named("Cy") {
+        space.add_post(
+            "gardens",
+            &cy,
+            "The fig is in its new pot. Now to find it some sun.",
+            None,
+        );
     }
 }
 
@@ -141,12 +155,16 @@ impl LobbyWorld {
                     "Atmosphere sign-ins from now on grant what they ask for."
                 }
                 "/space/locked" => {
-                    knobs_space.refuse_writes_in("welcome");
-                    "The Space refuses every new Post in its welcome Topic."
+                    knobs_space.lock("welcome");
+                    "The Space locked its welcome Topic."
                 }
-                "/space/tokens-end" => {
-                    knobs_space.end_tokens();
-                    "The Space ended every token it issued."
+                "/space/new-post" => {
+                    new_post(&knobs_space);
+                    "Cy posted in the Space's gardens Topic."
+                }
+                "/space/sign-ins-end" => {
+                    knobs_space.end_sign_ins();
+                    "The Space ended every sign-in it made."
                 }
                 "/keys/brief" => {
                     knobs.key_lifetime(2);

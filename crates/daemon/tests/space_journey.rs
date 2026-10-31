@@ -7,8 +7,8 @@
 //! with the fake account; the sponsor grants it a connection to the fake
 //! Space, which the adapter establishes through the proof exchange: the
 //! credential adapter mints a service proof at the fake PDS, and the Space
-//! takes it once for a participant token. A mind attaches through the real
-//! shim. Nothing is seeded: every credential exists because a sign-in
+//! takes it once and signs the account in with a cookie, which the lobby keeps
+//! for that connection alone. A mind attaches through the real shim. Nothing is seeded: every credential exists because a sign-in
 //! completed, every connection because the Space issued it.
 
 use std::path::Path;
@@ -16,11 +16,12 @@ use std::path::Path;
 use lobby_conformance::host::{Install, body, call, initialize, names, text, tools};
 use lobby_daemon::mcp::LIST_CHANGED;
 use lobby_service_tangent::tools::POST_DENIED;
+use lobby_service_tangent::wire::LOCKED;
 use lobby_testkit::atproto::AtprotoWorld;
 use lobby_testkit::hosts;
 use lobby_testkit::secrets_in;
 use lobby_testkit::space::SpaceServer;
-use lobby_testkit::world::LobbyWorld;
+use lobby_testkit::world::{LobbyWorld, new_post};
 use serde_json::{Value, json};
 
 const SYNTHETIC: &str = env!("CARGO_BIN_EXE_companion-lobby-synthetic");
@@ -31,7 +32,9 @@ const EXCHANGE: &str = "/api/v1/identity/exchange";
 struct World {
     atproto: AtprotoWorld,
     space: SpaceServer,
+    bea: String,
     welcome: String,
+    route: String,
     opening: String,
 }
 
@@ -46,11 +49,14 @@ fn world() -> World {
     let bea = space.add_participant("Bea", "bea.example.test");
     let opening = space.add_post("welcome", &bea, "Welcome, Ada! What brings you here?", None);
     let welcome = space.topic_ref("welcome");
+    let route = space.topic_route("welcome");
     let opening = space.post_ref(&opening);
     World {
         atproto,
         space,
+        bea,
         welcome,
+        route,
         opening,
     }
 }
@@ -114,7 +120,7 @@ fn a_companion_connects_through_the_proof_exchange_reads_what_is_new_and_replies
 
     // The connection is the proof exchange: the profile read with no
     // credential, one proof minted at the PDS for this Space and presented
-    // once in the header, and only the Space's token kept.
+    // once in the header, and only the Space's cookie kept.
     let requests = world.space.listener().requests();
     assert_eq!(requests[0].route(), "/.well-known/tangent-auth");
     assert!(requests[0].header("authorization").is_none());
@@ -154,40 +160,25 @@ fn a_companion_connects_through_the_proof_exchange_reads_what_is_new_and_replies
     assert!(woke.contains("reaches Tangent Space at main ("), "{woke}");
     assert!(woke.contains("start with tangent_arrive"), "{woke}");
 
-    // Reading what is new: other people's words arrive quoted, with the
-    // references to act on.
-    let arrived = call(&mut peer, 3, "tangent_arrive", json!({}));
-    assert_eq!(arrived["result"]["isError"], false, "{arrived}");
-    let news = said(&arrived);
-    assert!(
-        news.contains("\"Welcome, Ada! What brings you here?\""),
-        "{news}"
-    );
-    assert!(news.contains(&world.opening), "{news}");
-    // Who wrote it is named, in the text and in the structured answer a
-    // host may show instead, beside the reference to look them up by.
-    assert!(
-        news.contains("A new Post by \"Bea\" (participant \""),
-        "{news}"
-    );
-    let item = &arrived["result"]["structuredContent"]["attention"]["items"][0];
-    assert_eq!(item["quoted"]["actorName"], "Bea", "{item}");
-    assert_eq!(
-        reach["result"]["structuredContent"]["connections"][0]["startWith"], "tangent_arrive",
-        "the structured reach names where to start, as its text does"
-    );
+    // Reading a Topic: other people's words arrive quoted, with the
+    // addresses to act on.
     let read = call(
         &mut peer,
-        4,
+        3,
         "tangent_read_topic",
         json!({ "topic": world.welcome }),
     );
     assert_eq!(read["result"]["isError"], false, "{read}");
+    let opened = said(&read);
     assert!(
-        said(&read).contains("\"Say hello.\"; 1 Post, oldest first. You can post here."),
-        "{}",
-        said(&read)
+        opened.contains("; 2 Posts, oldest first. You can post here."),
+        "{opened}"
     );
+    assert!(
+        opened.contains("\"Welcome, Ada! What brings you here?\""),
+        "{opened}"
+    );
+    assert!(opened.contains(&world.opening), "{opened}");
     assert_eq!(
         read["result"]["structuredContent"]["replyWith"],
         json!({ "tool": "tangent_post", "topic": world.welcome }),
@@ -197,15 +188,20 @@ fn a_companion_connects_through_the_proof_exchange_reads_what_is_new_and_replies
         read["result"]["structuredContent"]["message"], read["result"]["content"][0]["text"],
         "and holds the text for a host that shows it alone"
     );
+    assert_eq!(
+        reach["result"]["structuredContent"]["connections"][0]["startWith"], "tangent_arrive",
+        "the structured reach names where to start, as its text does"
+    );
 
-    // Replying with a request id; the same request again is the same Post.
+    // Replying with a request id, through the form the page carries; the same
+    // request again is the same Post.
     let reply = json!({
         "topic": world.welcome,
         "text": "Hello, Bea! I came to read and to say hello.",
         "reply_to": world.opening,
         "request_id": "hello-bea-1",
     });
-    let posted = call(&mut peer, 5, "tangent_post", reply.clone());
+    let posted = call(&mut peer, 4, "tangent_post", reply.clone());
     assert_eq!(posted["result"]["isError"], false, "{posted}");
     let post = posted["result"]["structuredContent"]["post"].clone();
     assert!(
@@ -213,7 +209,7 @@ fn a_companion_connects_through_the_proof_exchange_reads_what_is_new_and_replies
             .is_some_and(|post| post.starts_with(&world.welcome)),
         "{posted}"
     );
-    let again = call(&mut peer, 6, "tangent_post", reply);
+    let again = call(&mut peer, 5, "tangent_post", reply);
     assert_eq!(again["result"]["isError"], false, "{again}");
     assert_eq!(
         again["result"]["structuredContent"]["post"], post,
@@ -223,7 +219,7 @@ fn a_companion_connects_through_the_proof_exchange_reads_what_is_new_and_replies
         .space
         .posts()
         .into_iter()
-        .filter(|post| post.request_id.as_deref() == Some("hello-bea-1"))
+        .filter(|post| post.text == "Hello, Bea! I came to read and to say hello.")
         .collect();
     assert_eq!(replies.len(), 1, "posted once");
     assert_eq!(
@@ -231,6 +227,25 @@ fn a_companion_connects_through_the_proof_exchange_reads_what_is_new_and_replies
         world.space.participant_of(ADA).expect("Ada's participant"),
         "as the companion's own participant"
     );
+
+    // What is new names who wrote it, in the text and in the structured
+    // answer a host may show instead, beside the reference to look them up by.
+    world.space.add_post(
+        "welcome",
+        &world.bea,
+        "Glad you came, Ada.",
+        Some(&replies[0].id),
+    );
+    let arrived = call(&mut peer, 6, "tangent_arrive", json!({}));
+    assert_eq!(arrived["result"]["isError"], false, "{arrived}");
+    let news = said(&arrived);
+    assert!(news.contains("\"Glad you came, Ada.\""), "{news}");
+    assert!(
+        news.contains("A reply to you by \"Bea\" (participant \""),
+        "{news}"
+    );
+    let item = &arrived["result"]["structuredContent"]["attention"]["items"][0];
+    assert_eq!(item["quoted"]["actorName"], "Bea", "{item}");
 
     // The journal names every call by the connection it went through.
     let calls: Vec<(String, String, String)> = install
@@ -247,15 +262,15 @@ fn a_companion_connects_through_the_proof_exchange_reads_what_is_new_and_replies
         .collect();
     assert_eq!(
         calls,
-        ["arrive", "read_topic", "post", "post"]
+        ["read_topic", "post", "post", "arrive"]
             .iter()
             .map(|tool| ((*tool).to_owned(), connection.clone(), "done".to_owned()))
             .collect::<Vec<_>>()
     );
 
-    // No proof, token or atproto secret reaches any projection or file the
+    // No proof, cookie or atproto secret reaches any projection or file the
     // daemon writes in plain text.
-    let mut secrets: Vec<String> = world.space.tokens();
+    let mut secrets: Vec<String> = world.space.cookies();
     secrets.extend(world.atproto.issued());
     let secrets: Vec<&str> = secrets.iter().map(String::as_str).collect();
     for (name, projected) in [
@@ -277,7 +292,7 @@ fn a_companion_connects_through_the_proof_exchange_reads_what_is_new_and_replies
 #[test]
 fn reach_names_the_account_and_how_the_space_knows_the_companion_and_never_lets_a_reader_write() {
     let world = world();
-    world.space.grant_only(&["welcome", "read"]);
+    world.space.hold_as_applicants(true);
     let (install, _, mut peer) = connected(&world, "space-reach");
     let participant = world.space.participant_of(ADA).expect("a participant");
     let origin = world.space.origin();
@@ -333,13 +348,17 @@ fn reach_names_the_account_and_how_the_space_knows_the_companion_and_never_lets_
 fn a_connection_revoked_while_a_reply_is_on_its_way_turns_it_into_an_unknown_outcome() {
     let world = world();
     let (install, connection, mut peer) = connected(&world, "space-late");
-    let route = "/api/v1/experience/topics/welcome/posts";
-    let held = world.space.listener().hold_answers(route);
+    let route = world.route.as_str();
+    let held = world
+        .space
+        .listener()
+        .hold_answers_to(route, "body", "Landing late.");
     peer.send(&json!({
         "jsonrpc": "2.0", "id": 10, "method": "tools/call",
         "params": { "name": "tangent_post", "arguments": { "topic": world.welcome, "text": "Landing late.", "request_id": "late-1" } }
     }));
-    world.space.listener().wait_for(route, 1);
+    // The page that offers the form, and then the form.
+    world.space.listener().wait_for_handled(route, 2);
     let revoked = install.operator(
         "POST",
         &format!("/api/connections/{connection}/revoke"),
@@ -395,7 +414,7 @@ fn a_connection_revoked_while_a_reply_is_on_its_way_turns_it_into_an_unknown_out
     assert!(!said(&after).contains("revoked"), "never a guess at why");
     assert_eq!(
         world.space.listener().count(route),
-        1,
+        2,
         "nothing more reached the Space"
     );
     install.stop();
@@ -405,7 +424,7 @@ fn a_connection_revoked_while_a_reply_is_on_its_way_turns_it_into_an_unknown_out
 fn a_read_cut_off_by_a_revoke_says_which_connection_and_to_call_reach() {
     let world = world();
     let (install, connection, mut peer) = connected(&world, "space-read-revoked");
-    let route = "/api/v1/experience/topics/welcome";
+    let route = world.route.as_str();
     let held = world.space.listener().hold_answers(route);
     peer.send(&json!({
         "jsonrpc": "2.0", "id": 15, "method": "tools/call",
@@ -436,10 +455,10 @@ fn a_read_cut_off_by_a_revoke_says_which_connection_and_to_call_reach() {
 }
 
 #[test]
-fn a_space_that_refuses_reads_as_its_reason_with_a_next_step_and_a_suspension_too() {
+fn a_space_that_refuses_reads_as_its_reason_with_a_next_step_and_a_ban_too() {
     let world = world();
     let (install, _, mut peer) = connected(&world, "space-refused");
-    world.space.refuse_writes_in("welcome");
+    world.space.refuse_replies_in("welcome");
     let refused = call(
         &mut peer,
         20,
@@ -454,17 +473,25 @@ fn a_space_that_refuses_reads_as_its_reason_with_a_next_step_and_a_suspension_to
         POST_DENIED
     );
 
-    // A Space that stops taking the token is given a fresh proof once; one
-    // that suspended the account says so, and nothing loops.
-    world.space.suspend(ADA);
-    let exchanges = world.space.listener().count(EXCHANGE);
-    let suspended = call(&mut peer, 21, "tangent_arrive", json!({}));
-    assert_eq!(suspended["result"]["isError"], true, "{suspended}");
-    assert_eq!(
-        suspended["result"]["structuredContent"]["outcome"],
-        "refused"
+    // A locked Topic offers no form, and says why.
+    world.space.lock("welcome");
+    let locked = call(
+        &mut peer,
+        22,
+        "tangent_post",
+        json!({ "topic": world.welcome, "text": "Hello?" }),
     );
-    assert_eq!(said(&suspended), lobby_service_tangent::SUSPENDED);
+    assert_eq!(said(&locked), LOCKED);
+
+    // A Space that ended the sign-in is given a fresh proof once; one that
+    // banned the account says so, and nothing loops.
+    world.space.end_sign_ins();
+    world.space.ban(ADA);
+    let exchanges = world.space.listener().count(EXCHANGE);
+    let banned = call(&mut peer, 21, "tangent_arrive", json!({}));
+    assert_eq!(banned["result"]["isError"], true, "{banned}");
+    assert_eq!(banned["result"]["structuredContent"]["outcome"], "refused");
+    assert_eq!(said(&banned), lobby_service_tangent::SUSPENDED);
     assert_eq!(world.space.listener().count(EXCHANGE), exchanges + 1);
     let lobby = install.json("/api/lobby");
     assert_eq!(
@@ -475,10 +502,10 @@ fn a_space_that_refuses_reads_as_its_reason_with_a_next_step_and_a_suspension_to
 }
 
 #[test]
-fn a_token_the_space_stops_taking_is_exchanged_again_once_and_kept() {
+fn a_sign_in_the_space_ended_is_proved_again_once_and_kept() {
     let world = world();
     let (install, _, mut peer) = connected(&world, "space-again");
-    world.space.end_tokens();
+    world.space.end_sign_ins();
     let read = call(
         &mut peer,
         30,
@@ -504,18 +531,104 @@ fn a_token_the_space_stops_taking_is_exchanged_again_once_and_kept() {
     assert_eq!(
         world.space.listener().count(EXCHANGE),
         2,
-        "the new token was kept for the next call"
+        "the new cookie was kept for the next call"
     );
     install.stop();
 }
 
-/// Ada connected, then the Space stops taking its token and the account's
-/// server stops taking its sign-in: the next call must establish the
-/// connection again, and the proof it needs cannot be minted.
+#[test]
+fn two_companions_at_one_space_hold_a_cookie_each_and_keep_it_across_a_restart() {
+    const CY: &str = "did:plc:cycycycycycycycycycycycy";
+    const CY_HANDLE: &str = "cy.example.test";
+    let world = world();
+    world.space.name_account(CY, "Cy", CY_HANDLE);
+    world.atproto.add_account(CY_HANDLE, CY);
+    let (install, _, mut ada) = connected(&world, "space-two");
+
+    world.atproto.sign_in_as(CY);
+    let cy_id = install.create("cy");
+    let started = install.operator(
+        "POST",
+        "/api/sign-ins",
+        &json!({ "companion": cy_id, "kind": "atproto", "hint": "" }),
+    );
+    assert_eq!(started.status, 201, "{}", text(&started));
+    let url = body(&started)["url"].as_str().expect("url").to_owned();
+    assert_eq!(install.arrive(&world.atproto.approve(&url)).status, 200);
+    let credentials = install.json("/api/lobby")["credentials"].clone();
+    let credential = credentials
+        .as_array()
+        .expect("credentials")
+        .iter()
+        .find(|credential| credential["companion"] == cy_id.as_str())
+        .expect("Cy's credential")["id"]
+        .clone();
+    let granted = install.operator(
+        "POST",
+        "/api/connections",
+        &json!({ "companion": cy_id, "credential": credential, "service": "tangent", "address": world.space.origin(), "label": "main" }),
+    );
+    assert_eq!(granted.status, 201, "{}", text(&granted));
+    let mut cy = install.attach("cy");
+    initialize(&mut cy);
+
+    // One topic, one request id, two companions: two Posts, each its own.
+    let write = |text: &str| json!({ "topic": world.welcome, "text": text, "request_id": "hello" });
+    let from_ada = call(&mut ada, 120, "tangent_post", write("From Ada."));
+    let from_cy = call(&mut cy, 121, "tangent_post", write("From Cy."));
+    assert_eq!(from_ada["result"]["isError"], false, "{from_ada}");
+    assert_eq!(from_cy["result"]["isError"], false, "{from_cy}");
+    let author = |text: &str| {
+        world
+            .space
+            .posts()
+            .into_iter()
+            .find(|post| post.text == text)
+            .map(|post| post.author)
+    };
+    assert_eq!(author("From Ada.").as_deref(), Some(ADA));
+    assert_eq!(author("From Cy.").as_deref(), Some(CY));
+    let arrived = call(&mut cy, 122, "tangent_arrive", json!({}));
+    assert_eq!(
+        arrived["result"]["structuredContent"]["you"]["quoted"]["participant"],
+        CY
+    );
+
+    // Each signed in once, with a cookie of its own, and neither is in a file
+    // the daemon writes in plain text.
+    assert_eq!(world.space.listener().count(EXCHANGE), 2);
+    let cookies = world.space.cookies();
+    let secrets: Vec<&str> = cookies.iter().map(String::as_str).collect();
+    assert!(
+        secrets_in(&install.plain_files(), &secrets).is_empty(),
+        "cookies stay sealed"
+    );
+
+    // A restarted lobby still holds them: nothing proves itself again.
+    drop(ada);
+    drop(cy);
+    install.stop();
+    install.open();
+    let mut ada = install.attach("ada");
+    initialize(&mut ada);
+    let read = call(
+        &mut ada,
+        123,
+        "tangent_read_topic",
+        json!({ "topic": world.welcome }),
+    );
+    assert_eq!(read["result"]["isError"], false, "{read}");
+    assert_eq!(world.space.listener().count(EXCHANGE), 2);
+    install.stop();
+}
+
+/// Ada connected, then the Space ends its sign-in and the account's server
+/// stops taking its sign-in: the next call must establish the connection
+/// again, and the proof it needs cannot be minted.
 fn signed_out_mid_call(world: &World, label: &str, id: i64, tool: &str, arguments: Value) {
     let (install, _, mut peer) = connected(world, label);
     let posts = world.space.posts().len();
-    world.space.end_tokens();
+    world.space.end_sign_ins();
     world.atproto.end_access_tokens();
     world.atproto.refuse_refreshes();
     let answer = call(&mut peer, id, tool, arguments);
@@ -583,17 +696,26 @@ fn flipped_mid_call(
     label: &str,
     tool: &str,
     arguments: Value,
-    route: &str,
     expected: (&str, &str),
 ) {
     let (install, _, mut first) = connected(world, label);
-    let held = world.space.listener().hold_answers(route);
+    let route = world.route.as_str();
+    let writes = tool == "tangent_post";
+    let held = if writes {
+        let body = arguments["text"].as_str().expect("the words");
+        world.space.listener().hold_answers_to(route, "body", body)
+    } else {
+        world.space.listener().hold_answers(route)
+    };
     first.send(&json!({
         "jsonrpc": "2.0", "id": 80, "method": "tools/call",
         "params": { "name": tool, "arguments": arguments }
     }));
-    world.space.listener().wait_for_handled(route, 1);
-    world.space.end_tokens();
+    world
+        .space
+        .listener()
+        .wait_for_handled(route, if writes { 2 } else { 1 });
+    world.space.end_sign_ins();
     world.atproto.end_access_tokens();
     world.atproto.refuse_refreshes();
     let mut second = install.attach("ada");
@@ -631,7 +753,6 @@ fn a_read_whose_account_another_call_found_needs_a_sign_in_says_so_and_shows_not
         "space-flipped-read",
         "tangent_read_topic",
         json!({ "topic": topic }),
-        "/api/v1/experience/topics/welcome",
         (
             "needs_sign_in",
             "The account behind Tangent Space at main needs the sponsor to sign it in again on the manager page; this read's answer is not shown, and its tools come back once they do.",
@@ -648,7 +769,6 @@ fn a_write_whose_account_another_call_found_needs_a_sign_in_is_unknown_and_says_
         "space-flipped-write",
         "tangent_post",
         json!({ "topic": topic, "text": "Held at the door.", "request_id": "held-1" }),
-        "/api/v1/experience/topics/welcome/posts",
         (
             "outcome_unknown",
             "The account behind Tangent Space at main needed signing in again while this write was on its way, so the lobby cannot say whether the service carried it out. Once the sponsor signs it in again, read the target before writing again.",
@@ -668,27 +788,31 @@ fn a_write_whose_account_another_call_found_needs_a_sign_in_is_unknown_and_says_
 fn a_write_whose_own_renewal_succeeded_while_another_call_found_the_account_signed_out_is_unknown()
 {
     let world = world();
-    // Every token the Space issues is near its expiry, so every call
-    // establishes its connection again before it is made.
-    world.space.issue_for(60);
     let (install, _, mut first) = connected(&world, "space-renewed-then-flipped");
-    // The first call's proof is minted only after its account is renewed
-    // at its server, which succeeds; the Space then refuses the Post, and
-    // that answer is held while a second mind finds the account signed out.
-    world.space.refuse_writes_in("welcome");
+    // The Space ended the sign-in, so the first call proves the account again,
+    // and that proof is minted only after its account is renewed at its
+    // server, which succeeds; the Space then refuses the Post, and that answer
+    // is held while a second mind finds the account signed out.
+    world.space.end_sign_ins();
+    world.space.refuse_replies_in("welcome");
     world.atproto.end_access_tokens();
-    let route = "/api/v1/experience/topics/welcome/posts";
-    let held = world.space.listener().hold_answers(route);
+    let route = world.route.as_str();
+    let held = world
+        .space
+        .listener()
+        .hold_answers_to(route, "body", "Renewed first.");
     first.send(&json!({
         "jsonrpc": "2.0", "id": 90, "method": "tools/call",
         "params": { "name": "tangent_post", "arguments": { "topic": world.welcome, "text": "Renewed first.", "request_id": "renewed-1" } }
     }));
-    world.space.listener().wait_for_handled(route, 1);
+    // The page read as a visitor, the page read again, and the form.
+    world.space.listener().wait_for_handled(route, 3);
     assert_eq!(
         world.space.listener().count(EXCHANGE),
         2,
         "the first call established its connection again"
     );
+    world.space.end_sign_ins();
     world.atproto.end_access_tokens();
     world.atproto.refuse_refreshes();
     let mut second = install.attach("ada");
@@ -773,7 +897,7 @@ fn an_argument_the_mind_got_wrong_is_named_in_the_refusal() {
         &mut peer,
         103,
         "tangent_post",
-        json!({ "topic": "https://elsewhere.example.test::home::welcome", "text": "Hi." }),
+        json!({ "topic": "https://elsewhere.example.test/t/home/welcome", "text": "Hi." }),
     );
     assert!(
         said(&foreign).starts_with("topic holds a reference of another Space."),
@@ -870,10 +994,7 @@ fn a_page_of_long_posts_in_another_script_fits_its_budget_and_says_what_it_left_
         !text.contains("cut this result short"),
         "the page fits whole: {text}"
     );
-    assert!(
-        text.contains("left out to keep this answer within its reading budget; read with limit"),
-        "{text}"
-    );
+    assert!(text.contains("There is more: pass cursor"), "{text}");
     assert!(
         text.contains("To mark these read, call tangent_mark_read"),
         "{text}"
@@ -886,25 +1007,32 @@ fn a_page_of_long_posts_in_another_script_fits_its_budget_and_says_what_it_left_
         "{} Posts",
         posts.len()
     );
-    assert_eq!(
-        posts.last().expect("the newest")["post"],
-        planted.last().expect("planted").as_str(),
-        "the newest Posts are the ones shown"
-    );
-    assert!(
-        structured["cursor"].is_null(),
-        "no cursor that would skip the Posts left out"
-    );
-    // A host that shows the structured answer alone hears the same: how
-    // many were left out, the limit that reads them, and a message.
-    assert_eq!(
-        structured["leftOut"],
-        json!(10 - posts.len()),
-        "{structured}"
-    );
-    assert_eq!(structured["readWithLimit"], json!(posts.len()));
     assert!(structured["message"].is_string(), "{structured}");
-    assert!(structured["readCursor"].is_string());
+    assert!(structured["through"].is_u64(), "{structured}");
+
+    // A host that shows the structured answer alone follows its cursor to
+    // the Posts this answer had no room for, and reaches the newest.
+    let mut cursor = structured["cursor"].as_str().expect("a cursor").to_owned();
+    let mut reached = Vec::new();
+    for id in 51..70 {
+        let next = call(
+            &mut peer,
+            id,
+            "tangent_read_topic",
+            json!({ "topic": world.welcome, "cursor": cursor }),
+        );
+        let structured = &next["result"]["structuredContent"];
+        reached.extend(structured["posts"].as_array().expect("posts").clone());
+        let Some(further) = structured["cursor"].as_str() else {
+            break;
+        };
+        cursor = further.to_owned();
+    }
+    assert_eq!(
+        reached.last().expect("the newest")["post"],
+        planted.last().expect("planted").as_str(),
+        "the newest Post is reached"
+    );
     install.stop();
 }
 
@@ -945,6 +1073,9 @@ fn the_recorded_claude_code_mind_in_a_space_replays_through_the_shim() {
         &json!({ "companion": ada, "credential": credential, "service": "tangent", "address": world.space.origin(), "label": "main" }),
     );
     assert_eq!(granted.status, 201, "{}", text(&granted));
+    // What the walk's control page did once the connection was made: a Post
+    // that is new to the mind when it arrives.
+    new_post(&world.space);
 
     let reach = recording
         .sent()
@@ -1032,6 +1163,6 @@ fn the_recorded_claude_code_mind_in_a_space_replays_through_the_shim() {
     let posts = world.space.posts();
     assert_eq!(posts.len(), before + 1, "the mind posted one reply");
     let reply = posts.last().expect("the reply");
-    assert!(reply.reply_to.is_some() && reply.request_id.is_some());
+    assert!(reply.reply_to.is_some());
     install.stop();
 }

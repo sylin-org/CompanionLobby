@@ -267,7 +267,7 @@ fn one_account_serves_the_space_and_bluesky_and_every_call_is_journaled_to_its_s
     );
 
     // No token or proof reaches any projection or plain file.
-    let mut secrets: Vec<String> = world.space.tokens();
+    let mut secrets: Vec<String> = world.space.cookies();
     secrets.extend(world.atproto.issued());
     secrets.extend(
         resources

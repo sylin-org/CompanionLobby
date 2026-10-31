@@ -1,54 +1,39 @@
 //! What a Space issued for one connection.
 //!
-//! The identity exchange answers a participant credential and its token.
-//! The connection keeps exactly what the Space issued and nothing the
-//! account minted: the participant the Space made of the account, the
-//! name its card shows for that participant when the card could be read
-//! as the connection was established, the credential's id, its token, when
-//! it expires and the grants it holds.
-//! The token is presented as `Bearer` on every call and never printed.
+//! The identity exchange answers `204` and the cookies that sign the account
+//! in. The connection keeps exactly what the Space issued and nothing the
+//! account minted: its own [`Jar`] of those cookies, and what the Space's
+//! door last said of it, when that could be read: the participant the Space
+//! made of the account, the name it shows for them, and whether it lets them
+//! post. The jar goes with every request and is never printed.
 
-use lobby_contracts::{SealedIssued, Secret};
+use lobby_contracts::SealedIssued;
 use serde_json::{Value, json};
 
+use crate::jar::Jar;
+
 /// The format tag of what this adapter keeps.
-pub const FORMAT: &str = "tangent-1";
-/// The longest token kept.
-pub const TOKEN_LIMIT: usize = 4096;
-/// The longest participant or credential id kept.
+pub const FORMAT: &str = "tangent-2";
+/// The longest participant id kept.
 pub const ID_LIMIT: usize = 512;
 /// The most characters of the participant's name kept.
 pub const NAME_LIMIT: usize = 200;
 
 /// What a Space issued for one connection.
+#[derive(Debug, Clone)]
 pub struct Issued {
-    /// The participant the Space made of the account.
-    pub participant: String,
-    /// The name the Space's card shows for that participant, as it read
-    /// when the connection was established, if it could be read.
+    /// The participant the Space made of the account, as its door said.
+    pub participant: Option<String>,
+    /// The name the Space shows for that participant, as its door said.
     pub name: Option<String>,
-    /// The participant credential's id.
-    pub credential: String,
-    /// The token presented on every call.
-    pub token: Secret,
-    /// When the credential expires, in seconds since the Unix epoch.
-    pub expires_at: i64,
-    /// The grants it holds, in the Space's words.
-    pub grants: Vec<String>,
+    /// Whether its door said the participant may post.
+    pub posts: bool,
+    /// This connection's cookies, which print by name alone.
+    pub jar: Jar,
 }
 
-impl std::fmt::Debug for Issued {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Issued")
-            .field("participant", &self.participant)
-            .field("name", &self.name)
-            .field("expires_at", &self.expires_at)
-            .field("grants", &self.grants)
-            .finish_non_exhaustive()
-    }
-}
-
-fn id_shaped(text: &str) -> bool {
+/// Whether `text` is a participant's id as kept.
+pub fn id_shaped(text: &str) -> bool {
     !text.is_empty() && text.len() <= ID_LIMIT && text.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
@@ -61,9 +46,14 @@ pub fn name_shaped(text: &str) -> bool {
 }
 
 impl Issued {
-    /// Whether the credential holds `grant`.
-    pub fn grants(&self, grant: &str) -> bool {
-        self.grants.iter().any(|held| held == grant)
+    /// A connection whose exchange set `jar`, before its door was read.
+    pub fn signed_in(jar: Jar) -> Self {
+        Self {
+            participant: None,
+            name: None,
+            posts: false,
+            jar,
+        }
     }
 
     /// The sealed form the lobby keeps.
@@ -73,10 +63,8 @@ impl Issued {
                 "format": FORMAT,
                 "participant": self.participant,
                 "name": self.name,
-                "credential": self.credential,
-                "token": self.token.expose(),
-                "expiresAt": self.expires_at,
-                "grants": self.grants,
+                "posts": self.posts,
+                "cookies": self.jar.encode(),
             })
             .to_string()
             .into_bytes(),
@@ -86,73 +74,24 @@ impl Issued {
     /// What this adapter kept, with every field in its own shape.
     pub fn decode(sealed: &SealedIssued) -> Option<Self> {
         let body: Value = serde_json::from_slice(sealed.as_bytes()).ok()?;
-        if body["format"] != FORMAT || body.as_object()?.len() != 7 {
+        if body["format"] != FORMAT || body.as_object()?.len() != 5 {
             return None;
         }
+        let participant = match &body["participant"] {
+            Value::Null => None,
+            Value::String(id) if id_shaped(id) => Some(id.clone()),
+            _ => return None,
+        };
         let name = match &body["name"] {
             Value::Null => None,
             Value::String(name) if name_shaped(name) => Some(name.clone()),
             _ => return None,
         };
-        let text = |field: &str| body[field].as_str().filter(|text| id_shaped(text));
-        let token = body["token"]
-            .as_str()
-            .filter(|token| id_shaped(token) && token.len() <= TOKEN_LIMIT)?;
-        let grants = body["grants"]
-            .as_array()?
-            .iter()
-            .map(|grant| {
-                grant
-                    .as_str()
-                    .filter(|grant| id_shaped(grant))
-                    .map(str::to_owned)
-            })
-            .collect::<Option<Vec<_>>>()?;
         Some(Self {
-            participant: text("participant")?.to_owned(),
+            participant,
             name,
-            credential: text("credential")?.to_owned(),
-            token: Secret::new(token),
-            expires_at: body["expiresAt"].as_i64()?,
-            grants,
-        })
-    }
-
-    /// What the exchange answered, when it keeps the profile: a
-    /// `tangent_participant` credential naming a participant, an id, an
-    /// expiry and grants, with a token. The participant's name is not in
-    /// it; the adapter reads it from the participant's card.
-    pub fn from_exchange(answer: &Value) -> Option<Self> {
-        if answer["profile"] != "tangent_participant" {
-            return None;
-        }
-        let credential = &answer["credential"];
-        let text = |value: &Value| {
-            value
-                .as_str()
-                .filter(|text| id_shaped(text))
-                .map(str::to_owned)
-        };
-        let token = answer["token"]
-            .as_str()
-            .filter(|token| id_shaped(token) && token.len() <= TOKEN_LIMIT)?;
-        let grants = credential["grants"]
-            .as_array()?
-            .iter()
-            .map(|grant| {
-                grant
-                    .as_str()
-                    .filter(|grant| id_shaped(grant))
-                    .map(str::to_owned)
-            })
-            .collect::<Option<Vec<_>>>()?;
-        Some(Self {
-            participant: text(&credential["participantId"])?,
-            name: None,
-            credential: text(&credential["id"])?,
-            token: Secret::new(token),
-            expires_at: credential["expiresAt"].as_str().and_then(parse_rfc3339)?,
-            grants,
+            posts: body["posts"].as_bool()?,
+            jar: Jar::decode(&body["cookies"])?,
         })
     }
 }
@@ -256,38 +195,22 @@ mod tests {
     }
 
     #[test]
-    fn what_was_issued_round_trips_and_never_prints_its_token() {
-        let answer = json!({
-            "profile": "tangent_participant",
-            "credential": {
-                "id": "cred-1",
-                "participantId": "prt_1",
-                "name": "Companion Lobby",
-                "grants": ["welcome", "read", "post"],
-                "createdAt": "2026-09-21T14:13:20Z",
-                "expiresAt": "2026-09-28T14:13:20Z",
-                "revokedAt": null,
-            },
-            "token": "ts_0123456789",
-        });
-        let issued = Issued::from_exchange(&answer).expect("kept");
-        assert!(issued.grants("post") && !issued.grants("manage"));
-        assert!(!format!("{issued:?}").contains("ts_0123456789"));
+    fn what_was_issued_round_trips_and_never_prints_a_cookie() {
+        let mut jar = Jar::default();
+        jar.absorb("signed=in0123456789; path=/", "/", false, 0);
+        let mut issued = Issued::signed_in(jar);
+        issued.participant = Some("prt_1".to_owned());
+        issued.name = Some("Ada".to_owned());
+        issued.posts = true;
+        assert!(!format!("{issued:?}").contains("in0123456789"));
         let again = Issued::decode(&issued.encode()).expect("decodes");
-        assert_eq!(again.participant, "prt_1");
-        assert_eq!(again.name, None);
-        let mut named = Issued::decode(&issued.encode()).expect("decodes");
-        named.name = Some("Ada".to_owned());
-        let named = Issued::decode(&named.encode()).expect("decodes");
-        assert_eq!(named.name.as_deref(), Some("Ada"));
-        assert_eq!(again.token.expose(), "ts_0123456789");
-        assert_eq!(again.expires_at, 1_790_000_000 + 7 * 86_400);
-        let mut broken = answer.clone();
-        broken["profile"] = json!("other");
-        assert!(Issued::from_exchange(&broken).is_none());
-        let mut tokenless = answer;
-        tokenless["token"] = json!("");
-        assert!(Issued::from_exchange(&tokenless).is_none());
+        assert_eq!(again.participant.as_deref(), Some("prt_1"));
+        assert_eq!(again.name.as_deref(), Some("Ada"));
+        assert!(again.posts);
+        assert_eq!(again.jar, issued.jar);
+        let unread = Issued::decode(&Issued::signed_in(Jar::default()).encode()).expect("decodes");
+        assert_eq!(unread.participant, None);
+        assert!(!unread.posts);
         assert!(Issued::decode(&SealedIssued::new(b"{\"format\":\"board-1\"}".to_vec())).is_none());
     }
 }

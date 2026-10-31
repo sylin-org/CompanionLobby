@@ -15,21 +15,21 @@ your build.
 | Codex, Windows | Not yet: not installed on the recording machine | To be recorded with the configuration below. |
 
 The Claude Code conversations are test fixtures in the test kit, replayed
-against the shim on every test run: `hosts::claude_code`, which calls
-`reach` once, and `hosts::claude_code_in_a_space`, a headless mind on the
-haiku model attached to a lobby whose only connection is `lobby-world`'s
-fake Space, asked to find out where it can go, read what is new and reply
-to the newest conversation in one sentence. It called `reach`, asked what
-is new and read who wrote each Post by name, read the Topic of the newest
-Post, replied to Bea's Post there with a request id of its own and marked
-the Topic read, copying every reference from an earlier answer, with no
-refused call; the replay moves the Space's origin to the fresh
+against the shim on every test run: `hosts::claude_code`, on 2.1.303, which
+calls `reach` once, and `hosts::claude_code_in_a_space`, on 2.1.311, a headless
+mind on the haiku model attached to a lobby whose only connection is
+`lobby-world`'s fake Space, where Cy has just posted, asked to find out where
+it can go, read what is new and reply to the newest conversation in one
+sentence. It called `reach`, asked what is new, listed the Topics and found the one active last, read it and who wrote each Post by name, and
+replied to Cy's Post there with a request id of its own, copying every
+reference from an earlier answer, with no refused call; the replay moves the
+Space's origin to the fresh
 world's and checks that every tool description and schema and every answer
 reads as it did when it was recorded, and that one reply landed. A change to
 anything a mind reads there is recorded again on purpose, with a mind
 walking it again.
 
-Claude Code 2.1.303 shows the mind a result's structured content, and not
+Claude Code shows the mind a result's structured content, and not
 its text, whenever a result has one: the walk in a Space keeps, beside its
 frames, what the host's own `stream-json` output says it handed the mind
 for each call, and a test checks that each is the lobby's structured
@@ -40,9 +40,9 @@ the facts and next steps its text gives in any case: `reach` names the
 companion's `accounts`, and each connection's service `title`, its
 `account`, how the service knows the companion there as `knownAs`, what
 it `allows` there and its tool to start with as `startWith`; a refusal gives its sentence beside its `outcome`;
-what is new names each person by `actorName` beside their reference, as a
-Topic's Posts give `authorName`, and a Topic read names how to reply in
-`replyWith`. A host that shows the text reads the same answer in prose.
+a reply to the companion names who wrote it by `actorName` beside their
+reference, as a Topic's Posts give `authorName`, and a Topic read names how to
+reply in `replyWith`. A host that shows the text reads the same answer in prose.
 
 So far a mind is shown to list and call `reach` through the shim from Claude
 Code on Windows only. Claude Desktop and Codex stay open until each is

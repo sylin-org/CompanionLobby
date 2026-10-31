@@ -4,49 +4,48 @@
 //! the way the real server does, as far as a companion's journey goes:
 //!
 //! * `GET /.well-known/tangent-auth` publishes the Space's authentication
-//!   profile: its canonical origin, the service proof it takes (method and
+//!   profile: its canonical origin and the service proof it takes (method and
 //!   purpose `org.sylin.tangent.exchangeIdentity`, the audience Tangent
 //!   derives from a loopback origin, `did:web:localhost%3A<port>#tangent`,
 //!   ES256 or ES256K, in the `Authorization` header, at the exchange
-//!   endpoint) and the participant credential it issues;
+//!   endpoint);
 //! * `POST /api/v1/identity/exchange` takes a proof the atproto world's PDS
-//!   minted, presented once as `Bearer`: it must be for this audience and
-//!   method and not expired, and its `iss` and `jti` are claimed before
-//!   anything is issued, so a proof is never taken twice. The body names
-//!   the credential (1 to 80 printable characters), its life in days (1 to
-//!   30) and the grants asked for (`welcome`, `read`, `post`, `manage`);
-//!   any other member is refused. The answer is the participant credential
-//!   and its `ts_` token;
-//! * the experience routes under `/api/v1/experience` take the token as
-//!   `Bearer`: arriving, the Tangents and their Topics, a Topic's window of
-//!   Posts, what is new since a checkpoint, posting with a request id
-//!   (the same request answers with the same Post; another post under the
-//!   same id is a `request_conflict`), starting a Topic, editing and
-//!   removing one's own Post, the read position, membership, watching,
-//!   mentionables, a participant's card and reporting a Post. Every write
-//!   but a `DELETE` must say `Content-Type: application/json`, or it is
-//!   answered 415;
-//! * a token the Space does not take (expired, revoked, or its participant
-//!   suspended) is answered 401 `participant_authentication_required` with
-//!   `WWW-Authenticate: Bearer`; a refusal is 403 with the problem shape
-//!   `{code, message, field, retryable}`.
+//!   minted, presented once as `Bearer` with no body: it must be for this
+//!   audience and method and not expired, and it is claimed, so a proof is
+//!   never taken twice. It answers `204` and a cookie that signs the account
+//!   in;
+//! * every page answers JSON when asked: the door `/`, the Tangents `/t`, a
+//!   Tangent `/t/<tangent>`, a Topic `/t/<tangent>/<topic>` with one window of
+//!   its replies, a Post's address, a Post's `edit` and `report` pages, a new
+//!   Topic's page `/t/<tangent>/new` and a participant `/p/<id or handle>`.
+//!   Each says who reads it in `who`, which is absent to a visitor, whom a
+//!   private Space answers 401 with the `sign-in` gate;
+//! * every write a page offers is a form in its JSON, saying where it posts,
+//!   its fields and its token, and is absent where the reader may not write,
+//!   the page's `gate` saying why. A page that carries a form sets the
+//!   antiforgery cookie when the reader has none, and its token is good only
+//!   with that cookie and that reader, in the `RequestVerificationToken`
+//!   header beside one JSON object;
+//! * a new Post's `id` is a TID of the sender's: the same one with the same
+//!   words answers the same Post, with other words answers 409, and in another
+//!   Topic or from another sender answers 400;
+//! * a refusal is a problem, `{status, title, detail, gate}`;
+//! * `POST /auth/logout` signs out.
 //!
-//! Knobs change the profile it publishes, refuse proofs, fail exchanges
-//! for a while, suspend an
-//! account, end every token it issued, issue tokens that expire soon,
-//! refuse writes in a Topic, and grant fewer grants than asked. The
-//! listener records every request and can hold a route, or its answer,
-//! mid-flight.
+//! Knobs change the profile it publishes, refuse proofs, fail exchanges for
+//! a while, ban an account, end every sign-in it made, hold every reader as an
+//! applicant, lock a Topic, refuse the forms a Topic offered, and close the
+//! Space to visitors. The listener records every request and can hold a
+//! route, or its answer, mid-flight.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use serde_json::{Map, Value, json};
 
 use crate::atproto::Proofs;
 use crate::listener::{Listener, Received, Reply};
-use crate::unique_token;
+use crate::{percent_decode, unique_token};
 
 /// The well-known path of the authentication profile.
 pub const PROFILE_PATH: &str = "/.well-known/tangent-auth";
@@ -54,17 +53,24 @@ pub const PROFILE_PATH: &str = "/.well-known/tangent-auth";
 pub const EXCHANGE_PATH: &str = "/api/v1/identity/exchange";
 /// The method and purpose of the proof the Space takes.
 pub const EXCHANGE_METHOD: &str = "org.sylin.tangent.exchangeIdentity";
-/// The root of the experience routes.
-pub const ROOT: &str = "/api/v1/experience";
+/// The header a form's token travels in.
+pub const TOKEN_HEADER: &str = "requestverificationtoken";
 /// What the Space calls itself.
 pub const PLACE_LABEL: &str = "Lobby Test Space";
+
+const SESSION_COOKIE: &str = ".AspNetCore.Koan.cookie";
+const ANTIFORGERY_COOKIE: &str = ".AspNetCore.Antiforgery.lobbytest";
+const WINDOW_MOST: usize = 25;
+const TOPICS_MOST: usize = 30;
+const DOOR_TANGENTS_MOST: usize = 8;
+const ITEMS_MOST: usize = 5;
 
 /// What the authentication profile says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     /// The profile the Space really has.
     Ready,
-    /// 503 `exchange_unconfigured`: the Space takes no proofs yet.
+    /// 503 `exchange_unconfigured`: the Space has no address of its own.
     Unconfigured,
     /// A method other than the exchange's.
     WrongMethod,
@@ -77,19 +83,16 @@ pub enum Profile {
 }
 
 #[derive(Debug, Clone)]
-struct Credential {
-    token: String,
-    participant: String,
-    grants: Vec<String>,
-    expires_at: i64,
+struct SignedIn {
+    cookie: String,
+    did: String,
     ended: bool,
 }
 
 #[derive(Debug, Clone)]
 struct Participant {
     reference: String,
-    did: Option<String>,
-    handle: Option<String>,
+    handle: String,
     display_name: String,
 }
 
@@ -98,7 +101,6 @@ struct Tangent {
     key: String,
     name: String,
     description: String,
-    members: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,14 +108,16 @@ struct Topic {
     key: String,
     tangent: String,
     title: String,
-    brief: String,
-    refusing_writes: bool,
+    root: String,
+    locked: bool,
+    refusing: bool,
+    last_sequence: u64,
 }
 
 /// One Post on the fake Space.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Post {
-    /// Its id, the last segment of its reference.
+    /// Its id, the last segment of its address.
     pub id: String,
     /// The key of its Topic.
     pub topic: String,
@@ -121,15 +125,16 @@ pub struct Post {
     pub author: String,
     /// What it says.
     pub text: String,
-    /// The id of the Post it replies to.
+    /// The id of the Post it replies to, when that is not the Topic.
     pub reply_to: Option<String>,
-    /// The request id it was posted under, when a participant posted it.
-    pub request_id: Option<String>,
-    /// Whether its author removed it.
+    /// Whether it was removed.
     pub removed: bool,
-    /// Whether its author edited it.
+    /// Whether it was edited.
     pub edited: bool,
-    seq: u64,
+    root: bool,
+    sequence: u64,
+    version: u64,
+    log: u64,
 }
 
 #[derive(Debug, Default)]
@@ -140,19 +145,21 @@ struct Floor {
     claimed: HashSet<String>,
     rejecting_proofs: bool,
     failing_exchanges: bool,
-    suspended: HashSet<String>,
-    lifetime_secs: Option<i64>,
-    granting: Option<Vec<String>>,
-    credentials: Vec<Credential>,
+    banned: HashSet<String>,
+    applicants: bool,
+    private: bool,
+    signed_in: Vec<SignedIn>,
+    antiforgery: HashMap<String, String>,
     participants: Vec<Participant>,
     tangents: Vec<Tangent>,
     topics: Vec<Topic>,
     posts: Vec<Post>,
-    read: HashMap<(String, String), u64>,
-    watches: HashMap<(String, String), String>,
-    reports: Vec<(String, String)>,
-    exchanges: Vec<Value>,
-    seq: u64,
+    topic_seen: HashMap<(String, String), i64>,
+    door_seen: HashMap<String, u64>,
+    watches: HashSet<(String, String)>,
+    reports: Vec<(String, String, String)>,
+    exchanges: Vec<Vec<u8>>,
+    log: u64,
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -203,16 +210,62 @@ pub struct SpaceServer {
 }
 
 /// A problem in the shape the Space answers.
-fn problem(status: u16, code: &str, message: &str) -> Reply {
-    Reply::json(
-        status,
-        &json!({ "code": code, "message": message, "field": null, "retryable": false }),
+fn problem(status: u16, title: &str, detail: &str, gate: Option<&str>) -> Reply {
+    let mut body = json!({ "status": status, "title": title, "detail": detail });
+    if let Some(gate) = gate {
+        body["gate"] = json!(gate);
+    }
+    let mut reply = Reply::json(status, &body);
+    reply.headers[0].1 = "application/problem+json; charset=utf-8".to_owned();
+    reply
+}
+
+/// What an address with nothing at it answers.
+fn absent() -> Reply {
+    problem(
+        404,
+        "Not found",
+        "Nothing answers at this address.",
+        Some("absent"),
+    )
+}
+
+/// A gate's problem: 401 to sign in, 403 for any other.
+fn gated(gate: &str) -> Reply {
+    problem(
+        if gate == "sign-in" { 401 } else { 403 },
+        "Not open to you",
+        "This isn't open to you here.",
+        Some(gate),
     )
 }
 
 /// An identity-exchange error in the shape the exchange answers.
 fn exchange_error(status: u16, code: &str) -> Reply {
     Reply::json(status, &json!({ "error": code }))
+}
+
+/// Percent-encodes what a path segment may not hold as it is.
+fn segment(text: &str) -> String {
+    text.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
+}
+
+/// Whether `id` has a TID's shape.
+fn tid_shaped(id: &str) -> bool {
+    const ALPHABET: &str = "234567abcdefghijklmnopqrstuvwxyz";
+    id.len() == 13
+        && id.chars().all(|character| ALPHABET.contains(character))
+        && ALPHABET
+            .find(id.chars().next().unwrap_or(' '))
+            .is_some_and(|first| first <= 15)
 }
 
 impl SpaceServer {
@@ -238,24 +291,22 @@ impl SpaceServer {
         &self.listener
     }
 
-    /// The reference of the Tangent `key`.
+    /// The address of the Tangent `key`.
     pub fn tangent_ref(&self, key: &str) -> String {
-        format!("{}::{key}", self.origin())
+        format!("{}/t/{key}", self.origin())
     }
 
-    /// The reference of the Topic `key`.
+    /// The route of the Topic `key`, as requests to it are recorded.
+    pub fn topic_route(&self, key: &str) -> String {
+        topic_route(&locked(&self.floor), key)
+    }
+
+    /// The address of the Topic `key`.
     pub fn topic_ref(&self, key: &str) -> String {
-        let floor = locked(&self.floor);
-        let tangent = floor
-            .topics
-            .iter()
-            .find(|topic| topic.key == key)
-            .map(|topic| topic.tangent.clone())
-            .unwrap_or_default();
-        format!("{}::{tangent}::{key}", floor.origin)
+        format!("{}{}", self.origin(), self.topic_route(key))
     }
 
-    /// The reference of the Post `id`.
+    /// The address of the Post `id`.
     pub fn post_ref(&self, id: &str) -> String {
         let floor = locked(&self.floor);
         floor
@@ -272,53 +323,84 @@ impl SpaceServer {
             key: key.to_owned(),
             name: name.to_owned(),
             description: description.to_owned(),
-            members: Vec::new(),
         });
     }
 
-    /// Adds a Topic to the Tangent `tangent`.
-    pub fn add_topic(&self, tangent: &str, key: &str, title: &str, brief: &str) {
-        locked(&self.floor).topics.push(Topic {
+    /// Adds a Topic to the Tangent `tangent`, its root by a steward of the
+    /// Space saying `brief`, and answers the root's id.
+    pub fn add_topic(&self, tangent: &str, key: &str, title: &str, brief: &str) -> String {
+        let mut floor = locked(&self.floor);
+        let steward = "did:plc:stewardstewardstewardstew".to_owned();
+        if !floor
+            .participants
+            .iter()
+            .any(|known| known.reference == steward)
+        {
+            floor.participants.push(Participant {
+                reference: steward.clone(),
+                handle: "steward.example.test".to_owned(),
+                display_name: "Steward".to_owned(),
+            });
+        }
+        floor.log += 1;
+        let log = floor.log;
+        let id = format!("root{log}");
+        floor.posts.push(Post {
+            id: id.clone(),
+            topic: key.to_owned(),
+            author: steward,
+            text: brief.to_owned(),
+            reply_to: None,
+            removed: false,
+            edited: false,
+            root: true,
+            sequence: 0,
+            version: 1,
+            log,
+        });
+        floor.topics.push(Topic {
             key: key.to_owned(),
             tangent: tangent.to_owned(),
             title: title.to_owned(),
-            brief: brief.to_owned(),
-            refusing_writes: false,
+            root: id.clone(),
+            locked: false,
+            refusing: false,
+            last_sequence: 0,
         });
+        id
     }
 
     /// Adds a participant who is no companion, known by `display_name`,
     /// and answers its reference.
     pub fn add_participant(&self, display_name: &str, handle: &str) -> String {
         let mut floor = locked(&self.floor);
-        let reference = format!("prt_{}", floor.participants.len() + 1);
+        let reference = format!("did:plc:participant{}", floor.participants.len() + 1);
         floor.participants.push(Participant {
             reference: reference.clone(),
-            did: None,
-            handle: Some(handle.to_owned()),
+            handle: handle.to_owned(),
             display_name: display_name.to_owned(),
         });
         reference
     }
 
-    /// Names the participant the account `did` becomes, once it exchanges a
-    /// proof, by `display_name` and `handle`.
+    /// Names the participant the account `did` becomes by `display_name` and
+    /// `handle`.
     pub fn name_account(&self, did: &str, display_name: &str, handle: &str) {
         let mut floor = locked(&self.floor);
-        let participant = participant_of(&mut floor, did);
+        participant_of(&mut floor, did);
         if let Some(found) = floor
             .participants
             .iter_mut()
-            .find(|known| known.reference == participant)
+            .find(|known| known.reference == did)
         {
             found.display_name = display_name.to_owned();
-            found.handle = Some(handle.to_owned());
+            found.handle = handle.to_owned();
         }
     }
 
-    /// Posts `text` in the Topic `topic` as the participant `author`,
-    /// replying to the Post `reply_to` when it names one, and answers the
-    /// new Post's id.
+    /// Replies with `text` in the Topic `topic` as the participant `author`,
+    /// to the Post `reply_to` when it names one, and answers the new Post's
+    /// id.
     pub fn add_post(
         &self,
         topic: &str,
@@ -327,34 +409,37 @@ impl SpaceServer {
         reply_to: Option<&str>,
     ) -> String {
         let mut floor = locked(&self.floor);
-        floor.seq += 1;
-        let seq = floor.seq;
-        let id = format!("p{seq}");
-        floor.posts.push(Post {
-            id: id.clone(),
-            topic: topic.to_owned(),
-            author: author.to_owned(),
-            text: text.to_owned(),
-            reply_to: reply_to.map(str::to_owned),
-            request_id: None,
-            removed: false,
-            edited: false,
-            seq,
-        });
+        let id = format!("p{}", floor.log + 1);
+        reply(&mut floor, &id, topic, author, text, reply_to);
         id
     }
 
-    /// Every Post, oldest first.
+    /// Every reply, oldest first; a Topic's root is not among them.
     pub fn posts(&self) -> Vec<Post> {
-        locked(&self.floor).posts.clone()
+        locked(&self.floor)
+            .posts
+            .iter()
+            .filter(|post| !post.root)
+            .cloned()
+            .collect()
     }
 
-    /// The participant reference the account `did` became.
+    /// The participant reference the account `did` became, when it has signed
+    /// in or been named.
     pub fn participant_of(&self, did: &str) -> Option<String> {
         locked(&self.floor)
             .participants
             .iter()
-            .find(|participant| participant.did.as_deref() == Some(did))
+            .find(|participant| participant.reference == did)
+            .map(|participant| participant.reference.clone())
+    }
+
+    /// The reference of the participant the Space shows as `display_name`.
+    pub fn participant_named(&self, display_name: &str) -> Option<String> {
+        locked(&self.floor)
+            .participants
+            .iter()
+            .find(|participant| participant.display_name == display_name)
             .map(|participant| participant.reference.clone())
     }
 
@@ -368,90 +453,181 @@ impl SpaceServer {
         locked(&self.floor).rejecting_proofs = rejecting;
     }
 
-    /// Answers every exchange 500 while `failing`, issuing nothing, as a
+    /// Answers every exchange 500 while `failing`, signing nobody in, as a
     /// Space that cannot answer just now.
     pub fn fail_exchanges(&self, failing: bool) {
         locked(&self.floor).failing_exchanges = failing;
     }
 
-    /// Suspends the account `did`: its exchanges are refused and its
-    /// tokens are not taken.
-    pub fn suspend(&self, did: &str) {
-        locked(&self.floor).suspended.insert(did.to_owned());
+    /// Bans the account `did`: it still signs in, and finds the Space absent
+    /// at every address, in the sign-in it holds and in a new one.
+    pub fn ban(&self, did: &str) {
+        locked(&self.floor).banned.insert(did.to_owned());
     }
 
-    /// Ends every token the Space issued so far, as a Space that restarted
-    /// with a new key would.
-    pub fn end_tokens(&self) {
-        for credential in &mut locked(&self.floor).credentials {
-            credential.ended = true;
+    /// Ends every sign-in the Space made so far, as a Space that restarted
+    /// with a new key would: their cookies read as a visitor's.
+    pub fn end_sign_ins(&self) {
+        for signed_in in &mut locked(&self.floor).signed_in {
+            signed_in.ended = true;
         }
     }
 
-    /// Issues tokens that expire `secs` from now, from now on.
-    pub fn issue_for(&self, secs: i64) {
-        locked(&self.floor).lifetime_secs = Some(secs);
+    /// Ends the one sign-in the cookie value `cookie` holds, as signing out at
+    /// the address a page's `who.signOut` names does.
+    pub fn end_sign_in(&self, cookie: &str) {
+        for signed_in in &mut locked(&self.floor).signed_in {
+            if signed_in.cookie == cookie {
+                signed_in.ended = true;
+            }
+        }
     }
 
-    /// Grants only `grants` from now on, whatever an exchange asks.
-    pub fn grant_only(&self, grants: &[&str]) {
-        locked(&self.floor).granting =
-            Some(grants.iter().map(|grant| (*grant).to_owned()).collect());
+    /// Holds every reader as an applicant from now on: they read and write
+    /// nothing until admitted.
+    pub fn hold_as_applicants(&self, holding: bool) {
+        locked(&self.floor).applicants = holding;
     }
 
-    /// Refuses every write in the Topic `topic` from now on with 403
-    /// `permission_denied`, as a Topic its stewards locked.
-    pub fn refuse_writes_in(&self, topic: &str) {
+    /// Closes the Space to visitors from now on: every page asks them to sign
+    /// in.
+    pub fn close_to_visitors(&self) {
+        locked(&self.floor).private = true;
+    }
+
+    /// Locks the Topic `topic`: its page offers no reply, and says why.
+    pub fn lock(&self, topic: &str) {
         for found in &mut locked(&self.floor).topics {
             if found.key == topic {
-                found.refusing_writes = true;
+                found.locked = true;
+            }
+        }
+    }
+
+    /// Refuses replies in the Topic `topic` with a 403 and no reason, though
+    /// its page still offers the form, as a rule the page does not know of.
+    pub fn refuse_replies_in(&self, topic: &str) {
+        for found in &mut locked(&self.floor).topics {
+            if found.key == topic {
+                found.refusing = true;
             }
         }
     }
 
     /// The body of every exchange the Space took up, oldest first.
-    pub fn exchanges(&self) -> Vec<Value> {
+    pub fn exchanges(&self) -> Vec<Vec<u8>> {
         locked(&self.floor).exchanges.clone()
     }
 
-    /// Every token the Space issued, for tests that look for secrets where
-    /// none may be.
-    pub fn tokens(&self) -> Vec<String> {
-        locked(&self.floor)
-            .credentials
+    /// Every cookie value the Space issued, for tests that look for secrets
+    /// where none may be.
+    pub fn cookies(&self) -> Vec<String> {
+        let floor = locked(&self.floor);
+        floor
+            .signed_in
             .iter()
-            .map(|credential| credential.token.clone())
+            .map(|signed_in| signed_in.cookie.clone())
+            .chain(floor.antiforgery.keys().cloned())
             .collect()
     }
-}
 
-/// The participant the account `did` is, made on its first visit.
-fn participant_of(floor: &mut Floor, did: &str) -> String {
-    if let Some(found) = floor
-        .participants
-        .iter()
-        .find(|participant| participant.did.as_deref() == Some(did))
-    {
-        return found.reference.clone();
+    /// Who wrote the reports the Space took, as (Post, reporter, reason).
+    pub fn reports(&self) -> Vec<(String, String, String)> {
+        locked(&self.floor).reports.clone()
     }
-    let reference = format!("prt_{}", floor.participants.len() + 1);
-    floor.participants.push(Participant {
-        reference: reference.clone(),
-        did: Some(did.to_owned()),
-        handle: None,
-        display_name: did.to_owned(),
-    });
-    reference
+
+    /// Whom the cookie the request `request` carried signs in.
+    pub fn signed_in_as(&self, request: &Received) -> Option<String> {
+        let floor = locked(&self.floor);
+        reader_of(&floor, request)
+    }
 }
 
-fn post_ref(floor: &Floor, post: &Post) -> String {
+fn topic_route(floor: &Floor, key: &str) -> String {
     let tangent = floor
         .topics
         .iter()
-        .find(|topic| topic.key == post.topic)
+        .find(|topic| topic.key == key)
         .map(|topic| topic.tangent.clone())
         .unwrap_or_default();
-    format!("{}::{tangent}::{}::{}", floor.origin, post.topic, post.id)
+    format!("/t/{tangent}/{key}")
+}
+
+fn post_ref(floor: &Floor, post: &Post) -> String {
+    format!(
+        "{}{}/{}",
+        floor.origin,
+        topic_route(floor, &post.topic),
+        post.id
+    )
+}
+
+/// Makes the account `did` a participant on its first visit.
+fn participant_of(floor: &mut Floor, did: &str) {
+    if floor
+        .participants
+        .iter()
+        .any(|known| known.reference == did)
+    {
+        return;
+    }
+    floor.participants.push(Participant {
+        reference: did.to_owned(),
+        handle: did.to_owned(),
+        display_name: did.to_owned(),
+    });
+}
+
+/// Adds a reply and answers it.
+fn reply(
+    floor: &mut Floor,
+    id: &str,
+    topic: &str,
+    author: &str,
+    text: &str,
+    reply_to: Option<&str>,
+) -> Post {
+    floor.log += 1;
+    let log = floor.log;
+    let found = floor.topics.iter_mut().find(|known| known.key == topic);
+    let sequence = found.map_or(1, |found| {
+        found.last_sequence += 1;
+        found.last_sequence
+    });
+    let post = Post {
+        id: id.to_owned(),
+        topic: topic.to_owned(),
+        author: author.to_owned(),
+        text: text.to_owned(),
+        reply_to: reply_to.map(str::to_owned),
+        removed: false,
+        edited: false,
+        root: false,
+        sequence,
+        version: 1,
+        log,
+    };
+    floor.posts.push(post.clone());
+    post
+}
+
+fn cookie_of(request: &Received, name: &str) -> Option<String> {
+    request
+        .header("cookie")?
+        .split(';')
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| value.to_owned())
+}
+
+/// Whom `request`'s cookie signs in, while the Space knows it.
+fn reader_of(floor: &Floor, request: &Received) -> Option<String> {
+    let cookie = cookie_of(request, SESSION_COOKIE)?;
+    floor
+        .signed_in
+        .iter()
+        .find(|signed_in| signed_in.cookie == cookie && !signed_in.ended)
+        .map(|signed_in| signed_in.did.clone())
 }
 
 fn answer(floor: &Mutex<Floor>, request: &Received) -> Reply {
@@ -460,25 +636,20 @@ fn answer(floor: &Mutex<Floor>, request: &Received) -> Reply {
     match (request.method.as_str(), route.as_str()) {
         ("GET", PROFILE_PATH) => profile(&floor),
         ("POST", EXCHANGE_PATH) => exchange(&mut floor, request),
-        (method, path) if path == ROOT || path.starts_with(&format!("{ROOT}/")) => {
-            if !matches!(method, "GET" | "DELETE")
-                && request
-                    .header("content-type")
-                    .is_none_or(|kind| !kind.starts_with("application/json"))
-            {
-                return Reply::json(415, &json!({ "reason": "unsupported media type" }));
+        ("POST", "/auth/logout") => {
+            if let Some(cookie) = cookie_of(request, SESSION_COOKIE) {
+                for signed_in in &mut floor.signed_in {
+                    if signed_in.cookie == cookie {
+                        signed_in.ended = true;
+                    }
+                }
             }
-            let Some(credential) = taken(&floor, request) else {
-                return Reply::json(
-                    401,
-                    &json!({ "error": "participant_authentication_required" }),
-                )
-                .with_header("WWW-Authenticate", "Bearer");
-            };
-            let rest = path.strip_prefix(ROOT).unwrap_or_default().to_owned();
-            experience(&mut floor, &credential, method, &rest, request)
+            Reply::redirect("/").with_header(
+                "Set-Cookie",
+                &format!("{SESSION_COOKIE}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/"),
+            )
         }
-        _ => problem(404, "not_found", "no such route"),
+        _ => pages(&mut floor, request, &route),
     }
 }
 
@@ -508,13 +679,6 @@ fn profile(floor: &Floor) -> Reply {
                 "transport": "authorization_header",
                 "endpoint": endpoint,
             },
-            "credentials": {
-                "type": "tangent_participant_token",
-                "transport": "authorization_header",
-                "defaultLifetimeDays": 1,
-                "grants": ["welcome", "read", "post", "manage"],
-                "manageGrantPolicy": "explicit",
-            },
         }),
     )
 }
@@ -522,6 +686,9 @@ fn profile(floor: &Floor) -> Reply {
 fn exchange(floor: &mut Floor, request: &Received) -> Reply {
     if floor.failing_exchanges {
         return exchange_error(500, "internal_error");
+    }
+    if floor.profile == Some(Profile::Unconfigured) {
+        return exchange_error(503, "exchange_unconfigured");
     }
     let presented = request.header("authorization").unwrap_or_default();
     let Some(token) = presented
@@ -540,820 +707,1276 @@ fn exchange(floor: &mut Floor, request: &Received) -> Reply {
     {
         return exchange_error(401, "invalid_service_proof");
     }
-    // The proof is claimed before anything else is checked or issued, so a
-    // proof is never taken twice whatever follows.
     if !floor
         .claimed
         .insert(format!("{}\n{}", proof.issuer, proof.id))
     {
         return exchange_error(401, "invalid_service_proof");
     }
-    if floor.suspended.contains(&proof.issuer) {
-        return exchange_error(403, "participant_suspended");
-    }
-    let body = request.json();
-    floor.exchanges.push(body.clone());
-    let Some(fields) = body.as_object() else {
-        return exchange_error(400, "the body is one object");
-    };
-    if fields
-        .keys()
-        .any(|key| !matches!(key.as_str(), "name" | "lifetimeDays" | "grants"))
-    {
-        return exchange_error(400, "unknown member");
-    }
-    let name = body["name"].as_str().unwrap_or("forum-client").to_owned();
-    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
-        return exchange_error(400, "name must be 1 to 80 printable characters");
-    }
-    let days = body["lifetimeDays"].as_i64().unwrap_or(1);
-    if !(1..=30).contains(&days) {
-        return exchange_error(400, "lifetimeDays must be 1 to 30");
-    }
-    let mut grants: Vec<String> = Vec::new();
-    for grant in body["grants"].as_array().cloned().unwrap_or_default() {
-        let Some(grant) = grant.as_str() else {
-            return exchange_error(400, "grants are names");
-        };
-        if !matches!(grant, "welcome" | "read" | "post" | "manage") {
-            return exchange_error(400, "unknown grant");
-        }
-        if !grants.iter().any(|known| known == grant) {
-            grants.push(grant.to_owned());
-        }
-    }
-    if grants.is_empty() {
-        grants = vec!["welcome".to_owned(), "read".to_owned(), "post".to_owned()];
-    }
-    if let Some(only) = &floor.granting {
-        grants.retain(|grant| only.contains(grant));
-    }
-    let participant = participant_of(floor, &proof.issuer);
-    let now = now_secs();
-    let expires_at = now + floor.lifetime_secs.unwrap_or(days * 86_400);
-    let token = format!("ts_{}", &unique_token("t").replace('-', "")[..]);
-    let id = unique_token("cred");
-    floor.credentials.push(Credential {
-        token: token.clone(),
-        participant: participant.clone(),
-        grants: grants.clone(),
-        expires_at,
+    floor.exchanges.push(request.body.clone());
+    participant_of(floor, &proof.issuer);
+    let cookie = format!("ts_{}", unique_token("t").replace('-', ""));
+    floor.signed_in.push(SignedIn {
+        cookie: cookie.clone(),
+        did: proof.issuer.clone(),
         ended: false,
     });
+    Reply {
+        status: 204,
+        headers: vec![(
+            "Set-Cookie".to_owned(),
+            format!("{SESSION_COOKIE}={cookie}; path=/; samesite=lax; httponly"),
+        )],
+        body: Vec::new(),
+    }
+}
+
+/// One request for a page: whom it reads as, and the antiforgery cookie it
+/// came with or was given.
+struct Visit<'a> {
+    request: &'a Received,
+    reader: Option<String>,
+    antiforgery: Option<String>,
+    minted: bool,
+}
+
+impl Visit<'_> {
+    /// The value of the token a form on this page carries; none for a visitor.
+    fn token(&mut self, floor: &mut Floor) -> Option<String> {
+        let reader = self.reader.clone()?;
+        if self.antiforgery.is_none() {
+            let cookie = format!("af_{}", unique_token("a").replace('-', ""));
+            floor.antiforgery.insert(cookie.clone(), reader);
+            self.antiforgery = Some(cookie);
+            self.minted = true;
+        }
+        self.antiforgery
+            .as_ref()
+            .map(|cookie| format!("rv_{cookie}"))
+    }
+
+    /// Whether this write carried a token good for its reader.
+    fn token_holds(&self, floor: &Floor) -> bool {
+        let (Some(reader), Some(cookie)) = (&self.reader, &self.antiforgery) else {
+            return false;
+        };
+        floor.antiforgery.get(cookie) == Some(reader)
+            && self.request.header(TOKEN_HEADER) == Some(format!("rv_{cookie}").as_str())
+    }
+
+    /// `reply`, setting the antiforgery cookie when this page minted it.
+    fn finish(&self, reply: Reply) -> Reply {
+        match (&self.antiforgery, self.minted) {
+            (Some(cookie), true) => reply.with_header(
+                "Set-Cookie",
+                &format!("{ANTIFORGERY_COOKIE}={cookie}; path=/; samesite=strict; httponly"),
+            ),
+            _ => reply,
+        }
+    }
+}
+
+/// A form a page carries.
+fn form(action: &str, fields: Value, token: &str) -> Value {
+    json!({
+        "action": action,
+        "method": "POST",
+        "fields": fields,
+        "token": { "field": "__RequestVerificationToken", "value": token },
+    })
+}
+
+fn field(name: &str, value: Option<&str>) -> Value {
+    json!({ "name": name, "holds": format!("What {name} holds."), "value": value })
+}
+
+fn pages(floor: &mut Floor, request: &Received, route: &str) -> Reply {
+    let reader = reader_of(floor, request);
+    let antiforgery = cookie_of(request, ANTIFORGERY_COOKIE)
+        .filter(|cookie| floor.antiforgery.contains_key(cookie));
+    let mut visit = Visit {
+        request,
+        reader,
+        antiforgery,
+        minted: false,
+    };
+    if visit
+        .reader
+        .as_ref()
+        .is_some_and(|reader| floor.banned.contains(reader))
+    {
+        return absent();
+    }
+    if visit.reader.is_none() && floor.private {
+        return gated("sign-in");
+    }
+    let segments: Vec<String> = route
+        .trim_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(percent_decode)
+        .collect();
+    let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+    let reply = match (request.method.as_str(), segments.as_slice()) {
+        ("GET", []) => door(floor, &mut visit),
+        ("POST", []) => mark_door_seen(floor, &visit),
+        ("GET", ["t"]) => tangents_page(floor, &visit),
+        ("GET", ["t", tangent]) => tangent_page(floor, &mut visit, tangent),
+        ("GET", ["t", tangent, "new"]) => new_topic_page(floor, &mut visit, tangent),
+        ("POST", ["t", tangent, "new"]) => start_topic(floor, &visit, tangent),
+        ("POST", ["t", tangent, "watch"]) => set_watch(floor, &visit, tangent, None),
+        ("GET", ["t", tangent, topic]) => topic_page(floor, &mut visit, tangent, topic, None),
+        ("POST", ["t", tangent, topic]) => post_reply(floor, &visit, tangent, topic),
+        ("POST", ["t", tangent, topic, "seen"]) => mark_seen(floor, &visit, tangent, topic),
+        ("POST", ["t", tangent, topic, "watch"]) => set_watch(floor, &visit, tangent, Some(topic)),
+        ("GET", ["t", tangent, topic, post]) => {
+            topic_page(floor, &mut visit, tangent, topic, Some(post))
+        }
+        ("GET", ["t", tangent, topic, post, "edit"]) => {
+            edit_page(floor, &mut visit, tangent, topic, post)
+        }
+        ("POST", ["t", tangent, topic, post, "edit"]) => {
+            edit_post(floor, &visit, tangent, topic, post)
+        }
+        ("POST", ["t", tangent, topic, post, "remove"]) => {
+            remove_post(floor, &visit, tangent, topic, post)
+        }
+        ("GET", ["t", tangent, topic, post, "report"]) => {
+            report_page(floor, &mut visit, tangent, topic, post, false)
+        }
+        ("POST", ["t", tangent, topic, post, "report"]) => {
+            report_post(floor, &mut visit, tangent, topic, post)
+        }
+        ("GET", ["p", someone]) => participant_page(floor, &visit, someone),
+        _ => absent(),
+    };
+    visit.finish(reply)
+}
+
+/// What the reader's standing lets them do in the Space, and why not.
+fn can_and_gate(floor: &Floor, visit: &Visit<'_>) -> (Vec<&'static str>, Option<&'static str>) {
+    match &visit.reader {
+        None => (vec!["View"], Some("sign-in")),
+        Some(_) if floor.applicants => (vec!["View"], Some("apply")),
+        Some(_) => (vec!["View", "Post", "Topic"], None),
+    }
+}
+
+/// A participant as a page shows them.
+fn author_json(floor: &Floor, reference: &str) -> Value {
+    let found = floor
+        .participants
+        .iter()
+        .find(|participant| participant.reference == reference);
+    let (name, handle) = found.map_or((reference, reference), |found| {
+        (found.display_name.as_str(), found.handle.as_str())
+    });
+    json!({
+        "id": reference,
+        "handle": handle,
+        "name": name,
+        "kind": "person",
+        "profile": format!("{}/p/{}", floor.origin, segment(handle)),
+    })
+}
+
+/// Who reads the page at `route`: absent for a visitor.
+fn who_json(floor: &Floor, visit: &Visit<'_>, route: &str) -> Value {
+    let Some(reader) = &visit.reader else {
+        return Value::Null;
+    };
+    let mut who = author_json(floor, reader);
+    who["signOut"] = json!(format!(
+        "{}/auth/logout?return={}",
+        floor.origin,
+        segment(route)
+    ));
+    who
+}
+
+fn door(floor: &mut Floor, visit: &mut Visit<'_>) -> Reply {
+    let (can, gate) = can_and_gate(floor, visit);
+    if visit.reader.is_some() && floor.applicants && floor.private {
+        return gated("apply");
+    }
+    let through = floor.log;
+    let mut body = json!({
+        "name": PLACE_LABEL,
+        "address": format!("{}/", floor.origin),
+        "can": can,
+        "gate": gate,
+        "tangents": [],
+        "moreTangents": floor.tangents.len() > DOOR_TANGENTS_MOST,
+        "featured": [],
+        "alive": [],
+        "day": "2026-10-31",
+        "poll": { "through": through, "next": format!("{}/events?since={through}", floor.origin) },
+        "api": 1,
+        "who": who_json(floor, visit, "/"),
+    });
+    let mut new_in: HashMap<String, u64> = HashMap::new();
+    if let Some(reader) = visit.reader.clone() {
+        let (news, per_tangent) = door_news(floor, visit, &reader, through);
+        body["news"] = news;
+        new_in = per_tangent;
+    }
+    body["tangents"] = floor
+        .tangents
+        .iter()
+        .take(DOOR_TANGENTS_MOST)
+        .map(|tangent| {
+            let mut listed = tangent_listed(floor, tangent);
+            listed["new"] = json!(new_in.get(&tangent.key).copied().unwrap_or(0));
+            listed
+        })
+        .collect();
+    Reply::json(200, &body)
+}
+
+/// What is new to `reader` past their door's checkpoint, and how many Posts
+/// are new in each Tangent. Their first door counts nothing as new, and sets
+/// the checkpoint.
+fn door_news(
+    floor: &mut Floor,
+    visit: &mut Visit<'_>,
+    reader: &str,
+    through: u64,
+) -> (Value, HashMap<String, u64>) {
+    let empty = json!({ "count": 0, "atLeast": false, "posts": [] });
+    let Some(since) = floor.door_seen.get(reader).copied() else {
+        floor.door_seen.insert(reader.to_owned(), through);
+        return (
+            json!({
+                "from": 0, "through": through, "first": true, "quiet": true, "watched": [],
+                "replies": empty, "mentions": empty, "perTangent": [], "articles": empty,
+            }),
+            HashMap::new(),
+        );
+    };
+    let new: Vec<Post> = floor
+        .posts
+        .iter()
+        .filter(|post| post.log > since && post.author != reader && !post.removed)
+        .cloned()
+        .collect();
+    let tangent_of = |floor: &Floor, topic: &str| {
+        floor
+            .topics
+            .iter()
+            .find(|known| known.key == topic)
+            .map(|known| known.tangent.clone())
+            .unwrap_or_default()
+    };
+    let replies: Vec<&Post> = new
+        .iter()
+        .rev()
+        .filter(|post| !post.root && answers(floor, post) == reader)
+        .collect();
+    let items: Vec<Value> = replies
+        .iter()
+        .take(ITEMS_MOST)
+        .map(|post| {
+            let topic = floor.topics.iter().find(|known| known.key == post.topic);
+            json!({
+                "postId": post.id,
+                "who": author_json(floor, &post.author),
+                "topic": topic.map(|topic| topic.title.clone()),
+                "tangent": topic.map(|topic| topic.tangent.clone()),
+                "address": post_ref(floor, post),
+                "line": post.text.chars().take(180).collect::<String>(),
+                "at": rfc3339(1_790_000_000 + post.log as i64 * 60),
+            })
+        })
+        .collect();
+    let mut per_tangent: Vec<(String, u64, u64)> = Vec::new();
+    let mut new_in: HashMap<String, u64> = HashMap::new();
+    for post in &new {
+        let tangent = tangent_of(floor, &post.topic);
+        *new_in.entry(tangent.clone()).or_default() += 1;
+        if !per_tangent.iter().any(|(key, _, _)| *key == tangent) {
+            per_tangent.push((tangent.clone(), 0, 0));
+        }
+        if let Some(counts) = per_tangent.iter_mut().find(|(key, _, _)| *key == tangent) {
+            if post.root {
+                counts.1 += 1;
+            } else {
+                counts.2 += 1;
+            }
+        }
+    }
+    let per_tangent: Vec<Value> = per_tangent
+        .iter()
+        .map(|(key, topics, replies)| {
+            let name = floor
+                .tangents
+                .iter()
+                .find(|tangent| tangent.key == *key)
+                .map(|tangent| tangent.name.clone());
+            json!({
+                "slug": key, "name": name, "address": format!("{}/t/{key}", floor.origin),
+                "topics": topics, "replies": replies, "atLeast": false,
+            })
+        })
+        .collect();
+    let mut watched = Vec::new();
+    for topic in &floor.topics {
+        if floor
+            .watches
+            .contains(&(reader.to_owned(), topic.key.clone()))
+        {
+            let count = new.iter().filter(|post| post.topic == topic.key).count();
+            if count > 0 {
+                watched.push(json!({
+                    "scope": "topic", "name": topic.title, "tangent": topic.tangent,
+                    "address": format!("{}{}", floor.origin, topic_route(floor, &topic.key)),
+                    "new": count, "atLeast": false,
+                }));
+            }
+        }
+    }
+    for tangent in &floor.tangents {
+        if floor
+            .watches
+            .contains(&(reader.to_owned(), tangent.key.clone()))
+        {
+            let count = new
+                .iter()
+                .filter(|post| tangent_of(floor, &post.topic) == tangent.key)
+                .count();
+            if count > 0 {
+                watched.push(json!({
+                    "scope": "tangent", "name": tangent.name, "tangent": tangent.key,
+                    "address": format!("{}/t/{}", floor.origin, tangent.key),
+                    "new": count, "atLeast": false,
+                }));
+            }
+        }
+    }
+    let quiet = new.is_empty();
+    let mut news = json!({
+        "from": since,
+        "through": through,
+        "watched": watched,
+        "replies": { "count": replies.len(), "atLeast": false, "posts": items },
+        "mentions": empty,
+        "perTangent": per_tangent,
+        "articles": empty,
+        "first": false,
+        "quiet": quiet,
+    });
+    if !quiet && let Some(token) = visit.token(floor) {
+        news["caughtUp"] = form(
+            &format!("{}/", floor.origin),
+            json!([field("through", Some(&through.to_string()))]),
+            &token,
+        );
+    }
+    (news, new_in)
+}
+
+/// Whose Post `post` answers: the Post it replies to, or its Topic's root.
+fn answers<'f>(floor: &'f Floor, post: &Post) -> &'f str {
+    let parent = post.reply_to.clone().or_else(|| {
+        floor
+            .topics
+            .iter()
+            .find(|topic| topic.key == post.topic)
+            .map(|topic| topic.root.clone())
+    });
+    floor
+        .posts
+        .iter()
+        .find(|candidate| Some(&candidate.id) == parent.as_ref())
+        .map_or("", |parent| parent.author.as_str())
+}
+
+/// The JSON object a write sent.
+fn fields_of(request: &Received) -> Option<Map<String, Value>> {
+    request.json().as_object().cloned()
+}
+
+fn unreadable() -> Reply {
+    problem(
+        400,
+        "Not a form or a JSON object",
+        "A write sends its fields as a form, or as one JSON object.",
+        None,
+    )
+}
+
+/// What a write answers before anything else is judged, when it is not one
+/// to judge: a visitor is asked to sign in, and a token that does not hold
+/// writes nothing.
+fn refused_at_once(floor: &Floor, visit: &Visit<'_>) -> Option<Reply> {
+    if visit.reader.is_none() {
+        return Some(gated("sign-in"));
+    }
+    (!visit.token_holds(floor)).then(|| {
+        problem(
+            400,
+            "Open the form again",
+            "This form's token is missing or has expired, so nothing was written.",
+            None,
+        )
+    })
+}
+
+fn mark_door_seen(floor: &mut Floor, visit: &Visit<'_>) -> Reply {
+    if let Some(refused) = refused_at_once(floor, visit) {
+        return refused;
+    }
+    let Some(through) = fields_of(visit.request)
+        .and_then(|fields| fields.get("through")?.as_str()?.parse::<u64>().ok())
+    else {
+        return problem(400, "Not a sequence of the log", "Name one.", None);
+    };
+    let reader = visit.reader.clone().unwrap_or_default();
+    let moved = floor.door_seen.entry(reader).or_default();
+    *moved = (*moved).max(through);
+    Reply {
+        status: 303,
+        headers: vec![("Location".to_owned(), "/".to_owned())],
+        body: Vec::new(),
+    }
+}
+
+fn tangent_listed(floor: &Floor, tangent: &Tangent) -> Value {
+    json!({
+        "slug": tangent.key,
+        "name": tangent.name,
+        "kind": "topic",
+        "address": format!("{}/t/{}", floor.origin, tangent.key),
+        "topicCount": floor.topics.iter().filter(|topic| topic.tangent == tangent.key).count(),
+    })
+}
+
+fn tangents_page(floor: &Floor, visit: &Visit<'_>) -> Reply {
+    let (can, _) = can_and_gate(floor, visit);
     Reply::json(
         200,
         &json!({
-            "profile": "tangent_participant",
-            "credential": {
-                "id": id,
-                "participantId": participant,
-                "name": name,
-                "grants": grants,
-                "createdAt": rfc3339(now),
-                "expiresAt": rfc3339(expires_at),
-                "revokedAt": null,
-            },
-            "token": token,
+            "tangents": floor.tangents.iter().map(|tangent| tangent_listed(floor, tangent)).collect::<Vec<_>>(),
+            "next": null,
+            "continued": false,
+            "first": format!("{}/t", floor.origin),
+            "can": can,
+            "place": PLACE_LABEL,
+            "door": format!("{}/", floor.origin),
+            "who": who_json(floor, visit, "/t"),
         }),
     )
 }
 
-/// The credential a request's `Bearer` token names, while the Space takes it.
-fn taken(floor: &Floor, request: &Received) -> Option<Credential> {
-    let token = request.header("authorization")?.strip_prefix("Bearer ")?;
-    let credential = floor
-        .credentials
-        .iter()
-        .find(|credential| credential.token == token)?;
-    let did = floor
-        .participants
-        .iter()
-        .find(|participant| participant.reference == credential.participant)
-        .and_then(|participant| participant.did.clone());
-    let suspended = did.is_some_and(|did| floor.suspended.contains(&did));
-    (!credential.ended && credential.expires_at > now_secs() && !suspended)
-        .then(|| credential.clone())
-}
-
-fn grants(credential: &Credential, grant: &str) -> bool {
-    credential.grants.iter().any(|held| held == grant)
-}
-
-fn participant_json(floor: &Floor, reference: &str) -> Value {
-    let participant = floor
-        .participants
-        .iter()
-        .find(|participant| participant.reference == reference);
+fn watching_json(
+    floor: &Floor,
+    visit: &Visit<'_>,
+    token: Option<&str>,
+    address: &str,
+    scope: &str,
+) -> Value {
+    let (Some(reader), Some(token)) = (&visit.reader, token) else {
+        return Value::Null;
+    };
+    let watch = floor.watches.contains(&(reader.clone(), scope.to_owned()));
     json!({
-        "participantRef": reference,
-        "did": participant.and_then(|participant| participant.did.clone()),
-        "displayName": participant.map(|participant| participant.display_name.clone()).unwrap_or_default(),
-        "handle": participant.and_then(|participant| participant.handle.clone()),
+        "watch": watch,
+        "form": form(
+            &format!("{address}/watch"),
+            json!([field("watch", Some(if watch { "false" } else { "true" }))]),
+            token,
+        ),
     })
 }
 
-fn display_of(floor: &Floor, reference: &str) -> String {
-    floor
-        .participants
+fn tangent_page(floor: &mut Floor, visit: &mut Visit<'_>, key: &str) -> Reply {
+    let Some(tangent) = floor
+        .tangents
         .iter()
-        .find(|participant| participant.reference == reference)
-        .map(|participant| participant.display_name.clone())
-        .unwrap_or_default()
+        .find(|tangent| tangent.key == key)
+        .cloned()
+    else {
+        return absent();
+    };
+    let (can, gate) = can_and_gate(floor, visit);
+    let token = visit.token(floor);
+    let address = format!("{}/t/{key}", floor.origin);
+    let last_log = |topic: &Topic| {
+        floor
+            .posts
+            .iter()
+            .filter(|post| post.topic == topic.key)
+            .map(|post| post.log)
+            .max()
+            .unwrap_or(0)
+    };
+    let mut topics: Vec<&Topic> = floor
+        .topics
+        .iter()
+        .filter(|topic| topic.tangent == key)
+        .collect();
+    topics.sort_by_key(|topic| std::cmp::Reverse(last_log(topic)));
+    let from = visit
+        .request
+        .query("after")
+        .and_then(|after| after.parse::<usize>().ok())
+        .unwrap_or(0);
+    let rows: Vec<Value> = topics
+        .iter()
+        .skip(from)
+        .take(TOPICS_MOST)
+        .map(|topic| {
+            let root = floor.posts.iter().find(|post| post.id == topic.root);
+            let seen = visit
+                .reader
+                .as_ref()
+                .and_then(|reader| floor.topic_seen.get(&(reader.clone(), topic.key.clone())))
+                .copied()
+                .unwrap_or(-1);
+            let new = floor
+                .posts
+                .iter()
+                .filter(|post| post.topic == topic.key && post.sequence as i64 > seen)
+                .count();
+            json!({
+                "id": topic.root,
+                "slug": topic.key,
+                "title": topic.title,
+                "kind": "topic",
+                "address": format!("{address}/{}", topic.key),
+                "author": root.map(|root| author_json(floor, &root.author)),
+                "opening": root.map(|root| root.text.chars().take(180).collect::<String>()),
+                "readMinutes": 1,
+                "replyCount": topic.last_sequence,
+                "pinned": false,
+                "locked": topic.locked,
+                "lastActivityAt": rfc3339(1_790_000_000 + last_log(topic) as i64 * 60),
+                "people": [],
+                "new": visit.reader.is_some() && new > 0,
+                "newPosts": if visit.reader.is_some() { new } else { 0 },
+            })
+        })
+        .collect();
+    let next = (topics.len() > from + TOPICS_MOST)
+        .then(|| format!("{address}?after={}", from + TOPICS_MOST));
+    Reply::json(
+        200,
+        &json!({
+            "slug": key,
+            "name": tangent.name,
+            "description": tangent.description,
+            "kind": "topic",
+            "audience": "public",
+            "address": address,
+            "can": can,
+            "topics": rows,
+            "next": next,
+            "continued": from > 0,
+            "newTopic": gate.is_none().then(|| format!("{address}/new")),
+            "watching": watching_json(floor, visit, token.as_deref(), &address, key),
+            "place": PLACE_LABEL,
+            "door": format!("{}/", floor.origin),
+            "who": who_json(floor, visit, &format!("/t/{key}")),
+        }),
+    )
 }
 
-fn post_json(floor: &Floor, post: &Post) -> Value {
-    let reference = post_ref(floor, post);
-    let reply = post.reply_to.as_ref().and_then(|id| {
+fn new_topic_page(floor: &mut Floor, visit: &mut Visit<'_>, key: &str) -> Reply {
+    if !floor.tangents.iter().any(|tangent| tangent.key == key) {
+        return absent();
+    }
+    let (can, gate) = can_and_gate(floor, visit);
+    let address = format!("{}/t/{key}", floor.origin);
+    let start = if gate.is_none() {
+        visit.token(floor).map(|token| {
+            form(
+                &format!("{address}/new"),
+                json!([
+                    field("id", Some("3mz5acqquq4jl")),
+                    field("title", None),
+                    field("body", None),
+                    field("kind", None),
+                ]),
+                &token,
+            )
+        })
+    } else {
+        None
+    };
+    Reply::json(
+        200,
+        &json!({
+            "tangent": key,
+            "tangentAddress": address,
+            "kind": "topic",
+            "start": start,
+            "can": can,
+            "gate": gate,
+            "place": PLACE_LABEL,
+            "door": format!("{}/", floor.origin),
+            "who": who_json(floor, visit, &format!("/t/{key}/new")),
+        }),
+    )
+}
+
+/// A Post, as a write answers a JSON request.
+fn written_json(floor: &Floor, post: &Post) -> Value {
+    let topic = floor.topics.iter().find(|topic| topic.key == post.topic);
+    json!({
+        "id": post.id,
+        "address": post_ref(floor, post),
+        "tangent": topic.map(|topic| topic.tangent.clone()),
+        "topicId": topic.map(|topic| topic.root.clone()),
+        "parentId": post.reply_to,
+        "slug": post.root.then(|| post.topic.clone()),
+        "title": if post.root { topic.map(|topic| topic.title.clone()) } else { None },
+        "body": post.text,
+        "version": post.version,
+        "sequence": post.sequence,
+        "authorId": post.author,
+        "createdAt": rfc3339(1_790_000_000 + post.log as i64 * 60),
+        "removed": post.removed,
+        "can": ["View", "Post", "Topic", "EditOwn", "RemoveOwn"],
+    })
+}
+
+/// A word to make a slug of.
+fn slug_of(title: &str) -> String {
+    let slug: String = title
+        .to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    slug.split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn start_topic(floor: &mut Floor, visit: &Visit<'_>, key: &str) -> Reply {
+    if let Some(refused) = refused_at_once(floor, visit) {
+        return refused;
+    }
+    if !floor.tangents.iter().any(|tangent| tangent.key == key) {
+        return absent();
+    }
+    if let (_, Some(gate)) = can_and_gate(floor, visit) {
+        return gated(gate);
+    }
+    let Some(fields) = fields_of(visit.request) else {
+        return unreadable();
+    };
+    let text = |name: &str| fields.get(name).and_then(Value::as_str).unwrap_or_default();
+    let (id, title, body) = (text("id"), text("title"), text("body"));
+    if !tid_shaped(id) || title.is_empty() || body.is_empty() {
+        return problem(
+            400,
+            "Not written",
+            "A Topic needs a TID, a title and a body.",
+            None,
+        );
+    }
+    let reader = visit.reader.clone().unwrap_or_default();
+    if let Some(existing) = floor.posts.iter().find(|post| post.id == id) {
+        return if existing.author == reader && existing.text == body {
+            Reply::json(201, &written_json(floor, existing))
+        } else {
+            problem(409, "Already written", "That id holds other words.", None)
+        };
+    }
+    let slug = slug_of(title);
+    floor.log += 1;
+    let log = floor.log;
+    let post = Post {
+        id: id.to_owned(),
+        topic: slug.clone(),
+        author: reader,
+        text: body.to_owned(),
+        reply_to: None,
+        removed: false,
+        edited: false,
+        root: true,
+        sequence: 0,
+        version: 1,
+        log,
+    };
+    floor.posts.push(post.clone());
+    floor.topics.push(Topic {
+        key: slug,
+        tangent: key.to_owned(),
+        title: title.to_owned(),
+        root: id.to_owned(),
+        locked: false,
+        refusing: false,
+        last_sequence: 0,
+    });
+    Reply::json(201, &written_json(floor, &post))
+}
+
+/// The Topic `topic` of the Tangent `tangent`.
+fn located(floor: &Floor, tangent: &str, topic: &str) -> Option<Topic> {
+    floor
+        .topics
+        .iter()
+        .find(|found| found.key == topic && found.tangent == tangent)
+        .cloned()
+}
+
+/// One Post as a Topic page shows it.
+fn post_json(floor: &Floor, visit: &Visit<'_>, post: &Post, token: Option<&str>) -> Value {
+    let reader = visit.reader.as_deref();
+    let mine = reader == Some(post.author.as_str());
+    let address = post_ref(floor, post);
+    let parent = post.reply_to.as_ref().and_then(|id| {
         floor
             .posts
             .iter()
             .find(|candidate| candidate.id == *id)
             .map(|candidate| post_ref(floor, candidate))
     });
-    let url = format!("{}/p/{}", floor.origin, post.id);
-    json!({
-        "ref": reference,
-        "authorRef": post.author,
-        "authorName": display_of(floor, &post.author),
-        "text": if post.removed { String::new() } else { post.text.clone() },
-        "replyTo": reply,
-        "url": url,
-        "createdAt": rfc3339(1_790_000_000 + post.seq as i64 * 60),
-        "editedAt": if post.edited { Some(rfc3339(1_790_000_000 + post.seq as i64 * 60 + 30)) } else { None },
-        "removed": post.removed,
-        "facets": [],
-        "source": { "service": "tangent", "uri": url, "recordId": post.id },
-    })
-}
-
-fn tangent_json(floor: &Floor, tangent: &Tangent, participant: &str) -> Value {
-    let topics: Vec<&Topic> = floor
-        .topics
-        .iter()
-        .filter(|topic| topic.tangent == tangent.key)
-        .collect();
-    json!({
-        "tangentRef": format!("{}::{}", floor.origin, tangent.key),
-        "name": tangent.name,
-        "description": tangent.description,
-        "membership": if tangent.members.iter().any(|member| member == participant) { "member" } else { "none" },
-        "admission": "open",
-        "canJoin": true,
-        "hasReadableTopics": !topics.is_empty(),
-        "hasWritableTopics": topics.iter().any(|topic| !topic.refusing_writes),
-    })
-}
-
-/// What is new for `participant`: Posts by others it has not read past,
-/// newest first, within `scope` and after `checkpoint`.
-fn attention(
-    floor: &Floor,
-    participant: &str,
-    scope: Option<&str>,
-    checkpoint: u64,
-    limit: usize,
-) -> (Value, u64) {
-    let own: HashSet<&str> = floor
-        .posts
-        .iter()
-        .filter(|post| post.author == participant)
-        .map(|post| post.id.as_str())
-        .collect();
-    let mut news: Vec<&Post> = floor
-        .posts
-        .iter()
-        .filter(|post| post.author != participant && !post.removed && post.seq > checkpoint)
-        .filter(|post| {
-            let read = floor
-                .read
-                .get(&(participant.to_owned(), post.topic.clone()))
-                .copied()
-                .unwrap_or(0);
-            post.seq > read
-        })
-        .filter(|post| {
-            scope.is_none_or(|scope| {
-                let reference = post_ref(floor, post);
-                reference.starts_with(&format!("{scope}::")) || scope == floor.origin
-            })
-        })
-        .collect();
-    news.reverse();
-    let high = floor.posts.iter().map(|post| post.seq).max().unwrap_or(0);
-    let replies = news
-        .iter()
-        .filter(|post| post.reply_to.as_deref().is_some_and(|id| own.contains(id)))
-        .count();
-    let more = news.len() > limit;
-    let items: Vec<Value> = news
-        .iter()
-        .take(limit)
-        .map(|post| {
-            let reply = post.reply_to.as_deref().is_some_and(|id| own.contains(id));
-            let topic = floor
-                .topics
-                .iter()
-                .find(|topic| topic.key == post.topic)
-                .map(|topic| format!("{}::{}::{}", floor.origin, topic.tangent, topic.key))
-                .unwrap_or_default();
-            json!({
-                "ref": format!("att_{}", post.seq),
-                "kind": if reply { "direct_reply" } else { "watched_activity" },
-                "actorRef": post.author,
-                "scopeRef": topic,
-                "sourceRef": post_ref(floor, post),
-                "excerpt": post.text.chars().take(160).collect::<String>(),
-                "state": "new",
-            })
-        })
-        .collect();
-    (
-        json!({
-            "waitingCount": { "value": replies },
-            "newActivityCount": { "value": news.len() },
-            "items": items,
-            "more": more,
-        }),
-        high,
-    )
-}
-
-/// A page size the Space takes: out of range is its default.
-fn coerced(request: &Received, default: usize, most: usize) -> usize {
-    request
-        .query("limit")
-        .and_then(|limit| limit.parse::<usize>().ok())
-        .filter(|limit| (1..=most).contains(limit))
-        .unwrap_or(default)
-}
-
-fn experience(
-    floor: &mut Floor,
-    credential: &Credential,
-    method: &str,
-    rest: &str,
-    request: &Received,
-) -> Reply {
-    let me = credential.participant.clone();
-    let segments: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
-    let reads = grants(credential, "read");
-    let posts = grants(credential, "post");
-    let denied = || {
-        problem(
-            403,
-            "permission_denied",
-            "this credential does not allow that",
-        )
-    };
-    match (method, segments.as_slice()) {
-        ("GET", []) => {
-            if !reads {
-                return denied();
-            }
-            let scope = request.query("scopeRef");
-            let (attention, _) = attention(floor, &me, scope.as_deref(), 0, 10);
-            let tangents: Vec<Value> = floor
-                .tangents
-                .iter()
-                .take(10)
-                .map(|tangent| tangent_json(floor, tangent, &me))
-                .collect();
-            Reply::json(
-                200,
-                &json!({
-                    "identity": participant_json(floor, &me),
-                    "place": { "label": PLACE_LABEL },
-                    "authority": {
-                        "canRead": reads,
-                        "canPost": posts,
-                        "canManage": grants(credential, "manage"),
-                        "canStewardScope": false,
-                        "management": { "canWarn": false, "canTimeout": false, "canSuspend": false, "canBan": false, "canAssignRoles": false },
-                    },
-                    "tangents": tangents,
-                    "continuation": null,
-                    "attention": attention,
-                }),
-            )
-        }
-        ("GET", ["tangents"]) => {
-            if !reads {
-                return denied();
-            }
-            let tangents: Vec<Value> = floor
-                .tangents
-                .iter()
-                .take(10)
-                .map(|tangent| tangent_json(floor, tangent, &me))
-                .collect();
-            Reply::json(200, &json!({ "tangents": tangents, "continuation": null }))
-        }
-        ("GET", ["tangents", key, "topics"]) => {
-            if !reads {
-                return denied();
-            }
-            if !floor.tangents.iter().any(|tangent| tangent.key == *key) {
-                return problem(404, "not_found", "no such tangent");
-            }
-            let topics: Vec<Value> = floor
-                .topics
-                .iter()
-                .filter(|topic| topic.tangent == *key)
-                .take(10)
-                .map(|topic| {
-                    json!({
-                        "topicRef": format!("{}::{}::{}", floor.origin, topic.tangent, topic.key),
-                        "title": topic.title,
-                        "topic": topic.brief,
-                        "canRead": true,
-                        "canWrite": posts && !topic.refusing_writes,
-                        "isLocked": topic.refusing_writes,
-                        "allowPostEditing": true,
-                    })
-                })
-                .collect();
-            Reply::json(200, &json!({ "topics": topics, "continuation": null }))
-        }
-        ("GET", ["topics", key]) => {
-            if !reads {
-                return denied();
-            }
-            topic_window(floor, &me, posts, key, request)
-        }
-        ("GET", ["updates"]) => {
-            if !reads {
-                return denied();
-            }
-            let checkpoint = request.query("checkpoint").and_then(|checkpoint| {
-                checkpoint
-                    .strip_prefix("cp_")
-                    .and_then(|seq| seq.parse().ok())
-            });
-            if request.query("checkpoint").is_some() && checkpoint.is_none() {
-                return problem(
-                    400,
-                    "cursor_expired",
-                    "the checkpoint is not one this Space gave",
-                );
-            }
-            let scope = request.query("scopeRef");
-            let limit = coerced(request, 10, 25);
-            let (attention, high) =
-                attention(floor, &me, scope.as_deref(), checkpoint.unwrap_or(0), limit);
-            Reply::json(
-                200,
-                &json!({
-                    "scopeRef": scope.unwrap_or_else(|| floor.origin.clone()),
-                    "attention": attention,
-                    "activityCheckpoint": format!("cp_{high}"),
-                    "activityPageCursor": null,
-                }),
-            )
-        }
-        ("POST", ["topics", key, "posts"]) => {
-            if !posts {
-                return denied();
-            }
-            create_post(floor, &me, key, request)
-        }
-        ("POST", ["tangents", key, "topics"]) => {
-            if !posts {
-                return denied();
-            }
-            start_topic(floor, &me, key, request)
-        }
-        ("PATCH" | "DELETE", ["posts", id]) => {
-            if !posts {
-                return denied();
-            }
-            let Some(index) = floor.posts.iter().position(|post| post.id == *id) else {
-                return problem(404, "not_found", "no such post");
-            };
-            if floor.posts[index].author != me {
-                return problem(403, "permission_denied", "only its author changes a post");
-            }
-            if method == "PATCH" {
-                let Some(text) = request.json()["text"].as_str().map(str::to_owned) else {
-                    return problem(400, "invalid_arguments", "text is required");
-                };
-                floor.posts[index].text = text;
-                floor.posts[index].edited = true;
-            } else {
-                floor.posts[index].removed = true;
-            }
-            let post = floor.posts[index].clone();
-            Reply::json(
-                200,
-                &json!({
-                    "postRef": post_ref(floor, &post),
-                    "source": null,
-                    "url": format!("{}/p/{}", floor.origin, post.id),
-                    "requestId": null,
-                }),
-            )
-        }
-        ("POST", ["topics", key, "read-position"]) => {
-            if !reads {
-                return denied();
-            }
-            let Some(topic) = floor.topics.iter().find(|topic| topic.key == *key).cloned() else {
-                return problem(404, "not_found", "no such topic");
-            };
-            let Some(seq) = request.json()["readCursor"]
-                .as_str()
-                .and_then(|cursor| cursor.strip_prefix("rc_"))
-                .and_then(|seq| seq.parse::<u64>().ok())
-            else {
-                return problem(
-                    400,
-                    "cursor_expired",
-                    "the read cursor is not one this Space gave",
-                );
-            };
-            floor.read.insert((me.clone(), topic.key.clone()), seq);
-            let through = floor
-                .posts
-                .iter()
-                .filter(|post| post.topic == topic.key && post.seq <= seq)
-                .max_by_key(|post| post.seq)
-                .map(|post| post_ref(floor, post));
-            Reply::json(
-                200,
-                &json!({
-                    "throughPostRef": through,
-                    "topicRef": format!("{}::{}::{}", floor.origin, topic.tangent, topic.key),
-                }),
-            )
-        }
-        ("PUT" | "DELETE", ["tangents", key, "membership"]) => {
-            if !reads {
-                return denied();
-            }
-            let Some(tangent) = floor
-                .tangents
-                .iter_mut()
-                .find(|tangent| tangent.key == *key)
-            else {
-                return problem(404, "not_found", "no such tangent");
-            };
-            tangent.members.retain(|member| *member != me);
-            if method == "PUT" {
-                tangent.members.push(me.clone());
-                Reply::json(
-                    200,
-                    &json!({ "membership": "member", "message": "Welcome in." }),
-                )
-            } else {
-                Reply::json(
-                    200,
-                    &json!({ "membership": "none", "message": "You left." }),
-                )
-            }
-        }
-        ("PUT", ["watches"]) => {
-            if !reads {
-                return denied();
-            }
-            let body = request.json();
-            let (Some(scope), Some(mode)) = (body["scopeRef"].as_str(), body["mode"].as_str())
-            else {
-                return problem(400, "invalid_arguments", "scopeRef and mode are required");
-            };
-            if !matches!(mode, "all" | "replies" | "none") {
-                return problem(400, "invalid_arguments", "mode is all, replies or none");
-            }
+    let seen = reader
+        .and_then(|reader| {
             floor
-                .watches
-                .insert((me.clone(), scope.to_owned()), mode.to_owned());
-            Reply::json(200, &json!({ "scopeRef": scope, "mode": mode }))
-        }
-        ("GET", ["topics", key, "mentionables"]) => {
-            if !reads {
-                return denied();
-            }
-            let prefix = request.query("prefix").unwrap_or_default().to_lowercase();
-            let mut seen = Vec::new();
-            for post in floor.posts.iter().filter(|post| post.topic == *key) {
-                if !seen.contains(&post.author) {
-                    seen.push(post.author.clone());
-                }
-            }
-            let targets: Vec<Value> = seen
-                .iter()
-                .filter_map(|reference| {
-                    floor
-                        .participants
-                        .iter()
-                        .find(|participant| participant.reference == *reference)
-                })
-                .filter(|participant| participant.display_name.to_lowercase().starts_with(&prefix))
-                .take(10)
-                .map(|participant| {
-                    json!({
-                        "kind": "participant",
-                        "label": participant.display_name,
-                        "insert": format!("@{}", participant.handle.clone().unwrap_or_else(|| participant.reference.clone())),
-                        "did": participant.did,
-                        "count": null,
-                    })
-                })
-                .collect();
-            Reply::json(200, &json!({ "targets": targets }))
-        }
-        ("GET", ["participants", identifier]) => {
-            if !reads {
-                return denied();
-            }
-            let identifier = crate::percent_decode(identifier);
-            let Some(participant) = floor
-                .participants
-                .iter()
-                .find(|participant| {
-                    participant.reference == identifier
-                        || participant.handle.as_deref() == Some(identifier.as_str())
-                })
-                .cloned()
-            else {
-                return problem(404, "not_found", "no such participant");
-            };
-            let recent: Vec<Value> = floor
-                .posts
-                .iter()
-                .rev()
-                .filter(|post| post.author == participant.reference && !post.removed)
-                .take(10)
-                .map(|post| post_json(floor, post))
-                .collect();
-            Reply::json(
-                200,
-                &json!({
-                    "profile": {
-                        "participantRef": participant.reference,
-                        "did": participant.did,
-                        "handle": participant.handle,
-                        "displayName": participant.display_name,
-                        "classification": "member",
-                        "description": null,
-                        "avatar": null,
-                        "profileUrl": null,
-                    },
-                    "recentPosts": recent,
-                    "morePosts": false,
-                }),
-            )
-        }
-        ("POST", ["topics", _key, "reports"]) => {
-            if !reads {
-                return denied();
-            }
-            let body = request.json();
-            let Some(post) = body["postRef"].as_str().map(str::to_owned) else {
-                return problem(400, "invalid_arguments", "postRef is required");
-            };
-            let already = floor
-                .reports
-                .iter()
-                .any(|(reporter, reported)| *reporter == me && *reported == post);
-            if !already {
-                floor.reports.push((me.clone(), post.clone()));
-            }
-            Reply::json(
-                200,
-                &json!({ "postRef": post, "accepted": true, "alreadyReported": already, "caseSaturated": false }),
-            )
-        }
-        _ => problem(404, "not_found", "no such route"),
-    }
+                .topic_seen
+                .get(&(reader.to_owned(), post.topic.clone()))
+                .copied()
+        })
+        .unwrap_or(-1);
+    let report = match token {
+        Some(token) if !mine && !post.removed => form(
+            &format!("{address}/report"),
+            json!([field("id", Some("3mz5acrpyshjl")), field("body", None)]),
+            token,
+        ),
+        _ => Value::Null,
+    };
+    json!({
+        "id": post.id,
+        "sequence": post.sequence,
+        "address": address,
+        "author": author_json(floor, &post.author),
+        "body": if post.removed { None } else { Some(post.text.clone()) },
+        "mentions": [],
+        "createdAt": rfc3339(1_790_000_000 + post.log as i64 * 60),
+        "version": post.version,
+        "parentId": post.reply_to,
+        "parent": parent,
+        "removed": post.removed.then(|| json!({
+            "by": author_json(floor, &post.author),
+            "at": rfc3339(1_790_000_000 + post.log as i64 * 60),
+        })),
+        "new": reader.is_some() && post.sequence as i64 > seen,
+        "can": ["View"],
+        "edit": (mine && !post.removed).then(|| format!("{address}/edit")),
+        "report": report,
+    })
 }
 
-fn topic_window(floor: &Floor, me: &str, posts: bool, key: &str, request: &Received) -> Reply {
-    let Some(topic) = floor.topics.iter().find(|topic| topic.key == key).cloned() else {
-        return problem(404, "not_found", "no such topic");
+fn topic_page(
+    floor: &mut Floor,
+    visit: &mut Visit<'_>,
+    tangent: &str,
+    topic: &str,
+    anchor: Option<&str>,
+) -> Reply {
+    let Some(found) = located(floor, tangent, topic) else {
+        return absent();
     };
-    let limit = coerced(request, 10, 25);
-    let before = match request.query("cursor") {
-        None => None,
-        Some(cursor) => match cursor
-            .strip_prefix("older_")
-            .and_then(|seq| seq.parse::<u64>().ok())
+    let anchored = match anchor {
+        Some(id) => match floor
+            .posts
+            .iter()
+            .find(|post| post.id == id && post.topic == topic)
         {
-            Some(seq) => Some(seq),
-            None => {
-                return problem(
-                    400,
-                    "cursor_expired",
-                    "the cursor is not one this Space gave",
-                );
-            }
+            Some(post) => Some(post.clone()),
+            None => return absent(),
         },
-    };
-    let all: Vec<&Post> = floor
-        .posts
-        .iter()
-        .filter(|post| post.topic == topic.key && before.is_none_or(|seq| post.seq < seq))
-        .collect();
-    let window: Vec<&Post> = all.iter().rev().take(limit).rev().copied().collect();
-    let older = (all.len() > window.len())
-        .then(|| window.first().map(|post| format!("older_{}", post.seq)))
-        .flatten();
-    let high = window.last().map_or(0, |post| post.seq);
-    let _ = me;
-    Reply::json(
-        200,
-        &json!({
-            "topicRef": format!("{}::{}::{}", floor.origin, topic.tangent, topic.key),
-            "title": topic.title,
-            "brief": topic.brief,
-            "posts": window.iter().map(|post| post_json(floor, post)).collect::<Vec<_>>(),
-            "position": if before.is_some() { "older" } else { "recent" },
-            "canWrite": posts && !topic.refusing_writes,
-            "stewardship": false,
-            "isLocked": topic.refusing_writes,
-            "allowPostEditing": true,
-            "historyOlderCursor": older,
-            "historyNewerCursor": null,
-            "readCursor": format!("rc_{high}"),
-        }),
-    )
-}
-
-fn create_post(floor: &mut Floor, me: &str, key: &str, request: &Received) -> Reply {
-    let Some(topic) = floor.topics.iter().find(|topic| topic.key == key).cloned() else {
-        return problem(404, "not_found", "no such topic");
-    };
-    if topic.refusing_writes {
-        return problem(403, "permission_denied", "this topic takes no new posts");
-    }
-    let body = request.json();
-    let (Some(request_id), Some(text)) = (body["requestId"].as_str(), body["text"].as_str()) else {
-        return problem(400, "invalid_arguments", "requestId and text are required");
-    };
-    if request_id.is_empty() || request_id.len() > 128 || text.trim().is_empty() {
-        return problem(400, "invalid_arguments", "requestId and text are required");
-    }
-    let reply_to = match body["replyTo"].as_str() {
         None => None,
-        Some(reference) => {
-            let id = reference.rsplit("::").next().unwrap_or_default().to_owned();
-            if !floor
-                .posts
-                .iter()
-                .any(|post| post.id == id && post.topic == topic.key)
-            {
-                return problem(
-                    400,
-                    "invalid_arguments",
-                    "replyTo names no post of this topic",
-                );
-            }
-            Some(id)
-        }
     };
-    if let Some(earlier) = floor
+    let (can, standing) = can_and_gate(floor, visit);
+    let token = visit.token(floor);
+    let address = format!("{}{}", floor.origin, topic_route(floor, topic));
+    let replies: Vec<Post> = floor
         .posts
         .iter()
-        .find(|post| post.author == me && post.request_id.as_deref() == Some(request_id))
+        .filter(|post| post.topic == topic && !post.root)
         .cloned()
-    {
-        // The same request answers with the same Post; another post under
-        // the same request id is a conflict.
-        if earlier.topic != topic.key || earlier.text != text || earlier.reply_to != reply_to {
-            return problem(
-                409,
-                "request_conflict",
-                "that request id named another post",
-            );
+        .collect();
+    let seen = visit.reader.as_ref().and_then(|reader| {
+        floor
+            .topic_seen
+            .get(&(reader.clone(), topic.to_owned()))
+            .copied()
+    });
+    let last = found.last_sequence as i64;
+    let before = visit
+        .request
+        .query("before")
+        .and_then(|v| v.parse::<i64>().ok());
+    let after = visit
+        .request
+        .query("after")
+        .and_then(|v| v.parse::<i64>().ok());
+    let most = WINDOW_MOST as i64;
+    let (low, high) = if let Some(post) = &anchored {
+        if post.root {
+            (1, most)
+        } else {
+            let low = (post.sequence as i64 - most / 2).max(1);
+            (low, low + most - 1)
         }
-        return post_result(floor, &earlier, request_id);
-    }
-    floor.seq += 1;
-    let seq = floor.seq;
-    let post = Post {
-        id: format!("p{seq}"),
-        topic: topic.key.clone(),
-        author: me.to_owned(),
-        text: text.to_owned(),
-        reply_to,
-        request_id: Some(request_id.to_owned()),
-        removed: false,
-        edited: false,
-        seq,
+    } else if let Some(before) = before {
+        ((before - most).max(1), before - 1)
+    } else if let Some(after) = after {
+        (after + 1, after + most)
+    } else {
+        match seen {
+            Some(seen) if seen >= last => ((last - most + 1).max(1), last),
+            Some(seen) => (seen.max(0) + 1, seen.max(0) + most),
+            None => (1, most),
+        }
     };
-    floor.posts.push(post.clone());
-    floor.read.insert((me.to_owned(), topic.key.clone()), seq);
-    post_result(floor, &post, request_id)
-}
-
-fn post_result(floor: &Floor, post: &Post, request_id: &str) -> Reply {
+    let window: Vec<&Post> = replies
+        .iter()
+        .filter(|post| (post.sequence as i64) >= low && (post.sequence as i64) <= high)
+        .collect();
+    let shown_through = window.last().map_or(0, |post| post.sequence as i64);
+    let seen_sequence = seen.unwrap_or(-1);
+    let continues = low <= seen_sequence.max(0) + 1;
+    let root = floor
+        .posts
+        .iter()
+        .find(|post| post.id == found.root)
+        .cloned()
+        .unwrap_or_else(|| replies[0].clone());
+    let gate = standing.or(found.locked.then_some("locked"));
+    let reply = match (&token, gate) {
+        (Some(token), None) => form(
+            &address,
+            json!([
+                field("id", Some("3mz5acrpyshjl")),
+                field("body", None),
+                field(
+                    "parent",
+                    Some(
+                        anchored
+                            .as_ref()
+                            .filter(|post| {
+                                !post.root && Some(post.author.as_str()) != visit.reader.as_deref()
+                            })
+                            .map_or("", |post| post.id.as_str())
+                    )
+                ),
+            ]),
+            token,
+        ),
+        _ => Value::Null,
+    };
+    let seen_form = match &token {
+        Some(token) if continues && shown_through > seen_sequence => form(
+            &format!("{address}/seen"),
+            json!([field("through", Some(&shown_through.to_string()))]),
+            token,
+        ),
+        _ => Value::Null,
+    };
+    let older = (low > 1).then(|| format!("{address}?before={low}"));
+    let newer = (shown_through < last && !window.is_empty())
+        .then(|| format!("{address}?after={shown_through}"));
+    let route = topic_route(floor, topic);
     Reply::json(
         200,
         &json!({
-            "postRef": post_ref(floor, post),
-            "source": null,
-            "url": format!("{}/p/{}", floor.origin, post.id),
-            "requestId": request_id,
+            "id": found.root,
+            "slug": topic,
+            "title": found.title,
+            "kind": "topic",
+            "address": address,
+            "tangent": { "slug": tangent, "name": tangent, "address": format!("{}/t/{tangent}", floor.origin) },
+            "locked": found.locked,
+            "pinned": false,
+            "replyCount": replies.len(),
+            "can": can,
+            "gate": gate,
+            "reply": reply,
+            "seen": seen_form,
+            "watching": watching_json(floor, visit, token.as_deref(), &address, topic),
+            "root": post_json(floor, visit, &root, token.as_deref()),
+            "replies": window.iter().map(|post| post_json(floor, visit, post, token.as_deref())).collect::<Vec<_>>(),
+            "from": window.first().map(|post| post.sequence),
+            "through": window.last().map(|post| post.sequence),
+            "older": older,
+            "newer": newer,
+            "anchor": anchored.as_ref().map(|post| post.id.clone()),
+            "place": PLACE_LABEL,
+            "door": format!("{}/", floor.origin),
+            "who": who_json(floor, visit, &route),
+            "day": "2026-10-31",
         }),
     )
 }
 
-fn start_topic(floor: &mut Floor, me: &str, tangent: &str, request: &Received) -> Reply {
-    if !floor.tangents.iter().any(|known| known.key == tangent) {
-        return problem(404, "not_found", "no such tangent");
+fn post_reply(floor: &mut Floor, visit: &Visit<'_>, tangent: &str, topic: &str) -> Reply {
+    if let Some(refused) = refused_at_once(floor, visit) {
+        return refused;
     }
-    let body = request.json();
-    let (Some(request_id), Some(title), Some(text)) = (
-        body["requestId"].as_str(),
-        body["title"].as_str(),
-        body["text"].as_str(),
-    ) else {
+    let Some(found) = located(floor, tangent, topic) else {
+        return absent();
+    };
+    if let (_, Some(gate)) = can_and_gate(floor, visit) {
+        return gated(gate);
+    }
+    if found.locked {
+        return gated("locked");
+    }
+    if found.refusing {
+        return problem(403, "Not open to you", "This isn't open to you here.", None);
+    }
+    let Some(fields) = fields_of(visit.request) else {
+        return unreadable();
+    };
+    let text = |name: &str| fields.get(name).and_then(Value::as_str).unwrap_or_default();
+    let (id, body, parent) = (text("id"), text("body"), text("parent"));
+    if !tid_shaped(id) || body.is_empty() {
+        return problem(400, "Not written", "A reply needs a TID and a body.", None);
+    }
+    let reader = visit.reader.clone().unwrap_or_default();
+    let parent = (!parent.is_empty() && parent != found.root).then_some(parent);
+    if let Some(parent) = parent
+        && !floor
+            .posts
+            .iter()
+            .any(|post| post.id == parent && post.topic == topic)
+    {
+        return problem(400, "Not written", "That Post is not of this Topic.", None);
+    }
+    if let Some(existing) = floor.posts.iter().find(|post| post.id == id) {
+        if existing.author != reader || existing.topic != topic {
+            return problem(400, "Not written", "That id is taken.", None);
+        }
+        return if existing.text == body && existing.reply_to.as_deref() == parent {
+            Reply::json(201, &written_json(floor, existing))
+        } else {
+            problem(409, "Already written", "That id holds other words.", None)
+        };
+    }
+    let post = reply(floor, id, topic, &reader, body, parent);
+    Reply::json(201, &written_json(floor, &post))
+}
+
+fn checkpoint_answer(scope: &str, seq: Option<i64>, watch: bool) -> Reply {
+    Reply::json(200, &json!({ "scope": scope, "seq": seq, "watch": watch }))
+}
+
+fn mark_seen(floor: &mut Floor, visit: &Visit<'_>, tangent: &str, topic: &str) -> Reply {
+    if let Some(refused) = refused_at_once(floor, visit) {
+        return refused;
+    }
+    if located(floor, tangent, topic).is_none() {
+        return absent();
+    }
+    let Some(through) = fields_of(visit.request)
+        .and_then(|fields| fields.get("through")?.as_str()?.parse::<i64>().ok())
+    else {
+        return problem(400, "Not a sequence", "Name one.", None);
+    };
+    let reader = visit.reader.clone().unwrap_or_default();
+    let watch = floor.watches.contains(&(reader.clone(), topic.to_owned()));
+    let seen = floor
+        .topic_seen
+        .entry((reader, topic.to_owned()))
+        .or_insert(-1);
+    *seen = (*seen).max(through);
+    checkpoint_answer(&format!("topic:{topic}"), Some(*seen), watch)
+}
+
+fn set_watch(floor: &mut Floor, visit: &Visit<'_>, tangent: &str, topic: Option<&&str>) -> Reply {
+    if let Some(refused) = refused_at_once(floor, visit) {
+        return refused;
+    }
+    let scope = match topic {
+        Some(topic) if located(floor, tangent, topic).is_some() => (*topic).to_owned(),
+        None if floor.tangents.iter().any(|known| known.key == tangent) => tangent.to_owned(),
+        _ => return absent(),
+    };
+    let Some(watch) = fields_of(visit.request)
+        .and_then(|fields| fields.get("watch")?.as_str()?.parse::<bool>().ok())
+    else {
+        return problem(400, "Not a watch flag", "It is true or false.", None);
+    };
+    let reader = visit.reader.clone().unwrap_or_default();
+    if watch {
+        floor.watches.insert((reader, scope.clone()));
+    } else {
+        floor.watches.remove(&(reader, scope.clone()));
+    }
+    checkpoint_answer(&scope, None, watch)
+}
+
+/// The Post `post` of the Topic `topic`.
+fn located_post(floor: &Floor, tangent: &str, topic: &str, post: &str) -> Option<Post> {
+    located(floor, tangent, topic)?;
+    floor
+        .posts
+        .iter()
+        .find(|found| found.id == post && found.topic == topic)
+        .cloned()
+}
+
+fn edit_page(
+    floor: &mut Floor,
+    visit: &mut Visit<'_>,
+    tangent: &str,
+    topic: &str,
+    post: &str,
+) -> Reply {
+    let Some(found) = located_post(floor, tangent, topic, post) else {
+        return absent();
+    };
+    let mine = visit.reader.as_deref() == Some(found.author.as_str());
+    let address = post_ref(floor, &found);
+    let may = mine && !found.removed;
+    let token = if may { visit.token(floor) } else { None };
+    let gate = if found.removed {
+        Some("removed")
+    } else if !mine {
+        Some("not yours")
+    } else {
+        None
+    };
+    Reply::json(
+        200,
+        &json!({
+            "id": found.id,
+            "address": address,
+            "tangent": tangent,
+            "topicAddress": format!("{}{}", floor.origin, topic_route(floor, topic)),
+            "root": found.root,
+            "body": found.text,
+            "version": found.version,
+            "removed": found.removed,
+            "edit": token.as_ref().map(|token| form(
+                &format!("{address}/edit"),
+                json!([field("version", Some(&found.version.to_string())), field("body", None)]),
+                token,
+            )),
+            "remove": token.as_ref().map(|token| form(&format!("{address}/remove"), json!([]), token)),
+            "can": ["View"],
+            "gate": gate,
+            "removeGate": gate,
+            "place": PLACE_LABEL,
+            "door": format!("{}/", floor.origin),
+            "who": who_json(floor, visit, &format!("{}/{post}/edit", topic_route(floor, topic))),
+        }),
+    )
+}
+
+/// What refuses a change to `found` by the visit's reader, if anything does.
+fn change_refused(visit: &Visit<'_>, found: &Post) -> Option<Reply> {
+    if found.removed {
+        return Some(gated("removed"));
+    }
+    (visit.reader.as_deref() != Some(found.author.as_str())).then(|| gated("not yours"))
+}
+
+fn edit_post(
+    floor: &mut Floor,
+    visit: &Visit<'_>,
+    tangent: &str,
+    topic: &str,
+    post: &str,
+) -> Reply {
+    if let Some(refused) = refused_at_once(floor, visit) {
+        return refused;
+    }
+    let Some(found) = located_post(floor, tangent, topic, post) else {
+        return absent();
+    };
+    if let Some(refused) = change_refused(visit, &found) {
+        return refused;
+    }
+    let Some(fields) = fields_of(visit.request) else {
+        return unreadable();
+    };
+    let body = fields
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let version = fields
+        .get("version")
+        .and_then(Value::as_str)
+        .and_then(|version| version.parse::<u64>().ok());
+    if body.is_empty() || version.is_none() {
         return problem(
             400,
-            "invalid_arguments",
-            "requestId, title and text are required",
+            "Not written",
+            "An edit needs a version and a body.",
+            None,
         );
+    }
+    if version != Some(found.version) {
+        return problem(409, "Changed since you read it", "Read it again.", None);
+    }
+    let Some(held) = floor.posts.iter_mut().find(|held| held.id == post) else {
+        return absent();
     };
-    let digest = Sha256::digest(format!("{me}\n{tangent}\n{request_id}").as_bytes());
-    let key = format!(
-        "thread-{}",
-        digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()[..24]
-            .to_owned()
-    );
-    let existing = floor.topics.iter().find(|topic| topic.key == key).cloned();
-    let opening = match existing {
-        Some(topic) => {
-            let first = floor
-                .posts
-                .iter()
-                .find(|post| post.topic == topic.key)
-                .cloned();
-            match first {
-                Some(first) if topic.title == title && first.text == text => first,
-                _ => {
-                    return problem(
-                        409,
-                        "request_conflict",
-                        "that request id named another topic",
-                    );
-                }
-            }
-        }
-        None => {
-            floor.topics.push(Topic {
-                key: key.clone(),
-                tangent: tangent.to_owned(),
-                title: title.to_owned(),
-                brief: String::new(),
-                refusing_writes: false,
-            });
-            floor.seq += 1;
-            let seq = floor.seq;
-            let post = Post {
-                id: format!("p{seq}"),
-                topic: key.clone(),
-                author: me.to_owned(),
-                text: text.to_owned(),
-                reply_to: None,
-                request_id: Some(request_id.to_owned()),
-                removed: false,
-                edited: false,
-                seq,
-            };
-            floor.posts.push(post.clone());
-            post
-        }
+    held.text = body.to_owned();
+    held.version += 1;
+    held.edited = true;
+    let edited = held.clone();
+    Reply::json(200, &written_json(floor, &edited))
+}
+
+fn remove_post(
+    floor: &mut Floor,
+    visit: &Visit<'_>,
+    tangent: &str,
+    topic: &str,
+    post: &str,
+) -> Reply {
+    if let Some(refused) = refused_at_once(floor, visit) {
+        return refused;
+    }
+    let Some(found) = located_post(floor, tangent, topic, post) else {
+        return absent();
     };
+    if let Some(refused) = change_refused(visit, &found) {
+        return refused;
+    }
+    let Some(held) = floor.posts.iter_mut().find(|held| held.id == post) else {
+        return absent();
+    };
+    held.removed = true;
+    let removed = held.clone();
+    Reply::json(200, &written_json(floor, &removed))
+}
+
+fn report_page(
+    floor: &mut Floor,
+    visit: &mut Visit<'_>,
+    tangent: &str,
+    topic: &str,
+    post: &str,
+    received: bool,
+) -> Reply {
+    let Some(found) = located_post(floor, tangent, topic, post) else {
+        return absent();
+    };
+    let mine = visit.reader.as_deref() == Some(found.author.as_str());
+    let address = post_ref(floor, &found);
+    let offered = !received && !mine && !found.removed;
+    let token = if offered { visit.token(floor) } else { None };
     Reply::json(
         200,
         &json!({
-            "topicRef": format!("{}::{tangent}::{key}", floor.origin),
-            "tangentRef": format!("{}::{tangent}", floor.origin),
-            "postRef": post_ref(floor, &opening),
-            "title": title,
-            "url": format!("{}/t/{key}", floor.origin),
-            "requestId": request_id,
+            "reported": { "id": found.id, "address": address, "text": found.text, "removed": found.removed },
+            "received": received,
+            "report": token.as_ref().map(|token| form(
+                &format!("{address}/report"),
+                json!([field("id", Some("3mz5acrpyshjl")), field("body", None)]),
+                token,
+            )),
+            "gate": if found.removed { Some("removed") } else { None },
+            "place": PLACE_LABEL,
+            "door": format!("{}/", floor.origin),
+            "who": who_json(floor, visit, &format!("{}/{post}/report", topic_route(floor, topic))),
         }),
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn times_are_written_as_rfc_3339_in_utc() {
-        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
-        assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
-        assert_eq!(rfc3339(1_790_000_000), "2026-09-21T14:13:20Z");
+fn report_post(
+    floor: &mut Floor,
+    visit: &mut Visit<'_>,
+    tangent: &str,
+    topic: &str,
+    post: &str,
+) -> Reply {
+    if let Some(refused) = refused_at_once(floor, visit) {
+        return refused;
     }
-
-    #[test]
-    fn the_audience_of_a_loopback_space_names_its_port() {
-        assert_eq!(
-            loopback_audience("http://127.0.0.1:5300"),
-            "did:web:localhost%3A5300#tangent"
+    if located_post(floor, tangent, topic, post).is_none() {
+        return absent();
+    }
+    let Some(fields) = fields_of(visit.request) else {
+        return unreadable();
+    };
+    let text = |name: &str| fields.get(name).and_then(Value::as_str).unwrap_or_default();
+    let (id, reason) = (text("id"), text("body"));
+    if !tid_shaped(id) || reason.is_empty() {
+        return problem(
+            400,
+            "Not written",
+            "A report needs a TID and a reason.",
+            None,
         );
     }
+    let reader = visit.reader.clone().unwrap_or_default();
+    let reported = (post.to_owned(), reader, reason.to_owned());
+    if !floor.reports.contains(&reported) {
+        floor.reports.push(reported);
+    }
+    report_page(floor, visit, tangent, topic, post, true)
+}
+
+fn participant_page(floor: &Floor, visit: &Visit<'_>, someone: &str) -> Reply {
+    let Some(found) = floor
+        .participants
+        .iter()
+        .find(|participant| participant.reference == someone || participant.handle == someone)
+    else {
+        return absent();
+    };
+    let (can, gate) = can_and_gate(floor, visit);
+    let posts: Vec<Value> = floor
+        .posts
+        .iter()
+        .rev()
+        .filter(|post| post.author == found.reference && !post.removed)
+        .take(20)
+        .map(|post| {
+            let topic = floor.topics.iter().find(|topic| topic.key == post.topic);
+            let route = topic_route(floor, &post.topic);
+            json!({
+                "id": post.id,
+                "kind": if post.root { "topic" } else { "reply" },
+                "topic": topic.map(|topic| topic.title.clone()),
+                "tangent": topic.map(|topic| topic.tangent.clone()),
+                "tangentAddress": topic.map(|topic| format!("{}/t/{}", floor.origin, topic.tangent)),
+                "address": if post.root {
+                    format!("{}{route}", floor.origin)
+                } else {
+                    post_ref(floor, post)
+                },
+                "line": post.text.chars().take(180).collect::<String>(),
+                "at": rfc3339(1_790_000_000 + post.log as i64 * 60),
+            })
+        })
+        .collect();
+    let address = format!("{}/p/{}", floor.origin, segment(&found.handle));
+    Reply::json(
+        200,
+        &json!({
+            "id": found.reference,
+            "handle": found.handle,
+            "name": found.display_name,
+            "displayName": found.display_name,
+            "kind": "person",
+            "roles": [],
+            "address": address,
+            "can": can,
+            "gate": gate,
+            "posts": posts,
+            "older": null,
+            "continued": false,
+            "place": PLACE_LABEL,
+            "door": format!("{}/", floor.origin),
+            "who": who_json(floor, visit, &format!("/p/{someone}")),
+            "day": "2026-10-31",
+        }),
+    )
 }

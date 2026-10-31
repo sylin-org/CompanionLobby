@@ -189,7 +189,7 @@ pub fn run(adapter: &dyn ServiceAdapter, fixture: &dyn ServiceFixture) {
     assert!(quoted, "the planted text arrives quoted");
     let catalog_text = format!("{catalog:?}");
     assert!(!catalog_text.contains(HOSTILE));
-    assert!(slot.reissued().is_empty(), "nothing was established again");
+    let minted = fixture.minted().len();
 
     let before = fixture.requests();
     let unknown = ToolName::new("no_such_tool").expect("a tool name");
@@ -220,17 +220,21 @@ pub fn run(adapter: &dyn ServiceAdapter, fixture: &dyn ServiceFixture) {
     // A service that stopped taking what it issued: the adapter establishes
     // the connection again once, with a fresh proof, keeps what the service
     // issued anew, and the call answers.
+    assert_eq!(
+        fixture.minted().len(),
+        minted,
+        "nothing was established again"
+    );
     fixture.drop_issued();
-    let minted = fixture.minted().len();
     adapter
         .call(&tool, &arguments, &address, &slot)
         .expect("the read answers after the connection is established again");
-    assert_eq!(slot.reissued().len(), 1, "established again exactly once");
     assert_eq!(
         fixture.minted().len(),
         minted + 1,
-        "with one proof minted fresh for it"
+        "established again exactly once, with one proof minted fresh for it"
     );
+    assert!(!slot.reissued().is_empty(), "and what it issued is kept");
     assert_ne!(
         slot.issued(),
         issued,
@@ -240,7 +244,7 @@ pub fn run(adapter: &dyn ServiceAdapter, fixture: &dyn ServiceFixture) {
         .call(&tool, &arguments, &address, &slot)
         .expect("the next read answers");
     assert!(!again.text.is_empty());
-    assert_eq!(slot.reissued().len(), 1, "and keeps using it");
+    assert_eq!(fixture.minted().len(), minted + 1, "and keeps using it");
 
     // A connection the service issued less leave offers fewer tools, and a
     // write it is not allowed is refused before anything reaches the

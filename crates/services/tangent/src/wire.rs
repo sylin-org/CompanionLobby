@@ -1,41 +1,45 @@
 //! Speaking to a Space, and what its answers mean.
 //!
 //! Every request goes through the outbound agent, so no redirect is
-//! followed and nothing goes anywhere but the Space's reviewed origin. The
-//! participant token rides only in the `Authorization` header, as `Bearer`.
-//! Every write but a `DELETE` carries a JSON body with its content type,
-//! even an empty one, since the Space refuses a write without it. Answers
-//! are read up to [`READ_LIMIT`] bytes.
+//! followed and nothing goes anywhere but the Space's reviewed origin. A
+//! request carries the connection's own cookies and asks for JSON, and what
+//! `Set-Cookie` the answer sends goes back in the jar. A write carries one
+//! JSON object with its content type, and the form's token in
+//! [`TOKEN_HEADER`]. Answers are read up to [`READ_LIMIT`] bytes.
 //!
 //! What an answer means is decided here, once, for every tool:
 //!
-//! * 401 is the Space not taking the connection's token: the adapter
-//!   establishes the connection again, once, and tries once more;
-//! * 403 is a definite refusal, whatever code it carries, and never an
-//!   unknown outcome: `not_admitted` and `participant_suspended` say so, and
-//!   every other code says the Space does not let the companion do that;
-//! * 400 `cursor_expired` is a cursor to leave out, any other 400 the
-//!   arguments; 404 is missing; 409 `request_conflict` is a request id
-//!   already used for something else; 429 asks for fewer requests;
-//! * any 2xx is a success when its body is a JSON object the route's
-//!   checks accept; a 202 says the Space holds a write for its stewards;
-//! * anything else, an answer the adapter does not trust, or an answer
-//!   that never arrived, is the Space being unavailable for a read; for a
-//!   write it is an unknown outcome, which says to read before writing
-//!   again, unless the request certainly never left.
+//! * 401 is the Space not taking the connection's cookies: the adapter proves
+//!   the account again, once, and tries once more;
+//! * 403 is a definite refusal, and never an unknown outcome: its `gate` word
+//!   says why ([`gated`]), and any other says the Space does not let the
+//!   companion do that;
+//! * 400 is the arguments; 404 is missing; 409 is a request id already used
+//!   for something else, or a Post that changed; 429 asks for fewer requests;
+//! * any 2xx is a success when its body is a JSON object the route's checks
+//!   accept;
+//! * anything else, an answer the adapter does not trust, or an answer that
+//!   never arrived, is the Space being unavailable for a read; for a write it
+//!   is an unknown outcome, which says to read before writing again, unless
+//!   the request certainly never left.
 
 use lobby_contracts::{Address, Effect, Explained, Outcome, Retry};
 use lobby_outbound::{Failure, Outbound, Request, Response};
 use serde_json::Value;
+use std::cell::RefCell;
 use std::time::Duration;
+
+use crate::jar::Jar;
 
 /// The longest answer read, in bytes: two Topic windows' worth.
 pub const READ_LIMIT: usize = 2 * 1024 * 1024;
+/// The header a form's token travels in beside one JSON object.
+pub const TOKEN_HEADER: &str = "RequestVerificationToken";
 
 /// How a request to the Space failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failed {
-    /// The Space does not take the connection's token.
+    /// The Space does not take the connection's cookies.
     Unauthenticated,
     /// It ended otherwise.
     Ended(Explained),
@@ -55,20 +59,28 @@ impl From<Explained> for Failed {
 
 /// The Space does not let the companion do that.
 pub const PERMISSION_DENIED: &str = "The Space does not let this companion do that here. Call tangent_arrive or read the Topic to see what it may do.";
-/// The companion is not admitted.
-pub const NOT_ADMITTED: &str = "This companion is not admitted to that Tangent. Join it with tangent_join first; when its stewards review new members, wait until they admit it.";
-/// The companion is suspended.
-pub const SUSPENDED: &str = "The Space has suspended this companion, so it cannot act there until the Space's stewards lift the suspension. Nothing the companion or its sponsor does here changes that.";
-/// A cursor the Space does not take.
-pub const CURSOR_EXPIRED: &str =
-    "That cursor has expired. Leave it out to start again from the newest page.";
+/// The companion's application waits.
+pub const NOT_ADMITTED: &str = "This companion's application to the Space is waiting: it can write there once someone admits it, and nothing it or its sponsor does here changes that.";
+/// The companion's application was declined.
+pub const DECLINED: &str = "The Space declined this companion's application, so it reads there and does not write. Only the Space's stewards can change that.";
+/// The companion is timed out.
+pub const TIMED_OUT: &str = "The Space has timed this companion out: it can read and report there, and post again once that ends.";
+/// The Topic is locked.
+pub const LOCKED: &str =
+    "This Topic is locked, so no one replies in it. Find another with tangent_topics.";
+/// The Post is removed.
+pub const REMOVED: &str = "This Post is removed, so nothing changes it now.";
+/// The Post is someone else's.
+pub const NOT_YOURS: &str = "Only this Post's author, or a moderator, can change it.";
+/// The Space shows nothing to the companion, however it arrives.
+pub const SUSPENDED: &str = "The Space shows nothing to this companion. It may have banned it, and only the Space's stewards can lift that; nothing the companion or its sponsor does here changes it.";
 /// Arguments the Space refused.
 pub const INVALID_ARGUMENTS: &str = "The Space refused those arguments. Check them against the tool's description; references are copied as the Space gave them.";
 /// Something missing.
 pub const NOT_FOUND: &str = "The Space has no such thing, or does not show it to this companion. Read again from tangent_arrive to find it.";
 /// A request id used for something else.
 pub const REQUEST_CONFLICT: &str = "That request_id was already used for a different write. Choose a new request_id for a new write, or send exactly the same write again to see what it made.";
-/// Another conflict.
+/// A Post that changed.
 pub const CONFLICT: &str =
     "The Space refused this because what it acts on changed. Read it again before trying.";
 /// A post whose answer was lost.
@@ -79,9 +91,9 @@ pub const WRITE_UNKNOWN: &str = "The Space may have made this change, but its an
 pub const UNREACHABLE: &str = "The lobby may not reach this Space's address, so nothing was sent.";
 /// A Space that cannot answer just now.
 pub const UNAVAILABLE: &str = "The Space cannot answer right now. Try again in a little while.";
-/// A Space that does not take the token even after the connection was
-/// established again.
-pub const NOT_TAKEN: &str = "The Space does not take this companion's credential, even one it just issued, so nothing was done. It may have suspended the companion there; only the Space's stewards can say.";
+/// A Space that does not take the cookies even after the account proved
+/// itself again.
+pub const NOT_TAKEN: &str = "The Space does not take this companion even after it proved itself again, so nothing was done. Only the Space's stewards can say why.";
 
 /// What a lost answer means for a tool of `effect`.
 pub fn lost(effect: Effect) -> Explained {
@@ -92,37 +104,44 @@ pub fn lost(effect: Effect) -> Explained {
     }
 }
 
-/// The problem code an answer carries: the experience API's `code`, or an
-/// `error`.
-pub fn code(response: &Response) -> Option<String> {
+/// A word an answer's JSON carries in `field`.
+pub fn word(response: &Response, field: &str) -> Option<String> {
     let body: Value = serde_json::from_slice(&response.body).ok()?;
-    body.get("code")
-        .or_else(|| body.get("error"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+    body.get(field).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// What a gate word means. `sign-in` is the Space not knowing the companion.
+pub fn gated(gate: &str) -> Failed {
+    let sentence = match gate {
+        "sign-in" => return Failed::Unauthenticated,
+        "absent" => return Explained::new(Outcome::NotFound, NOT_FOUND).into(),
+        "apply" => NOT_ADMITTED,
+        "declined" => DECLINED,
+        "timed-out" => TIMED_OUT,
+        "locked" => LOCKED,
+        "removed" => REMOVED,
+        "not yours" => NOT_YOURS,
+        _ => PERMISSION_DENIED,
+    };
+    Explained::new(Outcome::Refused, sentence).into()
 }
 
 /// What an answer that is not a success means for a tool of `effect`.
 pub fn refusal(response: &Response, effect: Effect) -> Failed {
-    let code = code(response);
-    let code = code.as_deref();
     match response.status {
         401 => Failed::Unauthenticated,
-        403 => Failed::Ended(match code {
-            Some("not_admitted") => Explained::new(Outcome::Refused, NOT_ADMITTED),
-            Some("participant_suspended") => Explained::new(Outcome::Refused, SUSPENDED),
-            _ => Explained::new(Outcome::Refused, PERMISSION_DENIED),
-        }),
-        400 if code == Some("cursor_expired") => {
-            Explained::new(Outcome::InvalidInput, CURSOR_EXPIRED).into()
-        }
+        403 => match word(response, "gate").as_deref() {
+            None | Some("absent" | "sign-in") => {
+                Explained::new(Outcome::Refused, PERMISSION_DENIED).into()
+            }
+            Some(gate) => gated(gate),
+        },
         400 => Explained::new(Outcome::InvalidInput, INVALID_ARGUMENTS).into(),
         404 => Explained::new(Outcome::NotFound, NOT_FOUND).into(),
-        409 if code == Some("request_conflict") => {
+        409 if word(response, "title").as_deref() == Some("Already written") => {
             Explained::new(Outcome::Conflict, REQUEST_CONFLICT).into()
         }
         409 => Explained::new(Outcome::Conflict, CONFLICT).into(),
-        415 => Outcome::Internal.into(),
         429 => Outcome::RateLimited.into(),
         _ => lost(effect).into(),
     }
@@ -132,7 +151,13 @@ pub fn refusal(response: &Response, effect: Effect) -> Failed {
 pub struct Call<'a> {
     pub method: &'a str,
     pub path: &'a str,
+    /// A service proof, presented as `Bearer`.
+    pub proof: Option<&'a str>,
+    /// The cookies this request goes with, which take what the answer sets.
+    pub jar: &'a RefCell<Jar>,
+    /// A form's token.
     pub token: Option<&'a str>,
+    /// One JSON object.
     pub body: Option<&'a Value>,
     pub effect: Effect,
     /// The whole request's deadline, when it needs one shorter than the
@@ -140,32 +165,54 @@ pub struct Call<'a> {
     pub within: Option<Duration>,
 }
 
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Sends `call` and answers the response, or what its loss means.
 pub fn send(outbound: &Outbound, address: &Address, call: &Call<'_>) -> Result<Response, Failed> {
-    let mut request = Request::new(call.method, call.path).limit(READ_LIMIT);
+    let now = now_secs();
+    let https = address.is_https();
+    let mut request = Request::new(call.method, call.path)
+        .limit(READ_LIMIT)
+        .header("Accept", "application/json");
     if let Some(deadline) = call.within {
         request = request.within(deadline);
     }
-    if let Some(token) = call.token {
-        request = request.header("Authorization", format!("Bearer {token}"));
+    if let Some(proof) = call.proof {
+        request = request.header("Authorization", format!("Bearer {proof}"));
     }
-    if call.method != "GET" && call.method != "DELETE" {
-        let body = call
-            .body
-            .cloned()
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    if let Some(cookies) = call.jar.borrow().header(call.path, https, now) {
+        request = request.header("Cookie", cookies);
+    }
+    if let Some(token) = call.token {
+        request = request.header(TOKEN_HEADER, token);
+    }
+    if let Some(body) = call.body {
         request = request.json(body.to_string().into_bytes());
     }
-    outbound
+    let response = outbound
         .send(address, request)
-        .map_err(|failure| match failure {
-            // Nothing left: a write is not in doubt.
-            Failure::Refused => Explained::new(Outcome::Refused, UNREACHABLE).into(),
-            Failure::Unreachable => {
-                Explained::new(Outcome::TemporarilyUnavailable, UNAVAILABLE).into()
+        .map_err(|failure| -> Failed {
+            match failure {
+                // Nothing left: a write is not in doubt.
+                Failure::Refused => Explained::new(Outcome::Refused, UNREACHABLE).into(),
+                Failure::Unreachable => {
+                    Explained::new(Outcome::TemporarilyUnavailable, UNAVAILABLE).into()
+                }
+                Failure::Interrupted => lost(call.effect).into(),
             }
-            Failure::Interrupted => lost(call.effect).into(),
-        })
+        })?;
+    {
+        let mut jar = call.jar.borrow_mut();
+        for set in response.all("set-cookie") {
+            jar.absorb(set, call.path, https, now);
+        }
+    }
+    Ok(response)
 }
 
 /// The JSON body of a success, any 2xx answer, or what the answer means.
@@ -206,10 +253,10 @@ mod tests {
     }
 
     #[test]
-    fn a_definite_forbidden_is_refused_even_with_an_unknown_code() {
+    fn a_definite_forbidden_is_refused_even_with_an_unknown_gate() {
         for body in [
-            r#"{"error":"future_auth_layer_denial"}"#,
-            r#"{"code":"permission_denied","message":"no"}"#,
+            r#"{"gate":"a-future-gate"}"#,
+            r#"{"title":"Not open to you"}"#,
             "not json",
         ] {
             assert_eq!(
@@ -219,15 +266,16 @@ mod tests {
             );
         }
         assert_eq!(
-            refusal(&response(403, r#"{"code":"not_admitted"}"#), POST),
+            refusal(&response(403, r#"{"gate":"apply"}"#), POST),
             Failed::Ended(Explained::new(Outcome::Refused, NOT_ADMITTED))
         );
         assert_eq!(
-            refusal(
-                &response(403, r#"{"error":"participant_suspended"}"#),
-                Effect::Read
-            ),
-            Failed::Ended(Explained::new(Outcome::Refused, SUSPENDED))
+            refusal(&response(403, r#"{"gate":"locked"}"#), POST),
+            Failed::Ended(Explained::new(Outcome::Refused, LOCKED))
+        );
+        assert_eq!(
+            refusal(&response(403, r#"{"gate":"not yours"}"#), EDIT),
+            Failed::Ended(Explained::new(Outcome::Refused, NOT_YOURS))
         );
     }
 
@@ -250,13 +298,17 @@ mod tests {
         assert_eq!(lost(POST).sentence, POST_UNKNOWN);
         assert_eq!(lost(EDIT).sentence, WRITE_UNKNOWN);
         assert_eq!(
-            refusal(&response(409, r#"{"code":"request_conflict"}"#), POST),
+            refusal(&response(409, r#"{"title":"Already written"}"#), POST),
             Failed::Ended(Explained::new(Outcome::Conflict, REQUEST_CONFLICT))
         );
-        assert_eq!(refusal(&response(401, "{}"), POST), Failed::Unauthenticated);
         assert_eq!(
-            refusal(&response(400, r#"{"code":"cursor_expired"}"#), Effect::Read),
-            Failed::Ended(Explained::new(Outcome::InvalidInput, CURSOR_EXPIRED))
+            refusal(
+                &response(409, r#"{"title":"Changed since you read it"}"#),
+                EDIT
+            ),
+            Failed::Ended(Explained::new(Outcome::Conflict, CONFLICT))
         );
+        assert_eq!(refusal(&response(401, "{}"), POST), Failed::Unauthenticated);
+        assert_eq!(gated("sign-in"), Failed::Unauthenticated);
     }
 }

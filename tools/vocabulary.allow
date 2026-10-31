@@ -40,13 +40,13 @@ crates/daemon/tests/space_journey.rs	provider-tangent	The journey connects a com
 crates/daemon/tests/space_journey.rs	provider-atproto	The journey signs the companion in with the atproto adapter against the test kit's fake world.
 crates/daemon/tests/space_journey.rs	provider-atproto-wire	The journey checks the proof the fake PDS minted.
 crates/testkit/src/hosts.rs	provider-tangent	A recorded mind calls the Tangent adapter's tools by the names its host saw.
-crates/testkit/fixtures/hosts/claude-code-2.1.303-space.jsonl	provider-tangent	The frames a real host exchanged with the lobby while its mind used the Tangent adapter's tools.
+crates/testkit/fixtures/hosts/claude-code-2.1.311-space.jsonl	provider-tangent	The frames a real host exchanged with the lobby while its mind used the Tangent adapter's tools.
 crates/testkit/fixtures/manager/companion-accounts.txt	provider-tangent	The page's recorded text names the installed service by its title.
 crates/testkit/fixtures/manager/companion-trouble.txt	provider-tangent	The page's recorded text names the installed service by its title.
 docs/services/tangent.md	provider-atproto	A Space names itself by a did:web DID and takes atproto accounts; its doc states both as the Space's own wire.
 docs/services/tangent.md	provider-atproto-wire	A Space's accounts prove themselves with a proof their PDS mints; its doc says where the proof comes from.
-crates/testkit/fixtures/hosts/claude-code-2.1.303-space.jsonl	harvest	The recorded mind's own reply tells Bea to harvest her basil from the top; the word is a gardener's, written by the mind, and every other marker rule still applies to the file.
-crates/testkit/fixtures/hosts/claude-code-2.1.303-space-shown.jsonl	provider-tangent	What a real host showed its mind while it used the Tangent adapter's tools, in the adapter's own words.
+crates/testkit/fixtures/hosts/claude-code-2.1.311-space.jsonl	harvest	The recorded mind's own reply tells Bea to harvest her basil from the top; the word is a gardener's, written by the mind, and every other marker rule still applies to the file.
+crates/testkit/fixtures/hosts/claude-code-2.1.311-space-shown.jsonl	provider-tangent	What a real host showed its mind while it used the Tangent adapter's tools, in the adapter's own words.
 crates/conformance/Cargo.toml	provider-bluesky	The conformance suite's tests hold the Bluesky service adapter to its contract.
 crates/conformance/tests/bluesky_service.rs	provider-bluesky	The service suite runs against the Bluesky adapter and the test kit's fake PDS.
 crates/conformance/tests/bluesky_service.rs	provider-atproto	The Bluesky adapter's records live in the fake PDS's repository, in their lexicon's own names.
@@ -63,3 +63,4 @@ crates/daemon/tests/bluesky_journey.rs	provider-atproto-wire	The journey checks 
 crates/testkit/fixtures/manager/companion-accounts.txt	provider-bluesky	The page's recorded text names the installed services by their titles.
 crates/testkit/fixtures/manager/companion-trouble.txt	provider-bluesky	The page's recorded text names the installed services by their titles.
 docs/services/bluesky.md	provider-tangent	Bluesky's doc shows one atproto account serving Tangent and Bluesky at once, and walks both in its live check.
+crates/services/tangent/tests/wire.rs	provider-atproto	The test plays a Space, whose profile names itself by a did:web DID, for an adapter taking accounts of that kind.

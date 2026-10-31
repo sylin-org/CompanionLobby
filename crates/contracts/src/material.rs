@@ -153,8 +153,8 @@ pub trait IssuedSlot: Send + Sync {
     fn authority(&self) -> &dyn Authority;
 
     /// Keeps `issued`, which the service issued when the connection was
-    /// established again, in place of what was read. Refused when the
-    /// connection was revoked or changed meanwhile.
+    /// established again, or set for it along the way, in place of what was
+    /// read. Refused when the connection was revoked or changed meanwhile.
     fn reissue(&self, issued: SealedIssued) -> Result<(), Outcome>;
 }
 

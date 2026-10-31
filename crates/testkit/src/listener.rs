@@ -142,7 +142,8 @@ pub struct Listener {
 }
 
 /// Which answers an answer hold keeps back: those to a route starting with
-/// `prefix`, and, when `field` names one, whose form field has that value.
+/// `prefix`, and, when `field` names one, whose form field or JSON member has
+/// that value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AnswerHold {
     prefix: String,
@@ -152,10 +153,10 @@ struct AnswerHold {
 impl AnswerHold {
     fn holds(&self, request: &Received) -> bool {
         request.route().starts_with(self.prefix.as_str())
-            && self
-                .field
-                .as_ref()
-                .is_none_or(|(name, value)| request.field(name).as_deref() == Some(value.as_str()))
+            && self.field.as_ref().is_none_or(|(name, value)| {
+                request.field(name).as_deref() == Some(value.as_str())
+                    || request.json()[name.as_str()] == value.as_str()
+            })
     }
 }
 
@@ -262,7 +263,7 @@ impl Listener {
     }
 
     /// [`Listener::hold_answers`], for the requests to `prefix` whose form
-    /// field `field` is `value` only.
+    /// field or JSON member `field` is `value` only.
     pub fn hold_answers_to(&self, prefix: &str, field: &str, value: &str) -> Hold<'_> {
         self.hold_answers_like(AnswerHold {
             prefix: prefix.to_owned(),

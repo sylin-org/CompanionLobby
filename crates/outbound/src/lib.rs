@@ -126,7 +126,9 @@ impl<'a> Request<'a> {
 pub struct Response {
     /// The HTTP status.
     pub status: u16,
-    /// The headers, names lowercased, in the order they arrived.
+    /// The headers, names lowercased, one pair per value: a header sent more
+    /// than once, as `Set-Cookie` is, comes back once for each value it was
+    /// sent with, those of one name together, in the order they arrived.
     pub headers: Vec<(String, String)>,
     /// The body.
     pub body: Vec<u8>,
@@ -138,6 +140,15 @@ impl Response {
         self.headers
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Every value of the header `name`, compared without case, in the order
+    /// they arrived.
+    pub fn all(&self, name: &str) -> impl Iterator<Item = &str> {
+        self.headers
+            .iter()
+            .filter(move |(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
     }
 
@@ -223,14 +234,16 @@ impl Outbound {
             }
         };
         let status = response.status();
-        let headers = response
-            .headers_names()
-            .into_iter()
-            .filter_map(|name| {
-                let value = response.header(&name)?.to_owned();
-                Some((name.to_ascii_lowercase(), value))
-            })
-            .collect();
+        let mut headers: Vec<(String, String)> = Vec::new();
+        for name in response.headers_names() {
+            let name = name.to_ascii_lowercase();
+            if headers.iter().any(|(seen, _)| *seen == name) {
+                continue;
+            }
+            for value in response.all(&name) {
+                headers.push((name.clone(), value.to_owned()));
+            }
+        }
         let mut body = Vec::new();
         response
             .into_reader()
@@ -327,6 +340,30 @@ mod tests {
             head
         });
         (loopback(port), handle)
+    }
+
+    #[test]
+    fn a_header_sent_twice_comes_back_with_both_values() {
+        let (address, server) = serve_once(
+            b"HTTP/1.1 204 No Content
+Set-Cookie: one=1; path=/
+X-Board: one
+Set-Cookie: two=2; path=/
+Connection: close
+
+",
+        );
+        let outbound = Outbound::new(AddressPolicy::LoopbackAllowed);
+        let response = outbound
+            .send(&address, Request::new("GET", "/"))
+            .expect("a response");
+        server.join().expect("the server");
+        assert_eq!(
+            response.all("Set-Cookie").collect::<Vec<_>>(),
+            ["one=1; path=/", "two=2; path=/"]
+        );
+        assert_eq!(response.header("x-board"), Some("one"));
+        assert_eq!(response.all("absent").count(), 0);
     }
 
     #[test]

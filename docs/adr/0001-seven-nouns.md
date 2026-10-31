@@ -223,9 +223,9 @@ decision.
    attaches through the shim; none attaches over HTTP directly.
 8. **Ship line.** v0.1.0 as described above; sponsor portraits exist, and
    Bluesky, the `attention` tool, profile portraits and the tray come after.
-9. **Tangent connection defaults.** Request the server's default grants
-   (welcome, read, post) with a 7-day lifetime; the `manage` grant and the
-   lifetime are per-connection sponsor choices in the manager. The derived
+9. **Tangent connection.** A proof signs the account in as a browser's
+   sign-in does, and the connection keeps the Space's cookies for itself; what
+   the companion may do there is what the Space's pages offer it. The derived
    did:web audience is built first; the did:plc DID-document proof path is
    required for the ship line only if the owner's live Tangent uses it.
 10. **Journal retention.** Five rotated generations of 1 MiB each, with no
