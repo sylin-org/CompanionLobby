@@ -69,7 +69,12 @@ word and one action:
 | Revoked | The sponsor revoked it, or its account. | *Open again* with a ready account the service takes, or *Sign in* when there is none. |
 
 A revoked connection is shown only while nothing ready or newer holds its
-name. Below the list, each installed service has a form: the address (a
+name. A service's own page may open the manager at `/?service=<name>&address=<origin>`:
+the manager takes those once and clears them from the address, says on the
+list of companions which place was offered, and fills that service's form with
+the address and a suggested name. It only fills the form: nothing connects
+until the sponsor reads it and opens the connection. Below the list, each
+installed service has a form: the address (a
 bare host is read as `https://`, and a bare `localhost`, `127.0.0.1` or
 `[::1]`, with or without a port, as `http://`), a name suggested from the address, and,
 when the companion holds more than one account the service takes, which

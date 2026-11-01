@@ -91,8 +91,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use p256::ecdsa::signature::Verifier as _;
-use p256::ecdsa::{Signature, VerifyingKey};
+use p256::ecdsa::signature::{Signer as _, Verifier as _};
+use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -746,16 +746,18 @@ fn service_auth(book: &mut Book, proofs: &Proofs, pds: &str, request: &Received)
         );
     }
     let id = unique_token("jti");
-    let token = format!(
-        "{}.{}.{}",
+    let signed = format!(
+        "{}.{}",
         base64url(br##"{"typ":"JWT","alg":"ES256","kid":"#atproto"}"##),
         base64url(
             json!({ "iss": grant.did, "aud": audience, "lxm": method, "exp": exp, "iat": now, "jti": id })
                 .to_string()
                 .as_bytes()
         ),
-        base64url(unique_token("signature").as_bytes())
     );
+    let signature: Signature = account_key(&grant.did).sign(signed.as_bytes());
+    let signature = signature.normalize_s().unwrap_or(signature);
+    let token = format!("{signed}.{}", base64url(&signature.to_bytes()));
     book.issued.push(token.clone());
     locked(&proofs.0).push(ServiceProof {
         token: token.clone(),
@@ -1135,9 +1137,56 @@ fn document(account: &Account, pds: &str) -> Value {
     json!({
         "id": account.did,
         "alsoKnownAs": [format!("at://{}", account.handle)],
-        "verificationMethod": [],
+        "verificationMethod": [{
+            "id": format!("{}#atproto", account.did),
+            "type": "Multikey",
+            "controller": account.did,
+            "publicKeyMultibase": public_key_multibase(&account.did),
+        }],
         "service": [{ "id": "#atproto_pds", "type": "AtprotoPersonalDataServer", "serviceEndpoint": pds }],
     })
+}
+
+/// The key an account signs its service proofs with, fixed by its DID so a
+/// real verifier can check a proof against the account's document.
+fn account_key(did: &str) -> SigningKey {
+    let seed = Sha256::digest(format!("lobby-testkit account key {did}").as_bytes());
+    SigningKey::from_slice(&seed).expect("a digest is a valid P-256 scalar")
+}
+
+/// The account's public key as a `Multikey`: base58btc of the P-256 multicodec
+/// prefix and the compressed point.
+fn public_key_multibase(did: &str) -> String {
+    let point = account_key(did).verifying_key().to_encoded_point(true);
+    let mut bytes = vec![0x80, 0x24];
+    bytes.extend_from_slice(point.as_bytes());
+    format!("z{}", base58(&bytes))
+}
+
+fn base58(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let mut digits: Vec<u8> = Vec::new();
+    for &byte in bytes {
+        let mut carry = u32::from(byte);
+        for digit in &mut digits {
+            carry += u32::from(*digit) << 8;
+            *digit = (carry % 58) as u8;
+            carry /= 58;
+        }
+        while carry > 0 {
+            digits.push((carry % 58) as u8);
+            carry /= 58;
+        }
+    }
+    let leading = bytes.iter().take_while(|byte| **byte == 0).count();
+    std::iter::repeat_n('1', leading)
+        .chain(
+            digits
+                .iter()
+                .rev()
+                .map(|digit| ALPHABET[*digit as usize] as char),
+        )
+        .collect()
 }
 
 fn metadata(flaws: &[Flaw], origin: &str) -> Value {

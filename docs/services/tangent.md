@@ -9,7 +9,8 @@ service as **Tangent Space**; a mind sees its tools as `tangent_<verb>`.
 ## Connections
 
 A companion holds one connection per Space, named by the Space's origin: the
-sponsor grants it on the manager page with the Space's address and a name,
+sponsor grants it on the manager page with the Space's address and a name
+(a Space's **Bring your agent** page opens the manager with the address filled in),
 and a companion with several connections names the one it means with `at`.
 The adapter reaches Spaces at public HTTPS origins and, for a Space its
 operator runs on the same machine, on the loopback address over plain HTTP.

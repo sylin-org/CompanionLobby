@@ -150,6 +150,26 @@ const drafts = {
   },
 };
 
+// A service's own page may open this one naming itself, `/?service=<name>&address=<origin>`.
+// That only fills in a form: nothing connects until the sponsor reads it and opens the connection.
+function takeHanded() {
+  const asked = new URLSearchParams(location.search);
+  const service = asked.get("service");
+  const address = asked.get("address");
+  if (!service && !address) return;
+  history.replaceState({}, "", location.pathname);
+  if (service && address) drafts.write("handed", { service, address });
+}
+takeHanded();
+
+// What a service handed over, while the lobby offers that service.
+function handed(service) {
+  const place = drafts.read("handed");
+  if (!place) return null;
+  if (service) return place.service === service ? place : null;
+  return lobby.services.some(entry => entry.name === place.service) ? place : null;
+}
+
 // A moniker suggested from a display name: lowercase ASCII, single hyphens.
 function monikerFrom(name) {
   return name.trim().toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "")
@@ -522,7 +542,13 @@ function renderLobby() {
   if (companions.length === 0) { renderFirstRun(); return; }
   const list = element("ul", "cards");
   for (const companion of companions) list.append(card(companion));
-  const parts = [element("h1", "", "Companions"), list];
+  const parts = [element("h1", "", "Companions")];
+  const place = handed();
+  if (place) {
+    const title = lobby.services.find(entry => entry.name === place.service).title;
+    parts.push(element("p", "muted", "Choose who connects to the " + title + " at " + placeText(place.address) + ". Its address is ready on their page."));
+  }
+  parts.push(list);
   const draft = drafts.read("create");
   const adding = element("section", "adding");
   adding.setAttribute("aria-label", "Add a companion");
@@ -607,6 +633,8 @@ function revokeQuestion(companion, credential) {
 
 function renderFirstRun() {
   const intro = element("p", "lede", "A companion is who a mind attaches as. Give yours a name; you can change it later.");
+  const place = handed();
+  if (place) intro.textContent += " Then sign it in, and its connection to " + placeText(place.address) + " is ready for you to open.";
   view.replaceChildren(element("h1", "", "Name your first companion"), intro, createForm(true));
 }
 
@@ -1224,7 +1252,8 @@ function grantPanel(companion, service, primary) {
   const form = element("form", "fields");
   form.setAttribute("aria-label", "Open a connection for " + companion.displayName + " to " + service.title);
   const key = "grant:" + companion.id + ":" + service.name;
-  const draft = drafts.read(key) || {};
+  const place = handed(service.name);
+  const draft = drafts.read(key) || (place ? { address: place.address, label: labelFrom(companion, service.name, place.address) } : {});
   const address = field("Address", draft.address, "Its address, such as https://" + service.name + ".example.test, or http://localhost:8080 for one on this machine.");
   const label = field("Name", draft.label, "What " + companion.displayName + " calls this " + service.title + " when it has more than one.");
   address.input.dataset.key = key + ":address";
@@ -1269,7 +1298,12 @@ function grantPanel(companion, service, primary) {
     const credential = account ? usable.find(entry => entry.id === account.value) : usable[0];
     await submitting(form, open, async () => {
       const granted = await grant(companion, credential, service.name, where, name, form);
-      if (granted) { drafts.clear(key); editing = false; refresh(true, "connection-" + granted.id); }
+      if (granted) {
+        drafts.clear(key);
+        if (place && placeText(place.address) === placeText(where)) drafts.clear("handed");
+        editing = false;
+        refresh(true, "connection-" + granted.id);
+      }
     });
   });
   panel.append(form);
