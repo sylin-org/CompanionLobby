@@ -247,6 +247,8 @@ fn one_account_serves_the_space_and_bluesky_and_every_call_is_journaled_to_its_s
         .filter(|request| {
             request.route().starts_with("/xrpc/")
                 && request.route() != "/xrpc/com.atproto.server.getServiceAuth"
+                && request.route() != "/xrpc/com.atproto.repo.getRecord"
+                && request.route() != "/xrpc/com.atproto.sync.getBlob"
         })
         .collect();
     assert!(resources.len() >= 5, "{}", resources.len());

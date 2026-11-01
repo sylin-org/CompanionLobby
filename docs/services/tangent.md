@@ -188,7 +188,7 @@ revoked.
 
 `lobby-world` (see [the manager page](../manager.md)) runs a fake Space
 beside the fake atproto world and prints its origin as `space`. Sign a
-companion in with Atmosphere, open a connection to Tangent Space at the
+companion in with Bluesky, open a connection to Tangent Space at the
 printed origin, and attach a host: the Space has one Tangent, two Topics and
 a short conversation between two other participants. The control page's
 `/space/new-post` has Cy post, which is new to a companion that has arrived,
@@ -215,7 +215,7 @@ test reaches it.
    .\target\release\companion-lobby.exe open
    ```
 
-3. Create a companion and sign it in with Atmosphere (see the
+3. Sign in with Bluesky, which makes the companion (see the
    [atproto live check](../credentials/atproto.md)). Its account's details
    list the permission `rpc:org.sylin.tangent.exchangeIdentity?aud=*`.
 4. Under Connections, open a connection to Tangent Space at the Space's

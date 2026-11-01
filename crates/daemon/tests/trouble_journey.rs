@@ -389,7 +389,7 @@ fn a_daemon_killed_between_the_rotation_and_the_commit_comes_back_needing_sign_i
     );
     assert!(
         sentences(&install).contains(
-            &format!("The lobby stopped while it renewed {HANDLE} for ada with Atmosphere and cannot tell whether Atmosphere renewed it, so ada needs signing in again.")
+            &format!("The lobby stopped while it renewed {HANDLE} for ada with Bluesky and cannot tell whether Bluesky renewed it, so ada needs signing in again.")
         )
     );
     std::thread::sleep(QUIET);
@@ -440,8 +440,8 @@ fn revoking_an_account_reaches_its_provider_and_says_whether_it_confirmed() {
     assert_eq!(world.live_refresh_token(ADA), None, "its grant ended there");
     let said = sentences(&install);
     for expected in [
-        format!("You revoked {HANDLE}, the Atmosphere account ada held."),
-        format!("You revoked {HANDLE} at Atmosphere too."),
+        format!("You revoked {HANDLE}, the Bluesky account ada held."),
+        format!("You revoked {HANDLE} at Bluesky too."),
     ] {
         assert!(said.contains(&expected), "{expected} in {said:#?}");
     }
@@ -461,7 +461,7 @@ fn revoking_an_account_reaches_its_provider_and_says_whether_it_confirmed() {
     assert_eq!(revoked.status, 200, "{}", text(&revoked));
     assert_eq!(body(&revoked)["provider"], "not_offered");
     assert!(sentences(&install).contains(&format!(
-        "You tried to revoke {HANDLE} at Atmosphere too, but Atmosphere offers no way to revoke it there, so it ends there when it expires."
+        "You tried to revoke {HANDLE} at Bluesky too, but Bluesky offers no way to revoke it there, so it ends there when it expires."
     )));
     install.stop();
 }
@@ -500,7 +500,7 @@ fn revoking_an_account_that_waits_sends_its_last_key_and_never_claims_a_confirma
         "the provider was still sent the last key the lobby held"
     );
     assert!(sentences(&install).contains(&format!(
-        "You tried to revoke {HANDLE} at Atmosphere too, but it waited for a sign-in, so Atmosphere was sent the last key the lobby held, which a renewal may already have replaced; the lobby cannot tell whether it is revoked there."
+        "You tried to revoke {HANDLE} at Bluesky too, but it waited for a sign-in, so Bluesky was sent the last key the lobby held, which a renewal may already have replaced; the lobby cannot tell whether it is revoked there."
     )), "{:#?}", sentences(&install));
     install.stop();
 }

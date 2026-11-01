@@ -170,7 +170,7 @@ function handed(service) {
   return lobby.services.some(entry => entry.name === place.service) ? place : null;
 }
 
-// A moniker suggested from a display name: lowercase ASCII, single hyphens.
+// A name suggested for a connection, in the shape of a moniker: lowercase ASCII, single hyphens.
 function monikerFrom(name) {
   return name.trim().toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "")
     .replace(/[^a-z0-9]+/g, "-").replace(/^[^a-z]+/, "").replace(/-+$/g, "").slice(0, 24).replace(/-+$/g, "");
@@ -228,7 +228,7 @@ function companionPath(companion, rest) {
 // ---------- the lobby: loaded, then patched by the feed ----------
 
 const lobby = {
-  companions: new Map(), credentials: new Map(), connections: new Map(), signIns: new Map(),
+  companions: new Map(), credentials: new Map(), connections: new Map(),
   kinds: [], services: [], journalHealthy: true, position: 0, loaded: false,
 };
 let resynchronizing = true;
@@ -246,7 +246,6 @@ function applyItem(seq, item) {
   else if (item.kind === "companion_removed") lobby.companions.delete(item.id);
   else if (item.kind === "credential") lobby.credentials.set(item.credential.id, item.credential);
   else if (item.kind === "connection") lobby.connections.set(item.connection.id, item.connection);
-  else if (item.kind === "sign_in") lobby.signIns.set(item.signIn.id, item.signIn);
   else if (item.kind === "journal_health") lobby.journalHealthy = item.healthy;
   else if (item.kind === "journal") { journalArrived(item.entry); return false; }
   return true;
@@ -266,7 +265,6 @@ async function resynchronize() {
     lobby.companions = new Map(body.companions.map(companion => [companion.id, companion]));
     lobby.credentials = new Map(body.credentials.map(credential => [credential.id, credential]));
     lobby.connections = new Map(body.connections.map(connection => [connection.id, connection]));
-    lobby.signIns = new Map(body.signIns.map(signIn => [signIn.id, signIn]));
     lobby.kinds = body.kinds;
     lobby.services = body.services;
     lobby.position = body.feed.position;
@@ -348,12 +346,9 @@ function liveCredentials(companion) {
   return credentialsOf(companion).filter(credential => credential.state !== "revoked");
 }
 
-function waitingNow(signIn) {
-  return signIn.status === "pending" && Date.now() < signIn.expiresAt;
-}
-
-function waitingSignIn(companion, kind) {
-  return [...lobby.signIns.values()].find(signIn => signIn.companion === companion.id && signIn.kind === kind && waitingNow(signIn));
+// The kinds of account a companion could still be signed in with.
+function unusedKinds(companion) {
+  return lobby.kinds.filter(entry => !liveCredentials(companion).some(credential => credential.kind === entry.kind));
 }
 
 function connectionsOf(companion) {
@@ -418,9 +413,8 @@ function shownConnections(companion) {
 
 // What the companion's page offers first: the single primary action.
 function nextStep(companion) {
-  if (lobby.kinds.some(entry => waitingCredential(companion, entry.kind) && !waitingSignIn(companion, entry.kind))) return "sign-in-again";
-  const anyAccount = lobby.kinds.some(entry => readyCredential(companion, entry.kind) || waitingSignIn(companion, entry.kind));
-  if (!anyAccount) return "sign-in";
+  if (lobby.kinds.some(entry => waitingCredential(companion, entry.kind))) return "sign-in-again";
+  if (!lobby.kinds.some(entry => readyCredential(companion, entry.kind))) return "sign-in";
   const usable = lobby.services.some(service => service.accepts.some(kind => readyCredential(companion, kind)));
   const reaching = connectionsOf(companion).some(connection => connection.state === "ready");
   if (usable && !reaching) return "connect";
@@ -433,7 +427,6 @@ const view = document.getElementById("view");
 let editing = false;
 let refreshPending = false;
 let journalView = null;
-let expiryTimer = null;
 // Which disclosures the sponsor opened, so a refresh keeps them open.
 const opened = new Set();
 
@@ -512,7 +505,6 @@ function sayWaiting() {
 }
 
 function render() {
-  clearTimeout(expiryTimer);
   const parts = location.pathname.split("/").filter(Boolean);
   const section = parts[0] === "journal" ? "journal" : "companions";
   document.querySelectorAll(".primary-nav [data-section]").forEach(item => {
@@ -524,10 +516,10 @@ function render() {
   condition.textContent = lobby.journalHealthy ? "" : "The journal could not record a change. The change itself happened; the trace log in the data directory says why the journal failed.";
   if (!lobby.loaded) { view.replaceChildren(element("p", "muted", "Loading the lobby…")); return; }
   if (parts.length === 0) renderLobby();
+  else if (parts[0] === "sign-in" && parts.length === 1) renderSignIn();
   else if (parts[0] === "journal" && parts.length === 1) renderJournalPage();
   else if (parts[0] === "companion" && parts[1] && parts.length === 2) renderCompanion(parts[1]);
   else if (parts[0] === "companion" && parts.length === 3 && parts[2] === "attach") renderAttach(parts[1]);
-  else if (parts[0] === "companion" && parts.length === 4 && parts[2] === "sign-in") renderSignIn(parts[1], parts[3]);
   else { history.replaceState({}, "", "/"); renderLobby(); }
 }
 
@@ -539,29 +531,87 @@ function notHere(text) {
 
 function renderLobby() {
   const companions = [...lobby.companions.values()];
-  if (companions.length === 0) { renderFirstRun(); return; }
-  const list = element("ul", "cards");
-  for (const companion of companions) list.append(card(companion));
   const parts = [element("h1", "", "Companions")];
   const place = handed();
   if (place) {
     const title = lobby.services.find(entry => entry.name === place.service).title;
-    parts.push(element("p", "muted", "Choose who connects to the " + title + " at " + placeText(place.address) + ". Its address is ready on their page."));
+    parts.push(element("p", "muted", companions.length
+      ? "Choose who connects to the " + title + " at " + placeText(place.address) + ", or sign in with another account. Its address is ready on their page."
+      : "Sign in to connect to the " + title + " at " + placeText(place.address) + "."));
   }
-  parts.push(list);
-  const draft = drafts.read("create");
-  const adding = element("section", "adding");
-  adding.setAttribute("aria-label", "Add a companion");
-  const open = button("Add a companion", "primary");
-  open.dataset.key = "add";
-  const form = createForm(false);
-  form.hidden = !draft;
-  open.hidden = !!draft;
-  open.addEventListener("click", () => { open.hidden = true; form.hidden = false; form.querySelector("input").focus(); });
-  form.addEventListener("reset", () => { drafts.clear("create"); form.hidden = true; open.hidden = false; open.focus(); });
-  adding.append(open, form);
-  parts.push(adding);
+  if (companions.length) {
+    const list = element("ul", "cards");
+    for (const companion of companions) list.append(card(companion));
+    parts.push(list);
+  } else {
+    parts.push(element("p", "muted", "No companions yet."));
+  }
+  const signIn = link("/sign-in", "button primary", "Sign in");
+  signIn.dataset.key = "sign-in";
+  const actions = element("div", "actions");
+  actions.append(signIn);
+  parts.push(actions);
   view.replaceChildren(...parts);
+}
+
+// Signing in is how a companion comes to be: the account the provider signs
+// in opens the companion it belongs to, or makes one of its own.
+function renderSignIn() {
+  const parts = [link("/", "back", "All companions"), element("h1", "", "Sign in"),
+    element("p", "lede", "Sign in with the account a companion goes by. An account the lobby knows opens its companion; a new one makes a companion, named after the account, which you can change later.")];
+  const place = handed();
+  if (place) parts.push(element("p", "muted", "Then the connection to " + placeText(place.address) + " is ready for you to open."));
+  if (lobby.kinds.length === 0) parts.push(element("p", "muted", "No kind of account is installed in this lobby."));
+  else parts.push(signInChoices(null, true));
+  view.replaceChildren(...parts);
+}
+
+// One way to sign in per kind of account: a button that goes straight to the
+// provider's page, and a field for naming the account first. With no
+// companion, the account says which one it is for.
+function signInChoices(companion, primary, kinds) {
+  const list = element("div", "sign-in-choices");
+  (kinds || lobby.kinds).forEach((entry, index) => list.append(signInChoice(companion, entry, primary && index === 0)));
+  return list;
+}
+
+function signInChoice(companion, entry, primary) {
+  const form = element("form", "sign-in-choice");
+  form.setAttribute("aria-label", "Sign in with " + entry.title);
+  const key = "sign-in:" + (companion ? companion.id : "lobby") + ":" + entry.kind;
+  const go = element("button", primary ? "primary" : "", "Sign in with " + entry.title);
+  go.type = "submit";
+  go.dataset.key = key + ":go";
+  const named = disclosure("details", "Name the account first", key + ":named");
+  const typed = drafts.read(key) || "";
+  if (typed) named.open = true;
+  const account = field(entry.title + " account", typed, entry.hint || "The account to sign in with.");
+  account.input.dataset.key = key;
+  account.input.addEventListener("input", () => drafts.write(key, account.input.value));
+  named.append(account.wrapper);
+  form.append(go, named);
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    await submitting(form, go, async () => {
+      const onward = await startSignIn(companion, entry.kind, account.input.value.trim(), form);
+      if (onward) { drafts.clear(key); location.assign(onward); }
+      else { named.open = true; account.input.focus(); }
+    });
+  });
+  return form;
+}
+
+// Starts a sign-in and answers where the browser goes for it, or says why not,
+// inside `form` when one asked, and answers null.
+async function startSignIn(companion, kind, hint, form) {
+  const request = { kind, hint };
+  if (companion) request.companion = companion.id;
+  const result = await call("/api/sign-ins", "POST", request);
+  if (result.ok) return result.body.url;
+  if (result.status === 409) { note(sentence(result), true); resynchronize(); }
+  else if (form) formSays(form, sentence(result));
+  else note(sentence(result), true);
+  return null;
 }
 
 function card(companion) {
@@ -587,135 +637,40 @@ function card(companion) {
   return item;
 }
 
-// One account on a companion's card: Revoke while it is signed in; while it
-// waits for a sign-in, the way back (Sign in again, or Continue when that
-// sign-in already waits) and Revoke beside it.
+// One account on a companion's card: Remove while it is signed in; while it
+// waits for a sign-in, the way back, Sign in again, and Remove beside it.
 function cardAccount(companion, credential) {
   const line = element("li", "card-account");
   const ready = credential.state === "ready";
   const said = element("span", ready ? "" : "warn", credential.label + " · " + kindTitle(credential.kind) + (ready ? "" : " · Sign in needed"));
-  const revoke = button("Revoke", ready ? "danger" : "quiet");
-  revoke.dataset.key = "card-revoke-" + credential.id;
-  confirmInPlace(revoke, revokeQuestion(companion, credential), "Revoke", () => revokeCredential(companion, credential, "card-" + companion.id));
+  const remove = button("Remove", ready ? "danger" : "quiet");
+  remove.dataset.key = "card-remove-" + credential.id;
+  confirmInPlace(remove, removeQuestion(companion, credential), "Remove", () => removeCredential(companion, credential, "card-" + companion.id));
   if (ready) {
-    line.append(said, revoke);
+    line.append(said, remove);
     return line;
   }
-  const pending = waitingSignIn(companion, credential.kind);
-  let back;
-  if (pending) {
-    back = link(companionPath(companion, "/sign-in/" + encodeURIComponent(pending.id)), "button", "Continue sign-in");
-    back.dataset.key = "card-continue-" + pending.id;
-  } else {
-    back = button("Sign in again");
-    back.dataset.key = "card-again-" + credential.id;
-    back.addEventListener("click", () => signInAgain(companion, credential, back));
-  }
+  const back = button("Sign in again");
+  back.dataset.key = "card-again-" + credential.id;
+  back.addEventListener("click", () => signInAgain(companion, credential, back));
   const actions = element("span", "actions");
-  actions.append(back, revoke);
+  actions.append(back, remove);
   line.append(said, actions);
   return line;
 }
 
-// Starts signing the same account in again and leads to the handoff.
+// Starts signing the same account in again and goes to the provider's page.
 async function signInAgain(companion, credential, control) {
   control.disabled = true;
-  const handoff = await startSignIn(companion, credential.kind, "");
+  const onward = await startSignIn(companion, credential.kind, "");
   control.disabled = false;
-  if (handoff) navigate(handoff);
+  if (onward) location.assign(onward);
   else control.focus();
 }
 
-function revokeQuestion(companion, credential) {
+function removeQuestion(companion, credential) {
   const derived = connectionsOf(companion).filter(connection => connection.credential === credential.id && connection.state !== "revoked").length;
-  return "Revoke " + credential.label + " for " + companion.displayName + "?" + (derived ? " Its connections are revoked too." : "");
-}
-
-function renderFirstRun() {
-  const intro = element("p", "lede", "A companion is who a mind attaches as. Give yours a name; you can change it later.");
-  const place = handed();
-  if (place) intro.textContent += " Then sign it in, and its connection to " + placeText(place.address) + " is ready for you to open.";
-  view.replaceChildren(element("h1", "", "Name your first companion"), intro, createForm(true));
-}
-
-// The form that names a new companion. Its draft survives a reload.
-function createForm(first) {
-  const form = element("form", "panel");
-  form.setAttribute("aria-label", "Name a companion");
-  form.noValidate = true;
-  const draft = drafts.read("create") || {};
-  const preview = avatar({ displayName: draft.name || "?", id: draft.name || "" }, "large");
-  const name = field("Display name", draft.name, "What people read, such as Ada.", { required: true });
-  const moniker = field("Moniker", draft.moniker, "How a host names it: lowercase letters, digits and single hyphens.");
-  const portrait = field("Portrait (optional)", "", "A PNG, JPEG, WebP or GIF image of at most 512 KiB. Without one, the initials show.", { type: "file" });
-  portrait.input.accept = "image/png,image/jpeg,image/webp,image/gif";
-  name.input.dataset.key = "create-name";
-  moniker.input.dataset.key = "create-moniker";
-  let monikerEdited = !!draft.monikerEdited;
-  let chosen = null;
-  let shownUrl = null;
-  const save = () => drafts.write("create", { name: name.input.value, moniker: moniker.input.value, monikerEdited });
-  const showPreview = () => {
-    const next = avatar({ displayName: name.input.value.trim() || "?", id: name.input.value }, "large");
-    if (shownUrl) URL.revokeObjectURL(shownUrl);
-    shownUrl = null;
-    if (chosen) {
-      const image = element("img");
-      image.alt = "";
-      shownUrl = URL.createObjectURL(chosen);
-      image.src = shownUrl;
-      next.append(image);
-    }
-    previewHolder.replaceChildren(next);
-  };
-  const previewHolder = element("div", "preview");
-  previewHolder.append(preview);
-  name.input.addEventListener("input", () => {
-    if (!monikerEdited) moniker.input.value = monikerFrom(name.input.value);
-    save();
-    showPreview();
-  });
-  moniker.input.addEventListener("input", () => { monikerEdited = true; save(); });
-  portrait.input.addEventListener("change", () => {
-    chosen = portrait.input.files && portrait.input.files[0] ? portrait.input.files[0] : null;
-    showPreview();
-  });
-  const create = element("button", "primary", "Create companion");
-  create.type = "submit";
-  const actions = element("div", "actions");
-  actions.append(create);
-  if (!first) {
-    const cancel = element("button", "quiet", "Cancel");
-    cancel.type = "reset";
-    actions.append(cancel);
-  }
-  const fields = element("div", "fields");
-  fields.append(name.wrapper, moniker.wrapper, portrait.wrapper);
-  const row = element("div", "create-row");
-  row.append(previewHolder, fields);
-  form.append(row, actions);
-  form.addEventListener("submit", async event => {
-    event.preventDefault();
-    const displayName = name.input.value.trim();
-    const wanted = moniker.input.value.trim() || monikerFrom(displayName);
-    if (!displayName) { formSays(form, "Give the companion a display name first."); return; }
-    await submitting(form, create, async () => {
-      const result = await call("/api/companions", "POST", { moniker: wanted, displayName });
-      if (!result.ok) { formSays(form, sentence(result)); return; }
-      let companion = result.body.companion;
-      keepNewer(companion);
-      drafts.clear("create");
-      editing = false;
-      if (chosen) {
-        // A portrait that is not kept leaves a note on the pages that come
-        // next, with the way to choose it again.
-        const uploaded = await uploadPortrait(companion, chosen, true);
-        if (uploaded) companion = uploaded;
-      }
-      navigate(companionPath(companion, "/attach"));
-    });
-  });
-  return form;
+  return "Remove " + credential.label + " from " + companion.displayName + "? It is revoked at its provider." + (derived ? " Its connections are revoked too." : "");
 }
 
 function readAsDataUrl(file) {
@@ -727,52 +682,15 @@ function readAsDataUrl(file) {
   });
 }
 
-// Sends a portrait; a refusal is said at once, or, when `lasting`, kept as
-// a note the companion's pages show until a portrait is kept or the sponsor
-// keeps the initials.
-async function uploadPortrait(companion, file, lasting) {
-  const failed = message => {
-    if (lasting) drafts.write("portrait-failed:" + companion.id, message);
-    else note(message, true);
-    return null;
-  };
-  if (file.size > 512 * 1024) return failed("That image is too large; a portrait is at most 512 KiB.");
+// Sends a portrait; a refusal is said at once.
+async function uploadPortrait(companion, file) {
+  if (file.size > 512 * 1024) { note("That image is too large; a portrait is at most 512 KiB.", true); return null; }
   let image;
-  try { image = await readAsDataUrl(file); } catch { return failed("That file could not be read."); }
+  try { image = await readAsDataUrl(file); } catch { note("That file could not be read.", true); return null; }
   const result = await call(companionPath(companion).replace("/companion/", "/api/companions/") + "/portrait", "PUT", { expectedRevision: companion.revision, image });
-  if (!result.ok) { if (result.status === 409) resynchronize(); return failed(sentence(result)); }
-  drafts.clear("portrait-failed:" + companion.id);
+  if (!result.ok) { note(sentence(result), true); if (result.status === 409) resynchronize(); return null; }
   keepNewer(result.body.companion);
   return result.body.companion;
-}
-
-// The note a portrait that was not kept leaves, with the way to choose it
-// again and the way to keep the initials, or nothing.
-function portraitNote(companion) {
-  const said = drafts.read("portrait-failed:" + companion.id);
-  if (!said) return null;
-  const box = element("div", "panel portrait-note");
-  const line = element("p", "status warn", tidy("The portrait was not kept: " + said + " " + companion.displayName + " shows its initials until you choose one again."));
-  line.setAttribute("role", "status");
-  const choose = button("Choose a portrait");
-  choose.dataset.key = "portrait-again-" + companion.id;
-  choose.addEventListener("click", () => {
-    opened.add("settings-" + companion.id);
-    if (location.pathname !== companionPath(companion)) history.pushState({}, "", companionPath(companion));
-    editing = false;
-    refresh(true, "portrait-" + companion.id);
-  });
-  const keep = button("Keep the initials", "quiet");
-  keep.dataset.key = "portrait-keep-" + companion.id;
-  keep.addEventListener("click", () => {
-    drafts.clear("portrait-failed:" + companion.id);
-    refresh(true);
-    view.focus({ preventScroll: true });
-  });
-  const actions = element("div", "actions");
-  actions.append(choose, keep);
-  box.append(line, actions);
-  return box;
 }
 
 // ---------- first attachment: what just happened and what comes next ----------
@@ -784,8 +702,6 @@ function renderAttach(id) {
   const heading = element("div", "identity");
   heading.append(avatar(companion, "large"), element("h1", "", companion.displayName + (companion.attachments > 0 ? " is attached" : " is ready to attach")));
   parts.push(heading);
-  const trouble = portraitNote(companion);
-  if (trouble) parts.push(trouble);
   parts.push(element("p", "lede", "Copy this block into your AI host's server settings. The host starts the lobby itself whenever it needs it."));
   const block = element("div", "config");
   const text = element("pre", "", companion.hostConfig);
@@ -803,9 +719,10 @@ function renderAttach(id) {
   const status = element("p", "status" + (attached ? " ok" : ""));
   status.setAttribute("role", "status");
   if (attached) {
-    status.textContent = tidy("A mind is attached as " + companion.displayName + ". Next, lend " + companion.displayName + " an account.");
-    const next = link(companionPath(companion), "button primary", "Lend " + companion.displayName + " an account");
-    next.dataset.key = "lend";
+    const reaching = connectionsOf(companion).some(connection => connection.state === "ready");
+    status.textContent = tidy("A mind is attached as " + companion.displayName + "." + (reaching ? "" : " Next, open a connection."));
+    const next = link(companionPath(companion), "button primary", reaching ? "Back to " + companion.displayName : "Open a connection");
+    next.dataset.key = "onward";
     parts.push(status, next);
   } else {
     status.textContent = tidy("No mind is attached as " + companion.displayName + " yet. This page changes when one attaches.");
@@ -836,14 +753,17 @@ function renderCompanion(id) {
   if (!companion) { notHere("No companion has that id; it may have been removed."); return; }
   const step = nextStep(companion);
   const head = element("header", "identity");
-  const words = element("div");
-  words.append(element("h1", "", companion.displayName), element("p", "muted", companion.moniker + " · " + attachedText(companion.attachments)));
-  head.append(avatar(companion, "large"), words);
+  const words = element("div", "identity-words");
+  const name = element("h1");
+  name.append(nameInPlace(companion, "displayName", "Display name"));
+  const facts = element("p", "muted identity-facts");
+  facts.append(nameInPlace(companion, "moniker", "Moniker"), element("span", "", "· " + attachedText(companion.attachments)));
+  words.append(name, facts);
+  head.append(portraitInPlace(companion), words);
   const tools = element("div", "head-tools");
-  tools.append(link(companionPath(companion, "/attach"), "", "Host configuration"), settings(companion));
-  const trouble = portraitNote(companion);
-  view.replaceChildren(...[link("/", "back", "All companions"), head, trouble, tools,
-    accountsSection(companion, step), connectionsSection(companion, step), journalSection(companion)].filter(Boolean));
+  tools.append(link(companionPath(companion, "/attach"), "", "Host configuration"));
+  view.replaceChildren(link("/", "back", "All companions"), head, tools,
+    accountsSection(companion, step), connectionsSection(companion, step), journalSection(companion), removal(companion));
   loadCompanionJournal(companion);
 }
 
@@ -859,9 +779,24 @@ function accountsSection(companion, step) {
     section.append(element("p", "muted", "No kind of account is installed in this lobby."));
     return section;
   }
-  const list = element("ul", "rows");
-  for (const entry of lobby.kinds) list.append(accountRow(companion, entry, step === "sign-in" && entry === lobby.kinds[0], step === "sign-in-again"));
-  section.append(list);
+  const held = liveCredentials(companion);
+  if (held.length) {
+    const list = element("ul", "rows");
+    for (const credential of held) list.append(accountRow(companion, credential, step === "sign-in-again"));
+    section.append(list);
+  } else {
+    const removed = credentialsOf(companion).pop();
+    section.append(element("p", "muted", removed
+      ? removed.label + " was removed. Signing in with it again brings it back here."
+      : companion.displayName + " holds no account yet."));
+  }
+  const unused = unusedKinds(companion);
+  if (unused.length) {
+    const add = disclosure("add-account" + (step === "sign-in" ? " first" : ""), "+ Add", "add-account-" + companion.id);
+    add.id = "add-account";
+    add.append(signInChoices(companion, false, unused));
+    section.append(add);
+  }
   return section;
 }
 
@@ -878,50 +813,31 @@ function accountWords(credential, entry) {
   return { words, details };
 }
 
-function accountRow(companion, entry, primary, again) {
+function accountRow(companion, credential, again) {
   const row = element("li", "row");
-  row.id = "account-" + entry.kind;
-  const credential = readyCredential(companion, entry.kind);
-  const waiting = waitingSignIn(companion, entry.kind);
-  const stale = waitingCredential(companion, entry.kind);
-  if (credential) {
-    const { words } = accountWords(credential, entry);
-    const revoke = button("Revoke", "danger");
-    revoke.dataset.key = "revoke-" + credential.id;
-    revoke.dataset.signIn = "";
-    confirmInPlace(revoke, revokeQuestion(companion, credential), "Revoke", () => revokeCredential(companion, credential));
-    row.append(words, element("span", "word ok", "Signed in"), revoke);
+  row.id = "account-" + credential.kind;
+  const entry = lobby.kinds.find(kind => kind.kind === credential.kind) || { title: credential.kind };
+  const { words } = accountWords(credential, entry);
+  if (credential.state === "ready") {
+    const remove = button("Remove", "danger");
+    remove.dataset.key = "remove-" + credential.id;
+    remove.dataset.signIn = "";
+    confirmInPlace(remove, removeQuestion(companion, credential), "Remove", () => removeCredential(companion, credential));
+    row.append(words, element("span", "word ok", "Signed in"), remove);
     return row;
   }
-  if (stale && !waiting) {
-    // The way back is signing the same account in again; revoking it
-    // instead sits beside it, quieter.
-    const { words } = accountWords(stale, entry);
-    const instead = button("Revoke", "quiet");
-    instead.dataset.key = "revoke-" + stale.id;
-    confirmInPlace(instead, revokeQuestion(companion, stale), "Revoke", () => revokeCredential(companion, stale));
-    const signIn = button("Sign in again", again ? "primary" : "");
-    signIn.dataset.key = "again-" + stale.id;
-    signIn.dataset.signIn = "";
-    signIn.addEventListener("click", () => signInAgain(companion, stale, signIn));
-    const actions = element("span", "actions");
-    actions.append(signIn, instead);
-    row.append(words, element("span", "word warn", "Sign in needed"), actions);
-    return row;
-  }
-  if (waiting) {
-    const words = element("div", "row-words");
-    words.append(element("strong", "", waiting.account || "An account of your choice"), element("span", "kind", entry.title + " account"));
-    const follow = link(companionPath(companion, "/sign-in/" + encodeURIComponent(waiting.id)), "button" + (primary ? " primary" : ""), "Continue");
-    follow.dataset.key = "continue-" + waiting.id;
-    follow.dataset.signIn = "";
-    row.append(words, element("span", "word", "Signing in"), follow);
-    return row;
-  }
-  const revoked = credentialsOf(companion).filter(credential => credential.kind === entry.kind).pop();
-  row.classList.add("row-form");
-  if (revoked) row.append(element("p", "muted wide", revoked.label + " was revoked. Sign " + companion.displayName + " in again to lend an account."));
-  row.append(signInForm(companion, entry, primary));
+  // The way back is signing the same account in again; removing it instead
+  // sits beside it, quieter.
+  const instead = button("Remove", "quiet");
+  instead.dataset.key = "remove-" + credential.id;
+  confirmInPlace(instead, removeQuestion(companion, credential), "Remove", () => removeCredential(companion, credential));
+  const signIn = button("Sign in again", again ? "primary" : "");
+  signIn.dataset.key = "again-" + credential.id;
+  signIn.dataset.signIn = "";
+  signIn.addEventListener("click", () => signInAgain(companion, credential, signIn));
+  const actions = element("span", "actions");
+  actions.append(signIn, instead);
+  row.append(words, element("span", "word warn", "Sign in needed"), actions);
   return row;
 }
 
@@ -946,7 +862,7 @@ const AT_PROVIDER = {
   not_asked: title => " The lobby held no key for it, so " + title + " was not asked to revoke it; it ends there when it expires.",
 };
 
-async function revokeCredential(companion, credential, focusKey) {
+async function removeCredential(companion, credential, focusKey) {
   const result = await call("/api/credentials/" + encodeURIComponent(credential.id) + "/revoke", "POST", {});
   if (!result.ok) {
     note(sentence(result), true);
@@ -958,151 +874,8 @@ async function revokeCredential(companion, credential, focusKey) {
     if (connection.credential === credential.id) lobby.connections.set(connection.id, Object.assign({}, connection, { state: "revoked" }));
   }
   const said = AT_PROVIDER[result.body.provider] || AT_PROVIDER.not_asked;
-  note(credential.label + " is revoked for " + companion.displayName + "." + said(kindTitle(credential.kind)));
-  refresh(true, focusKey || "sign-in:" + companion.id + ":" + credential.kind);
-}
-
-function signInForm(companion, entry, primary) {
-  const form = element("form", "inline-form");
-  form.setAttribute("aria-label", "Sign " + companion.displayName + " in with " + entry.title);
-  const key = "sign-in:" + companion.id + ":" + entry.kind;
-  const account = field(entry.title + " account", drafts.read(key) || "", entry.hint || "The account to sign in with.");
-  account.input.dataset.key = key;
-  account.input.addEventListener("input", () => drafts.write(key, account.input.value));
-  const go = element("button", primary ? "primary" : "", "Sign in with " + entry.title);
-  go.type = "submit";
-  go.dataset.key = key + ":go";
-  form.append(account.wrapper, go);
-  form.addEventListener("submit", async event => {
-    event.preventDefault();
-    await submitting(form, go, async () => {
-      const handoff = await startSignIn(companion, entry.kind, account.input.value.trim(), form);
-      if (!handoff) return;
-      drafts.clear(key);
-      editing = false;
-      navigate(handoff);
-    });
-  });
-  return form;
-}
-
-// Starts a sign-in and answers the path of its handoff, or says why not,
-// inside `form` when one asked, and answers null.
-async function startSignIn(companion, kind, hint, form) {
-  const result = await call("/api/sign-ins", "POST", { companion: companion.id, kind, hint });
-  if (!result.ok) {
-    if (result.status === 409) { note(sentence(result), true); resynchronize(); }
-    else if (form) formSays(form, sentence(result));
-    else note(sentence(result), true);
-    return null;
-  }
-  const signIn = result.body.signIn;
-  lobby.signIns.set(signIn.id, signIn);
-  handoffs.write(signIn.id, result.body.url);
-  return companionPath(companion, "/sign-in/" + encodeURIComponent(signIn.id));
-}
-
-// Where the sign-in page is, kept in this tab only: the lobby never shows it.
-const handoffs = {
-  read(id) { try { return sessionStorage.getItem("handoff:" + id); } catch { return null; } },
-  write(id, url) { try { sessionStorage.setItem("handoff:" + id, url); } catch { /* the tab that started it shows the link */ } },
-  clear(id) { try { sessionStorage.removeItem("handoff:" + id); } catch { /* nothing kept */ } },
-};
-
-// The page between the lobby and the provider. It names the companion, the
-// account the sponsor meant, as the lobby remembers it, and what is being
-// granted, and follows the sign-in until it ends.
-function renderSignIn(companionId, signInId) {
-  const companion = lobby.companions.get(companionId);
-  const signIn = lobby.signIns.get(signInId);
-  if (!companion) { notHere("No companion has that id; it may have been removed."); return; }
-  const back = link(companionPath(companion), "back", companion.displayName);
-  if (!signIn || signIn.companion !== companionId) {
-    view.replaceChildren(back, element("h1", "", "This sign-in is not remembered"),
-      element("p", "", "The lobby does not remember this sign-in, so it cannot say how it ended. The accounts of " + companion.displayName + " show what is signed in."),
-      link(companionPath(companion), "button primary", "Back to " + companion.displayName));
-    return;
-  }
-  const title = kindTitle(signIn.kind);
-  const parts = [back, element("h1", "", "Sign " + companion.displayName + " in with " + title)];
-  const meant = element("p", "lede");
-  meant.append(document.createTextNode("The account: "), element("strong", "", placeText(signIn.account) || "the one you choose on the sign-in page"), document.createTextNode("."));
-  const widening = waitingNow(signIn) ? readyCredential(companion, signIn.kind) : null;
-  const wider = widening ? widenedBy(widening) : [];
-  parts.push(meant, element("p", "", wider.length
-    ? widenSentence(companion, widening, wider) + " Nothing else changes, and nothing opens until you grant it."
-    : companion.displayName + " receives this account's identity and nothing more. No connection opens until you grant one."));
-  const status = element("p", "status");
-  status.setAttribute("role", "status");
-  status.tabIndex = -1;
-  status.dataset.key = "status";
-  parts.push(status);
-  const actions = element("div", "actions");
-  let after = null;
-  if (waitingNow(signIn)) {
-    status.textContent = "Waiting for the sign-in page to send you back, until " + timeText(signIn.expiresAt) + ".";
-    const url = handoffs.read(signIn.id);
-    if (url) {
-      const onward = element("a", "button primary", "Continue to sign in");
-      onward.href = url;
-      onward.target = "_blank";
-      onward.rel = "noopener noreferrer";
-      onward.dataset.key = "onward";
-      actions.append(onward);
-      let host = "";
-      try { host = new URL(url).hostname; } catch { host = ""; }
-      if (host) after = element("p", "hint", "Opens " + host + " in a new tab. Come back here when it is done.");
-    } else {
-      parts.push(element("p", "hint", "The sign-in page opens from the tab that started this sign-in. Finish there, or start it again here."));
-      const again = button("Start this sign-in again here", "primary");
-      again.dataset.key = "again";
-      again.addEventListener("click", async () => {
-        again.disabled = true;
-        const ended = await endSignIn(signIn);
-        const handoff = ended && await startSignIn(companion, signIn.kind, signIn.account || "");
-        again.disabled = false;
-        if (handoff) navigate(handoff);
-        else refresh(true, "status");
-      });
-      actions.append(again);
-    }
-    const cancel = button("Cancel sign-in", url ? "danger" : "quiet");
-    cancel.dataset.key = "cancel";
-    confirmInPlace(cancel, "Cancel this sign-in? Nothing is signed in.", "Cancel sign-in", async () => {
-      if (!await endSignIn(signIn)) return;
-      note("The sign-in was cancelled.");
-      refresh(true, "status");
-    }, "Keep waiting");
-    actions.append(cancel);
-    expiryTimer = setTimeout(() => refresh(false), Math.max(0, signIn.expiresAt - Date.now()) + 500);
-  } else {
-    const credential = readyCredential(companion, signIn.kind);
-    const said = {
-      signed_in: credential
-        ? "Signed in. The " + title + " account for " + companion.displayName + " is " + credential.label + "."
-        : "Signed in.",
-      cancelled: "This sign-in was cancelled. Nothing was signed in.",
-      refused: "The sign-in page's answer did not complete this sign-in. Nothing was signed in.",
-    }[signIn.status] || "This sign-in expired before it came back. Nothing was signed in.";
-    status.textContent = tidy(said);
-    status.className = "status" + (signIn.status === "signed_in" ? " ok" : "");
-    handoffs.clear(signIn.id);
-    const onward = link(companionPath(companion), "button primary", signIn.status === "signed_in" ? "Back to " + companion.displayName : "Start again from " + companion.displayName);
-    onward.dataset.key = "back";
-    actions.append(onward);
-  }
-  parts.push(actions);
-  if (after) parts.push(after);
-  view.replaceChildren(...parts);
-}
-
-// Cancels a waiting sign-in; answers whether it ended.
-async function endSignIn(signIn) {
-  const result = await call("/api/sign-ins/" + encodeURIComponent(signIn.id) + "/cancel", "POST", {});
-  if (!result.ok) { note(sentence(result), true); resynchronize(); return false; }
-  lobby.signIns.set(signIn.id, result.body.signIn);
-  handoffs.clear(signIn.id);
-  return true;
+  note(credential.label + " is removed from " + companion.displayName + "." + said(kindTitle(credential.kind)));
+  refresh(true, focusKey || "remove-" + companion.id);
 }
 
 // ---------- connections ----------
@@ -1125,7 +898,9 @@ function connectionsSection(companion, step) {
   } else {
     section.append(element("p", "muted", companion.displayName + " reaches no service yet."));
   }
-  lobby.services.map((service, index) => grantPanel(companion, service, step === "connect" && index === 0)).filter(Boolean).forEach(panel => section.append(panel));
+  const place = handed();
+  const first = place ? place.service : lobby.services[0].name;
+  lobby.services.map(service => grantPanel(companion, service, step === "connect" && service.name === first)).filter(Boolean).forEach(panel => section.append(panel));
   return section;
 }
 
@@ -1146,7 +921,7 @@ function connectionRow(companion, connection) {
     const credential = lobby.credentials.get(connection.credential);
     const again = button("Sign in again");
     again.dataset.key = "connection-" + connection.id;
-    again.addEventListener("click", () => focusSignIn(credential ? credential.kind : ""));
+    again.addEventListener("click", () => focusSignIn(companion, credential ? credential.kind : ""));
     const revoke = button("Revoke", "quiet");
     revoke.dataset.key = "connection-revoke-" + connection.id;
     confirmInPlace(revoke, "Revoke " + connection.label + "? It does not come back when the account is signed in again.", "Revoke", () => revokeConnection(companion, connection));
@@ -1168,7 +943,7 @@ function connectionRow(companion, connection) {
     } else {
       const kind = service ? service.accepts[0] : "";
       action = button("Sign in");
-      action.addEventListener("click", () => focusSignIn(kind));
+      action.addEventListener("click", () => focusSignIn(companion, kind));
     }
   }
   action.dataset.key = "connection-" + connection.id;
@@ -1176,10 +951,13 @@ function connectionRow(companion, connection) {
   return row;
 }
 
-function focusSignIn(kind) {
+// Leads to where the account of `kind` signs in: its row, or + Add, opened.
+function focusSignIn(companion, kind) {
   const row = document.getElementById("account-" + kind);
-  const target = row && (row.querySelector("[data-sign-in]") || row.querySelector("input"));
-  if (target) { row.scrollIntoView({ block: "center" }); target.focus(); }
+  const add = document.getElementById("add-account");
+  if (add) add.open = true;
+  const target = row ? row.querySelector("[data-sign-in]") : add && add.querySelector("button");
+  if (target) { target.scrollIntoView({ block: "center" }); target.focus(); }
 }
 
 async function revokeConnection(companion, connection) {
@@ -1240,12 +1018,12 @@ function grantPanel(companion, service, primary) {
   const usable = service.accepts.map(kind => readyCredential(companion, kind)).filter(Boolean);
   const stale = service.accepts.map(kind => waitingCredential(companion, kind)).find(Boolean);
   if (usable.length === 0 && stale) {
-    panel.append(element("p", "muted", "Sign " + stale.label + " in again above to open another connection to " + service.title + "."));
+    panel.append(element("p", "muted", "Sign " + stale.label + " in again under Accounts to open another connection to " + service.title + "."));
     return panel;
   }
   if (usable.length === 0) {
     const titles = service.accepts.map(kindTitle).join(" or ");
-    panel.append(element("p", "muted", service.title + " takes " + (titles ? titles + " accounts" : "accounts this lobby cannot sign in") + ". Sign " + companion.displayName + " in above first."));
+    panel.append(element("p", "muted", service.title + " takes " + (titles ? titles + " accounts" : "accounts this lobby cannot sign in") + ". Add one under Accounts first."));
     return panel;
   }
   if (service.home) return homePanel(companion, service, usable, panel, primary);
@@ -1332,10 +1110,10 @@ function homePanel(companion, service, usable, panel, primary) {
     form.addEventListener("submit", async event => {
       event.preventDefault();
       await submitting(form, again, async () => {
-        const handoff = await startSignIn(companion, credential.kind, "", form);
-        if (!handoff) return;
+        const onward = await startSignIn(companion, credential.kind, "", form);
+        if (!onward) return;
         editing = false;
-        navigate(handoff);
+        location.assign(onward);
       });
     });
     panel.append(form);
@@ -1361,98 +1139,90 @@ function homePanel(companion, service, usable, panel, primary) {
 
 // ---------- names, portrait and removal ----------
 
-function settings(companion) {
-  const details = disclosure("settings", "Name and portrait", "settings-" + companion.id);
-  const draft = drafts.read("rename:" + companion.id);
-  if (draft) details.open = true;
-  details.append(renameForm(companion, draft), portraitControls(companion), removal(companion));
-  return details;
-}
-
-function renameForm(companion, draft) {
-  const form = element("form", "fields");
-  form.setAttribute("aria-label", "Rename " + companion.displayName);
-  const key = "rename:" + companion.id;
-  const name = field("Display name", draft ? draft.name : companion.displayName);
-  const moniker = field("Moniker", draft ? draft.moniker : companion.moniker);
-  name.input.dataset.key = key + ":name";
-  moniker.input.dataset.key = key + ":moniker";
-  const warning = element("p", "warning", "A host configuration that names this companion by its moniker stops working after the moniker changes. The block this lobby gives names it by its id and keeps working.");
-  const update = () => {
-    warning.hidden = moniker.input.value.trim() === companion.moniker;
-    if (name.input.value === companion.displayName && moniker.input.value === companion.moniker) drafts.clear(key);
-    else drafts.write(key, { name: name.input.value, moniker: moniker.input.value });
-  };
-  warning.hidden = moniker.input.value.trim() === companion.moniker;
-  name.input.addEventListener("input", update);
-  moniker.input.addEventListener("input", update);
-  const save = element("button", "", "Save names");
-  save.type = "submit";
-  save.dataset.key = key + ":save";
-  const discard = button("Discard changes", "quiet");
-  discard.addEventListener("click", () => { drafts.clear(key); editing = false; refresh(true, key + ":name"); });
-  const actions = element("div", "actions");
-  actions.append(save, discard);
-  form.append(name.wrapper, moniker.wrapper, warning, actions);
-  form.addEventListener("submit", async event => {
-    event.preventDefault();
-    const change = { expectedRevision: companion.revision };
-    if (name.input.value.trim() !== companion.displayName) change.displayName = name.input.value.trim();
-    if (moniker.input.value.trim() !== companion.moniker) change.moniker = moniker.input.value.trim();
-    if (!("displayName" in change) && !("moniker" in change)) { note("Nothing changed."); drafts.clear(key); return; }
-    await submitting(form, save, async () => {
-      const result = await call("/api/companions/" + encodeURIComponent(companion.id), "PATCH", change);
-      if (!result.ok) {
-        if (result.status === 409) { note(sentence(result), true); resynchronize(); }
-        else formSays(form, sentence(result));
-        return;
-      }
-      drafts.clear(key);
-      keepNewer(result.body.companion);
-      note("Saved.");
-      editing = false;
-      refresh(true, key + ":save");
-    });
+// A name edited where it stands: it reads as text and takes the change when
+// the sponsor leaves it or presses Enter; Escape puts it back.
+function nameInPlace(companion, what, label) {
+  const shown = what === "displayName" ? companion.displayName : companion.moniker;
+  const form = element("form", "in-place");
+  const input = element("input");
+  input.value = shown;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.size = shown.length + 1;
+  input.setAttribute("aria-label", label + " of " + companion.displayName);
+  input.dataset.key = what + "-" + companion.id;
+  form.append(input);
+  input.addEventListener("keydown", event => {
+    if (event.key !== "Escape") return;
+    input.value = shown;
+    input.blur();
   });
+  input.addEventListener("input", () => {
+    input.size = input.value.length + 1;
+    const moving = what === "moniker" && input.value.trim() !== shown;
+    form.querySelector(".warning")?.remove();
+    if (moving) form.append(element("p", "warning", "A host configuration that names this companion by its moniker stops working after the moniker changes. The block this lobby gives names it by its id and keeps working."));
+  });
+  input.addEventListener("change", async () => {
+    const value = input.value.trim();
+    if (!value || value === shown) { input.value = shown; form.querySelector(".warning")?.remove(); return; }
+    form.dataset.busy = "1";
+    const result = await call("/api/companions/" + encodeURIComponent(companion.id), "PATCH", { expectedRevision: companion.revision, [what]: value });
+    delete form.dataset.busy;
+    if (!result.ok) {
+      if (result.status === 409) { note(sentence(result), true); resynchronize(); }
+      else formSays(form, sentence(result));
+      return;
+    }
+    keepNewer(result.body.companion);
+    note("Saved.");
+    editing = false;
+    refresh(true);
+  });
+  form.addEventListener("submit", event => { event.preventDefault(); input.blur(); });
   return form;
 }
 
-function portraitControls(companion) {
-  const box = element("div", "fields");
-  const choose = field("Portrait", "", "A PNG, JPEG, WebP or GIF image of at most 512 KiB.", { type: "file" });
-  choose.input.accept = "image/png,image/jpeg,image/webp,image/gif";
-  choose.input.dataset.key = "portrait-" + companion.id;
-  choose.input.addEventListener("change", async () => {
-    const file = choose.input.files && choose.input.files[0];
+// The portrait, changed by choosing a file right on it.
+function portraitInPlace(companion) {
+  const holder = element("div", "portrait-in-place");
+  const pick = element("label", "portrait-pick");
+  pick.title = "Choose a PNG, JPEG, WebP or GIF image of at most 512 KiB.";
+  const input = element("input");
+  input.type = "file";
+  input.accept = "image/png,image/jpeg,image/webp,image/gif";
+  input.setAttribute("aria-label", "Portrait of " + companion.displayName);
+  input.dataset.key = "portrait-" + companion.id;
+  input.addEventListener("change", async () => {
+    const file = input.files && input.files[0];
     if (!file) return;
-    const updated = await uploadPortrait(companion, file, false);
-    if (updated) { note("The portrait is changed."); editing = false; refresh(true, choose.input.dataset.key); }
+    const updated = await uploadPortrait(companion, file);
+    if (updated) { note("The portrait is changed."); editing = false; refresh(true, input.dataset.key); }
   });
-  box.append(choose.wrapper);
+  pick.append(avatar(companion, "large"), input);
+  holder.append(pick);
   if (companion.portrait) {
-    const clear = button("Use initials instead", "quiet");
+    const clear = button("Use initials", "quiet small");
     clear.addEventListener("click", async () => {
       const result = await call("/api/companions/" + encodeURIComponent(companion.id) + "/portrait", "PUT", { expectedRevision: companion.revision, image: null });
       if (!result.ok) { note(sentence(result), true); if (result.status === 409) resynchronize(); return; }
       keepNewer(result.body.companion);
       note(companion.displayName + " shows its initials.");
-      refresh(true, choose.input.dataset.key);
+      refresh(true, input.dataset.key);
     });
-    const actions = element("div", "actions");
-    actions.append(clear);
-    box.append(actions);
+    holder.append(clear);
   }
-  return box;
+  return holder;
 }
 
 function removal(companion) {
   const box = element("div", "actions removal");
-  const trigger = button("Remove " + companion.displayName, "danger");
+  const trigger = button("Remove " + companion.displayName, "quiet");
   trigger.dataset.key = "remove-" + companion.id;
   const count = companion.attachments;
   const question = count
-    ? "Remove " + companion.displayName + " and end its " + (count === 1 ? "attachment" : count + " attachments") + "? Its accounts are removed here too."
-    : "Remove " + companion.displayName + "? Its accounts are removed here too.";
+    ? "Remove " + companion.displayName + " and end its " + (count === 1 ? "attachment" : count + " attachments") + "? Its accounts are removed too, and free to sign in again as a new companion."
+    : "Remove " + companion.displayName + "? Its accounts are removed too, and free to sign in again as a new companion.";
   confirmInPlace(trigger, question, "Remove", async () => {
     const result = await call("/api/companions/" + encodeURIComponent(companion.id), "DELETE", { expectedRevision: companion.revision, cascade: count > 0 });
     if (!result.ok) {

@@ -64,3 +64,16 @@ crates/testkit/fixtures/manager/companion-accounts.txt	provider-bluesky	The page
 crates/testkit/fixtures/manager/companion-trouble.txt	provider-bluesky	The page's recorded text names the installed services by their titles.
 docs/services/bluesky.md	provider-tangent	Bluesky's doc shows one atproto account serving Tangent and Bluesky at once, and walks both in its live check.
 crates/services/tangent/tests/wire.rs	provider-atproto	The test plays a Space, whose profile names itself by a did:web DID, for an adapter taking accounts of that kind.
+crates/daemon/src/manager.rs	provider-bluesky	The title the atproto adapter gives its accounts, as the sponsor reads it.
+crates/daemon/src/projections.rs	provider-bluesky	The title the atproto adapter gives its accounts, as the sponsor reads it.
+crates/daemon/tests/space_journey.rs	provider-bluesky	The title the atproto adapter gives its accounts, as the sponsor reads it.
+crates/daemon/tests/trouble_journey.rs	provider-bluesky	The title the atproto adapter gives its accounts, as the sponsor reads it.
+crates/testkit/fixtures/hosts/claude-code-2.1.311-space-shown.jsonl	provider-bluesky	The title the atproto adapter gives its accounts, as the sponsor reads it.
+crates/testkit/fixtures/hosts/claude-code-2.1.311-space.jsonl	provider-bluesky	The title the atproto adapter gives its accounts, as the sponsor reads it.
+crates/testkit/src/world.rs	provider-bluesky	The title the atproto adapter gives its accounts, as the sponsor reads it.
+docs/manager.md	provider-bluesky	The title the atproto adapter gives its accounts, as the sponsor reads it.
+docs/services/tangent.md	provider-bluesky	The title the atproto adapter gives its accounts, as the sponsor reads it.
+crates/testkit/fixtures/manager/companion-account-details.txt	provider-tangent	The page's recorded text names the installed services and the title of the account's kind.
+crates/testkit/fixtures/manager/companion-account-details.txt	provider-bluesky	The page's recorded text names the installed services and the title of the account's kind.
+crates/testkit/fixtures/manager/lobby.txt	provider-bluesky	The page's recorded text names the installed services and the title of the account's kind.
+crates/testkit/fixtures/manager/lobby-trouble.txt	provider-bluesky	The page's recorded text names the installed services and the title of the account's kind.

@@ -222,6 +222,7 @@ struct Book {
     records: Vec<RepoRecord>,
     blobs: Vec<RepoBlob>,
     display_names: HashMap<String, String>,
+    avatars: HashMap<String, Vec<u8>>,
     sequence: u64,
 }
 
@@ -520,11 +521,19 @@ impl AtprotoWorld {
         keep_record(&mut book, did, "app.bsky.feed.post", record).uri
     }
 
-    /// Makes the app view show `name` as the display name of `did`.
+    /// Makes `name` the display name of `did`, on its profile and in the app
+    /// view.
     pub fn display_name(&self, did: &str, name: &str) {
         locked(&self.book)
             .display_names
             .insert(did.to_owned(), name.to_owned());
+    }
+
+    /// Makes `picture` the avatar on the profile of `did`.
+    pub fn avatar(&self, did: &str, picture: &[u8]) {
+        locked(&self.book)
+            .avatars
+            .insert(did.to_owned(), picture.to_vec());
     }
 
     /// Every record of `collection` in any repository, oldest first.
@@ -628,6 +637,39 @@ fn answer_server(book: &Mutex<Book>, origin: &str, pds: &str, request: &Received
     }
 }
 
+/// What the fake PDS names every avatar blob by.
+const AVATAR_CID: &str = "bafkreiavatar";
+
+/// The record `app.bsky.actor.profile/self`, which anyone may read, for an
+/// account that has said something of itself.
+fn public_profile(book: &Book, request: &Received) -> Reply {
+    let did = request.query("repo").unwrap_or_default();
+    let name = book.display_names.get(&did);
+    let avatar = book.avatars.get(&did);
+    if request.query("collection").as_deref() != Some("app.bsky.actor.profile")
+        || request.query("rkey").as_deref() != Some("self")
+        || (name.is_none() && avatar.is_none())
+    {
+        return xrpc_error(400, "RecordNotFound", "Could not locate record");
+    }
+    let mut value = json!({ "$type": "app.bsky.actor.profile" });
+    if let Some(name) = name {
+        value["displayName"] = json!(name);
+    }
+    if let Some(picture) = avatar {
+        value["avatar"] = json!({
+            "$type": "blob",
+            "ref": { "$link": AVATAR_CID },
+            "mimeType": "image/png",
+            "size": picture.len(),
+        });
+    }
+    Reply::json(
+        200,
+        &json!({ "uri": format!("at://{did}/app.bsky.actor.profile/self"), "value": value }),
+    )
+}
+
 fn answer_pds(
     book: &Mutex<Book>,
     proofs: &Proofs,
@@ -646,6 +688,18 @@ fn answer_pds(
         }
         ("GET", "/xrpc/com.atproto.server.getServiceAuth") => {
             service_auth(&mut book, proofs, pds, request)
+        }
+        ("GET", "/xrpc/com.atproto.repo.getRecord") => public_profile(&book, request),
+        ("GET", "/xrpc/com.atproto.sync.getBlob") => {
+            let did = request.query("did").unwrap_or_default();
+            match book.avatars.get(&did) {
+                Some(picture) if request.query("cid").as_deref() == Some(AVATAR_CID) => Reply {
+                    status: 200,
+                    headers: vec![("Content-Type".to_owned(), "image/png".to_owned())],
+                    body: picture.clone(),
+                },
+                _ => xrpc_error(400, "BlobNotFound", "Blob not found"),
+            }
         }
         ("GET", "/xrpc/com.atproto.server.getSession")
         | ("POST", "/xrpc/com.atproto.repo.createRecord")

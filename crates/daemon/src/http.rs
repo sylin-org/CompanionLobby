@@ -456,13 +456,6 @@ fn connection_revoked_in(path: &str) -> Option<ConnectionId> {
         .and_then(ConnectionId::parse)
 }
 
-/// The sign-in an `/api/sign-ins/<id>/cancel` path names: 32 hex digits.
-fn sign_in_cancelled_in(path: &str) -> Option<&str> {
-    path.strip_prefix("/api/sign-ins/")
-        .and_then(|rest| rest.strip_suffix("/cancel"))
-        .filter(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
-}
-
 /// The path of the page that says how a sign-in ended; it names no kind, so
 /// the address bar the sponsor reads names no provider.
 const SIGN_IN_DONE: &str = "/signin/done";
@@ -541,6 +534,7 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
             blocking(app, move |lobby| journal_reply(lobby, &query)).await
         }
         (&Method::GET, FEED_PATH) => events(app, request.headers()),
+        #[cfg(feature = "synthetic")]
         (&Method::POST, "/api/companions") => match operator_body(app, request).await {
             Ok(body) => blocking(app, move |lobby| create_companion(lobby, &body)).await,
             Err(refused) => refused.reply(),
@@ -577,23 +571,6 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
             }
             Err(refused) => refused.reply(),
         },
-        (&Method::POST, cancelled) if sign_in_cancelled_in(cancelled).is_some() => {
-            let id = sign_in_cancelled_in(cancelled)
-                .unwrap_or_else(|| unreachable!("checked above"))
-                .to_owned();
-            match operator_body(app, request).await {
-                Ok(_) => {
-                    blocking(app, move |lobby| match lobby.cancel_sign_in(&id) {
-                        Ok(sign_in) => {
-                            json_reply(StatusCode::OK, json!({ "signIn": sign_in_json(&sign_in) }))
-                        }
-                        Err(refusal) => refusal_reply(&refusal),
-                    })
-                    .await
-                }
-                Err(refused) => refused.reply(),
-            }
-        }
         (&Method::GET, SIGN_IN_DONE) => {
             blocking(app, move |lobby| sign_in_done(lobby, &query)).await
         }
@@ -721,7 +698,6 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
                 || portrait_in(other).is_some()
                 || credential_revoked_in(other).is_some()
                 || connection_revoked_in(other).is_some()
-                || sign_in_cancelled_in(other).is_some()
                 || other == SIGN_IN_DONE
                 || sign_in_return_in(other).is_some() =>
         {
@@ -975,6 +951,7 @@ fn snapshot_json(lobby: &Lobby) -> Value {
     })
 }
 
+#[cfg(feature = "synthetic")]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateCompanion {
@@ -982,6 +959,7 @@ struct CreateCompanion {
     display_name: Option<String>,
 }
 
+#[cfg(feature = "synthetic")]
 fn create_companion(lobby: &Lobby, body: &[u8]) -> Reply {
     let Ok(request) = serde_json::from_slice::<CreateCompanion>(body) else {
         return problem(
@@ -1141,20 +1119,24 @@ fn portrait_reply(lobby: &Lobby, id: CompanionId) -> Reply {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BeginSignIn {
-    companion: String,
+    #[serde(default)]
+    companion: Option<String>,
     kind: String,
     hint: String,
 }
 
 fn begin_sign_in(lobby: &Lobby, origin: &str, body: &[u8]) -> Reply {
-    let Some((request, companion)) = serde_json::from_slice::<BeginSignIn>(body)
+    let parsed = serde_json::from_slice::<BeginSignIn>(body)
         .ok()
-        .and_then(|request| CompanionId::parse(&request.companion).map(|id| (request, id)))
-    else {
+        .and_then(|request| match request.companion.as_deref() {
+            Some(id) => CompanionId::parse(id).map(|id| (Some(id), request)),
+            None => Some((None, request)),
+        });
+    let Some((companion, request)) = parsed else {
         return problem(
             StatusCode::BAD_REQUEST,
             Outcome::InvalidInput,
-            "Send {\"companion\": <id>, \"kind\": ..., \"hint\": ...} and nothing else.",
+            "Send {\"kind\": ..., \"hint\": ...}, with \"companion\": <id> for one companion, and nothing else.",
         );
     };
     match lobby.begin_sign_in(companion, &request.kind, &request.hint, origin) {
@@ -1167,42 +1149,39 @@ fn begin_sign_in(lobby: &Lobby, origin: &str, body: &[u8]) -> Reply {
 }
 
 /// Completes a sign-in from what the provider sent back, then sends the
-/// browser straight on to the page that says how it ended, so the code and
-/// the `state` leave the address bar and the history at once. The redirect
-/// carries only the outcome's wire name and, when the lobby knew the
-/// sign-in, the id of its companion, whose page the sponsor goes back to.
+/// browser straight on, so the code and the `state` leave the address bar and
+/// the history at once: to the page of the companion that holds the account,
+/// or, when nothing was signed in, to the page that says why, carrying only
+/// the outcome's wire name and the id of the companion it concerns.
 fn complete_sign_in(lobby: &Lobby, kind: &str, pairs: Vec<(String, String)>) -> Reply {
     let completed = lobby.complete_sign_in(kind, pairs);
-    let outcome = match &completed.result {
+    let location = match &completed.result {
         Ok(credential) => {
             trace::line(&format!("credential {} signed in", credential.id));
-            Outcome::Done
+            format!("/companion/{}", credential.companion)
         }
-        Err(refusal) => refusal.outcome,
+        Err(refusal) => {
+            let companion = completed
+                .companion
+                .map_or_else(String::new, |id| format!("&companion={id}"));
+            let conflict = refusal.conflict.map_or_else(String::new, |conflict| {
+                format!("&conflict={}", conflict.code())
+            });
+            format!(
+                "{SIGN_IN_DONE}?outcome={}{companion}{conflict}",
+                refusal.outcome.code()
+            )
+        }
     };
-    let companion = completed
-        .companion
-        .map_or_else(String::new, |id| format!("&companion={id}"));
-    let conflict = completed
-        .result
-        .as_ref()
-        .err()
-        .and_then(|refusal| refusal.conflict)
-        .map_or_else(String::new, |conflict| {
-            format!("&conflict={}", conflict.code())
-        });
     let mut reply = empty_reply(StatusCode::SEE_OTHER);
-    if let Ok(value) = HeaderValue::from_str(&format!(
-        "{SIGN_IN_DONE}?outcome={}{companion}{conflict}",
-        outcome.code()
-    )) {
+    if let Ok(value) = HeaderValue::from_str(&location) {
         reply.headers_mut().insert(header::LOCATION, value);
     }
     reply
 }
 
-/// The page that says how a sign-in ended, from the outcome's wire name
-/// alone, in the manager page's own stylesheet, with one action: back to
+/// The page that says why a sign-in signed nothing in, from the outcome's wire
+/// name alone, in the manager page's own stylesheet, with one action: back to
 /// the companion's own page when the lobby knows the companion, or to the
 /// lobby. It loads nothing else.
 fn sign_in_done(lobby: &Lobby, query: &str) -> Reply {
@@ -1230,31 +1209,27 @@ fn sign_in_done(lobby: &Lobby, query: &str) -> Reply {
             StatusCode::CONFLICT,
             conflict_said.as_deref().unwrap_or_default(),
         ),
-        Some("done") => (
-            StatusCode::OK,
-            "The account is signed in. The companion's page in the lobby shows it.",
-        ),
         Some("not_found") => (
             StatusCode::NOT_FOUND,
-            "The lobby does not remember a sign-in waiting for this answer, so this answer signed nothing in. It may have been cancelled, expired or finished already; the companion's page shows what is signed in.",
+            "The lobby does not remember a sign-in waiting for this answer, so this answer signed nothing in. It may have expired or finished already, or another may have taken its place; the lobby shows what is signed in.",
         ),
         Some("conflict") => (
             StatusCode::CONFLICT,
             conflict_said.as_deref().unwrap_or(
-                "Nothing was signed in: the account met a conflict in the lobby. The companion's page shows what is signed in.",
+                "Nothing was signed in: the account met a conflict in the lobby, which shows what is signed in.",
             ),
         ),
         Some("temporarily_unavailable" | "rate_limited") => (
             StatusCode::SERVICE_UNAVAILABLE,
-            "Nothing was signed in: the sign-in page could not be reached just now. Start the sign-in again from the companion's page.",
+            "Nothing was signed in: the sign-in page could not be reached just now. Sign in again from the lobby.",
         ),
         Some("refused" | "invalid_input") => (
             StatusCode::FORBIDDEN,
-            "Nothing was signed in: the sign-in page's answer did not prove the sign-in the lobby started. Start it again from the companion's page.",
+            "Nothing was signed in: the sign-in page's answer did not prove the sign-in the lobby started. Sign in again from the lobby.",
         ),
         _ => (
             StatusCode::FORBIDDEN,
-            "Nothing was signed in. Start the sign-in again from the companion's page.",
+            "Nothing was signed in. Sign in again from the lobby.",
         ),
     };
     let (back, back_label) = match &companion {
@@ -1297,9 +1272,15 @@ fn conflict_sentence(
         |companion| companion.display_name.to_string(),
     );
     match conflict {
-        SignInConflict::AnotherCompanion => "Nothing was signed in: that account is signed in for another companion, and an account belongs to one companion. Revoke it under Accounts on the page of the companion that holds it first, or sign in with another account.".to_owned(),
+        SignInConflict::AnotherCompanion => match companion {
+            Some(companion) => format!(
+                "Nothing changed: that account belongs to {}, and an account belongs to one companion. Sign in with another account here, or use it there.",
+                companion.display_name
+            ),
+            None => "Nothing changed: that account belongs to another companion, and an account belongs to one companion.".to_owned(),
+        },
         SignInConflict::AlreadyHeld => format!(
-            "Nothing was signed in: {name} already holds an account of this kind. Revoke it under Accounts on {name}'s page first to sign in another."
+            "Nothing was signed in: {name} already holds an account of this kind. Remove it under Accounts on {name}'s page first to sign in another."
         ),
         SignInConflict::AnotherAccount => format!(
             "Nothing changed: that is another account than the one {name} holds. Sign in again as {name}'s own account to grant it more; its connections stay as they are."
@@ -1320,11 +1301,11 @@ fn conflict_sentence(
             });
             match waiting {
                 Some(credential) => format!(
-                    "Nothing was signed in: that is another account than {label}, which waits for {name} to sign it in again. Sign in as {label} instead, or revoke it under Accounts on {name}'s page first.",
+                    "Nothing was signed in: that is another account than {label}, which waits for {name} to sign it in again. Sign in as {label} instead, or remove it under Accounts on {name}'s page first.",
                     label = credential.label
                 ),
                 None => format!(
-                    "Nothing was signed in: that is another account than the one that waits for {name} to sign it in again. Sign in as that account instead, or revoke it under Accounts on {name}'s page first."
+                    "Nothing was signed in: that is another account than the one that waits for {name} to sign it in again. Sign in as that account instead, or remove it under Accounts on {name}'s page first."
                 ),
             }
         }
@@ -1948,13 +1929,6 @@ mod tests {
             Some("passbook")
         );
         assert_eq!(sign_in_return_in("/signin//return"), None);
-        let id = "0123456789abcdef0123456789abcdef";
-        assert_eq!(
-            sign_in_cancelled_in(&format!("/api/sign-ins/{id}/cancel")),
-            Some(id)
-        );
-        assert_eq!(sign_in_cancelled_in("/api/sign-ins/x/cancel"), None);
-        assert_eq!(sign_in_cancelled_in(&format!("/api/sign-ins/{id}")), None);
         assert_eq!(sign_in_return_in("/signin/a/b/return"), None);
     }
 

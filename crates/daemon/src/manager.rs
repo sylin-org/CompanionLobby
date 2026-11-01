@@ -43,24 +43,13 @@ pub const SCRIPT: (&str, &str) = (
 pub const CONTENT_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
      connect-src 'self'; img-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-/// Whether `path` is a route of the page: the companions, the journal, one
-/// companion, the page that tells a host how to attach as it, or one of its
-/// sign-ins.
+/// Whether `path` is a route of the page: the companions, signing in, the
+/// journal, one companion, or the page that tells a host how to attach as it.
 pub fn is_page_path(path: &str) -> bool {
     let Some(rest) = path.strip_prefix("/companion/") else {
-        return matches!(path, "/" | "/journal");
+        return matches!(path, "/" | "/sign-in" | "/journal");
     };
-    if let Some(id) = rest.strip_suffix("/attach") {
-        return CompanionId::parse(id).is_some();
-    }
-    match rest.split_once("/sign-in/") {
-        Some((id, sign_in)) => {
-            CompanionId::parse(id).is_some()
-                && sign_in.len() == 32
-                && sign_in.bytes().all(|byte| byte.is_ascii_hexdigit())
-        }
-        None => CompanionId::parse(rest).is_some(),
-    }
+    CompanionId::parse(rest.strip_suffix("/attach").unwrap_or(rest)).is_some()
 }
 
 /// The embedded file served at `path`, with its content type.
@@ -206,9 +195,7 @@ mod tests {
         }
         let (_, lobby) = RENDERED[0];
         assert!(
-            recorded(lobby)
-                .1
-                .contains(&format!("{HANDLE} · Atmosphere")),
+            recorded(lobby).1.contains(&format!("{HANDLE} · Bluesky")),
             "the lobby names the account by its label"
         );
     }
@@ -247,11 +234,9 @@ mod tests {
         assert!(!is_page_path("/companion/ada/attach"));
         assert!(!is_page_path(&format!("/companion/{id}/attach/x")));
         assert!(!is_page_path("/companion/ada"));
-        let sign_in = "0123456789abcdef0123456789abcdef";
-        assert!(is_page_path(&format!("/companion/{id}/sign-in/{sign_in}")));
-        assert!(!is_page_path(&format!("/companion/{id}/sign-in/x")));
-        assert!(!is_page_path(&format!("/companion/ada/sign-in/{sign_in}")));
-        assert!(!is_page_path(&format!("/companion/{id}/other/{sign_in}")));
+        assert!(is_page_path("/sign-in"));
+        assert!(!is_page_path(&format!("/companion/{id}/sign-in")));
+        assert!(!is_page_path(&format!("/companion/{id}/other")));
         assert!(!is_page_path("/companion/"));
         assert!(!is_page_path("/elsewhere"));
         assert_eq!(asset("/manager.js"), Some(SCRIPT));

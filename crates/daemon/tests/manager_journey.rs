@@ -99,7 +99,7 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
         lobby["kinds"],
         json!([
             { "kind": "passbook", "title": "Passbook", "hint": lobby_testkit::passbook::HINT },
-            { "kind": "atproto", "title": "Atmosphere", "hint": lobby_credential_atproto::HINT },
+            { "kind": "atproto", "title": "Bluesky", "hint": lobby_credential_atproto::HINT },
         ])
     );
     assert_eq!(
@@ -193,8 +193,8 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
         "This kind of account cannot be chosen on the sign-in page; type the account to sign in with first."
     );
 
-    // Lending an identity: the handoff remembers the account meant, from
-    // the lobby, across a reload or a second tab.
+    // Lending an identity: the browser goes to the provider and comes back
+    // to the companion's own page.
     let started = install.operator(
         "POST",
         "/api/sign-ins",
@@ -204,31 +204,12 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
     let sign_in = body(&started)["signIn"].clone();
     assert_eq!(sign_in["account"], HANDLE);
     let url = body(&started)["url"].as_str().expect("url").to_owned();
-    let handoff = format!(
-        "/companion/{id}/sign-in/{}",
-        sign_in["id"].as_str().expect("id")
-    );
-    assert_eq!(get(&install, &handoff).status, 200);
-    let reloaded = install.json("/api/lobby")["signIns"].clone();
-    assert_eq!(
-        reloaded,
-        json!([sign_in]),
-        "a reload reads the same sign-in"
-    );
+    assert_eq!(get(&install, "/sign-in").status, 200);
     let back = install.arrive(&world.atproto.approve(&url));
     assert_eq!(back.status, 200, "{}", text(&back));
-    let done = text(&back);
-    assert!(
-        done.contains("<link rel=\"stylesheet\" href=\"/manager.css\">")
-            && done.contains(&format!(
-                "<a class=\"button primary\" href=\"/companion/{id}\">Back to Ada Lovelace</a>"
-            )),
-        "the page a sign-in lands on wears the lobby's look and leads to the companion's page: {done}"
-    );
-    assert!(!done.contains(DID) && !done.contains(HANDLE), "{done}");
+    assert!(!text(&back).contains(DID) && !text(&back).contains(HANDLE));
     let ended = install.json("/api/lobby")["signIns"].clone();
     assert_eq!(ended[0]["status"], "signed_in");
-    assert_eq!(ended[0]["account"], HANDLE, "the handoff still names it");
 
     // A second account, of the kind the board takes.
     let page = install.sign_in(&id, &world.passbook, HOLDER);
@@ -307,8 +288,8 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
         "You created Ada Lovelace.",
         "You changed the portrait of Ada Lovelace.",
         "A mind attached as Ada Lovelace.",
-        "You started signing Ada Lovelace in with Atmosphere.",
-        "You signed Ada Lovelace in with Atmosphere as ada.example.test.",
+        "You started signing Ada Lovelace in with Bluesky.",
+        "You signed Ada Lovelace in with Bluesky as ada.example.test.",
         "You signed Ada Lovelace in with Passbook as ada.",
         "You opened a connection for Ada Lovelace to Board at front.",
         "A mind as Ada Lovelace used Read the board on Board at front.",
@@ -345,13 +326,7 @@ fn a_sponsor_walks_from_nothing_to_an_attached_companion_with_a_lent_account_and
     assert_eq!(paged[0]["sentence"], said[0]);
 
     // The page's own files are served for every route it has.
-    for asset in [
-        "/",
-        "/journal",
-        "/manager.js",
-        "/manager.css",
-        handoff.as_str(),
-    ] {
+    for asset in ["/", "/sign-in", "/journal", "/manager.js", "/manager.css"] {
         assert_eq!(get(&install, asset).status, 200, "{asset}");
     }
 

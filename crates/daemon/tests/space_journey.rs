@@ -301,14 +301,14 @@ fn reach_names_the_account_and_how_the_space_knows_the_companion_and_never_lets_
     assert_eq!(
         told,
         format!(
-            "You are ada, attached through Companion Lobby. ada holds the Atmosphere account \"{HANDLE}\". ada reaches Tangent Space at main ({origin}) with the account \"{HANDLE}\"; Tangent Space knows it there as \"Ada\" (participant \"{participant}\") and lets it read, but not post: start with tangent_arrive."
+            "You are ada, attached through Companion Lobby. ada holds the Bluesky account \"{HANDLE}\". ada reaches Tangent Space at main ({origin}) with the account \"{HANDLE}\"; Tangent Space knows it there as \"Ada\" (participant \"{participant}\") and lets it read, but not post: start with tangent_arrive."
         )
     );
     let structured = &reach["result"]["structuredContent"];
     assert_eq!(structured["message"], told.as_str());
     assert_eq!(
         structured["accounts"],
-        json!([{ "label": HANDLE, "kind": "atproto", "title": "Atmosphere", "waitsForSignIn": false }])
+        json!([{ "label": HANDLE, "kind": "atproto", "title": "Bluesky", "waitsForSignIn": false }])
     );
     let connection = &structured["connections"][0];
     assert_eq!(connection["account"], HANDLE);

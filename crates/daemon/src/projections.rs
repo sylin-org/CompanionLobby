@@ -414,7 +414,7 @@ pub fn credential_json(credential: &Credential) -> Value {
 pub fn sign_in_json(sign_in: &SignInView) -> Value {
     json!({
         "id": sign_in.id,
-        "companion": sign_in.companion.to_string(),
+        "companion": sign_in.companion.map(|companion| companion.to_string()),
         "kind": sign_in.kind.as_str(),
         "account": sign_in.account,
         "status": sign_in.status.code(),
@@ -659,10 +659,6 @@ pub fn sentence(entry: &Value, names: &Names) -> String {
                 account.map_or_else(String::new, |account| format!(" as {account}"))
             ),
             format!("sign {companion} in{with_kind}"),
-        ),
-        (_, "cancel_sign_in") => (
-            format!("cancelled signing {companion} in{with_kind}"),
-            format!("cancel signing {companion} in{with_kind}"),
         ),
         (_, "revoke_credential") => {
             let what = match (account, kind) {
@@ -1142,7 +1138,7 @@ mod tests {
         });
         let mut waiting = passbook();
         waiting.label = AccountLabel::new("ada.example.test").expect("label");
-        waiting.title = "Atmosphere".to_owned();
+        waiting.title = "Bluesky".to_owned();
         waiting.waits = true;
         let answer = reach(
             &ada(),
@@ -1152,14 +1148,14 @@ mod tests {
         );
         assert_eq!(
             answer.rendered(),
-            "You are Ada (moniker ada), attached through Companion Lobby. Ada holds the Passbook account \"ada\" and the Atmosphere account \"ada.example.test\", which waits for the sponsor to sign it in again. Ada reaches Board at front (http://127.0.0.1:5300) with the account \"ada\"; Board knows it there as \"Ada \\\"the bold\\\"\" (member number \"7\") and lets it read the board and post on it: start with board_read."
+            "You are Ada (moniker ada), attached through Companion Lobby. Ada holds the Passbook account \"ada\" and the Bluesky account \"ada.example.test\", which waits for the sponsor to sign it in again. Ada reaches Board at front (http://127.0.0.1:5300) with the account \"ada\"; Board knows it there as \"Ada \\\"the bold\\\"\" (member number \"7\") and lets it read the board and post on it: start with board_read."
         );
         let structured = answer.structured.expect("structured");
         assert_eq!(
             structured["accounts"],
             json!([
                 { "label": "ada", "kind": "passbook", "title": "Passbook", "waitsForSignIn": false },
-                { "label": "ada.example.test", "kind": "passbook", "title": "Atmosphere", "waitsForSignIn": true },
+                { "label": "ada.example.test", "kind": "passbook", "title": "Bluesky", "waitsForSignIn": true },
             ])
         );
         let connection = &structured["connections"][0];
@@ -1230,32 +1226,32 @@ mod tests {
                 "You tried to start signing Ada in, but a sign-in for it was already waiting, or it is signed in with that kind already.",
             ),
             (
-                json!({ "initiator": "sponsor", "companion": ada, "companionName": "Ada", "kindTitle": "Atmosphere", "accountLabel": "ada.example.test", "kind": "command", "command": "complete_sign_in", "outcome": "done" }),
-                "You signed Ada in with Atmosphere as ada.example.test.",
+                json!({ "initiator": "sponsor", "companion": ada, "companionName": "Ada", "kindTitle": "Bluesky", "accountLabel": "ada.example.test", "kind": "command", "command": "complete_sign_in", "outcome": "done" }),
+                "You signed Ada in with Bluesky as ada.example.test.",
             ),
             (
-                json!({ "initiator": "sponsor", "companion": gone, "companionName": "Ada", "kindTitle": "Atmosphere", "accountLabel": "ada.example.test", "kind": "command", "command": "revoke_credential", "outcome": "done" }),
-                "You revoked ada.example.test, the Atmosphere account Ada held.",
+                json!({ "initiator": "sponsor", "companion": gone, "companionName": "Ada", "kindTitle": "Bluesky", "accountLabel": "ada.example.test", "kind": "command", "command": "revoke_credential", "outcome": "done" }),
+                "You revoked ada.example.test, the Bluesky account Ada held.",
             ),
             (
-                json!({ "initiator": "sponsor", "companion": ada, "companionName": "Ada", "kindTitle": "Atmosphere", "accountLabel": "ada.example.test", "kind": "command", "command": "revoke_at_provider", "outcome": "unsupported" }),
-                "You tried to revoke ada.example.test at Atmosphere too, but Atmosphere offers no way to revoke it there, so it ends there when it expires.",
+                json!({ "initiator": "sponsor", "companion": ada, "companionName": "Ada", "kindTitle": "Bluesky", "accountLabel": "ada.example.test", "kind": "command", "command": "revoke_at_provider", "outcome": "unsupported" }),
+                "You tried to revoke ada.example.test at Bluesky too, but Bluesky offers no way to revoke it there, so it ends there when it expires.",
             ),
             (
-                json!({ "initiator": "lobby", "companion": ada, "companionName": "Ada", "kindTitle": "Atmosphere", "accountLabel": "ada.example.test", "kind": "command", "command": "renew_credential", "outcome": "done" }),
-                "The lobby kept ada.example.test signed in for Ada with Atmosphere.",
+                json!({ "initiator": "lobby", "companion": ada, "companionName": "Ada", "kindTitle": "Bluesky", "accountLabel": "ada.example.test", "kind": "command", "command": "renew_credential", "outcome": "done" }),
+                "The lobby kept ada.example.test signed in for Ada with Bluesky.",
             ),
             (
-                json!({ "initiator": "lobby", "companion": ada, "companionName": "Ada", "kindTitle": "Atmosphere", "accountLabel": "ada.example.test", "kind": "command", "command": "renew_credential", "outcome": "needs_sign_in" }),
-                "The lobby tried to keep ada.example.test signed in for Ada with Atmosphere, but Atmosphere ended that sign-in, so Ada needs signing in again.",
+                json!({ "initiator": "lobby", "companion": ada, "companionName": "Ada", "kindTitle": "Bluesky", "accountLabel": "ada.example.test", "kind": "command", "command": "renew_credential", "outcome": "needs_sign_in" }),
+                "The lobby tried to keep ada.example.test signed in for Ada with Bluesky, but Bluesky ended that sign-in, so Ada needs signing in again.",
             ),
             (
-                json!({ "initiator": "lobby", "companion": ada, "companionName": "Ada", "kindTitle": "Atmosphere", "accountLabel": "ada.example.test", "kind": "command", "command": "renew_credential", "outcome": "outcome_unknown" }),
-                "The lobby tried to keep ada.example.test signed in for Ada with Atmosphere, but the lobby cannot tell whether Atmosphere renewed it, so Ada needs signing in again.",
+                json!({ "initiator": "lobby", "companion": ada, "companionName": "Ada", "kindTitle": "Bluesky", "accountLabel": "ada.example.test", "kind": "command", "command": "renew_credential", "outcome": "outcome_unknown" }),
+                "The lobby tried to keep ada.example.test signed in for Ada with Bluesky, but the lobby cannot tell whether Bluesky renewed it, so Ada needs signing in again.",
             ),
             (
-                json!({ "initiator": "lobby", "companion": ada, "companionName": "Ada", "kindTitle": "Atmosphere", "accountLabel": "ada.example.test", "kind": "command", "command": "end_unfinished_renewal", "outcome": "done" }),
-                "The lobby stopped while it renewed ada.example.test for Ada with Atmosphere and cannot tell whether Atmosphere renewed it, so Ada needs signing in again.",
+                json!({ "initiator": "lobby", "companion": ada, "companionName": "Ada", "kindTitle": "Bluesky", "accountLabel": "ada.example.test", "kind": "command", "command": "end_unfinished_renewal", "outcome": "done" }),
+                "The lobby stopped while it renewed ada.example.test for Ada with Bluesky and cannot tell whether Bluesky renewed it, so Ada needs signing in again.",
             ),
             (
                 json!({ "initiator": "sponsor", "companion": gone, "companionName": "Ada", "kind": "command", "command": "remove_companion", "outcome": "done" }),

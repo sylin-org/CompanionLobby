@@ -19,7 +19,7 @@ reach, and keeps an attributed record of everything that happened.
 | Sponsor | The person who owns the companions and decides what they may reach. | `Sponsor` |
 | Companion | A named identity: moniker, display name, portrait, sponsor. | `Companion`, `CompanionId` |
 | Mind | A model or agent run by an MCP host, known to the lobby only through its attachment. One attachment is one companion. | `Attachment`, `AttachmentId` |
-| Credential | An account the sponsor signed in to for a companion. The record never holds material. | `Credential`, `CredentialId` |
+| Credential | An account the sponsor signed in to, which says which companion it is: the one that holds it, or a new one named from it. The record never holds material. | `Credential`, `CredentialId` |
 | Service | Something a companion reaches, spoken to by a service adapter in its own words. | `ServiceName` |
 | Connection | The sponsor's decision that a companion may use one credential to reach a service at an address. | `Connection`, `ConnectionId` |
 | Journal | Attribution: who did what, when, through which connection, with which outcome, named as the sponsor read it then. | `JournalEntry` |
@@ -173,11 +173,11 @@ v0.1.0 is the Tangent service adapter (reading, creating a post and starting a
 topic; edit, delete, membership, watch and read position included; moderation
 and management tools last within the slice) reached through Claude Desktop,
 Claude Code and Codex on Windows with the owner's real atproto account.
-Portraits the sponsor uploads exist. The Bluesky service adapter is built
+Portraits read from the account's profile and uploaded by the sponsor exist. The Bluesky service adapter is built
 on the same atproto credential as Tangent's and passes the conformance
 suite; it is reached by real users only once the owner's live check in its
-documentation passes. The `attention` tool, portraits read from an
-account's profile and the Windows tray come after v0.1.0.
+documentation passes. The `attention` tool and the Windows tray come after
+v0.1.0.
 
 ## Consequences
 
@@ -213,16 +213,18 @@ decision.
 5. **Data directory.** `%LOCALAPPDATA%\CompanionLobby` through
    `SHGetKnownFolderPath`, `LOBBY_DATA_DIR` as the override, and a hard refusal
    of any path ending `.companion-lobby`.
-6. **Credential ownership.** A companion holds at most one account per
-   provider; an account belongs to exactly one companion; removing a
-   credential frees the account for another companion; revoking it while
-   keeping the record keeps the account reserved to that companion.
+6. **Credential ownership.** Confirmed by the owner. A companion comes from a
+   sign-in: the account says which companion it is, and an account no companion
+   holds makes one. A companion holds at most one account per provider; an
+   account belongs to exactly one companion; revoking it keeps the record and the
+   account reserved to that companion, so signing in with it again returns there;
+   removing the companion frees it.
 7. **MCP hosts for the ship line.** Claude Desktop, Claude Code and Codex on
    Windows, each recorded on day 1 of slice 1; the protocol revision they
    speak first is built first and the other is added later. Every host
    attaches through the shim; none attaches over HTTP directly.
-8. **Ship line.** v0.1.0 as described above; sponsor portraits exist, and
-   Bluesky, the `attention` tool, profile portraits and the tray come after.
+8. **Ship line.** v0.1.0 as described above; portraits exist, and Bluesky, the
+   `attention` tool and the tray come after.
 9. **Tangent connection.** A proof signs the account in as a browser's
    sign-in does, and the connection keeps the Space's cookies for itself; what
    the companion may do there is what the Space's pages offer it. The derived
@@ -230,8 +232,9 @@ decision.
    required for the ship line only if the owner's live Tangent uses it.
 10. **Journal retention.** Five rotated generations of 1 MiB each, with no
     age-based deletion.
-11. **Portrait source.** Sponsor upload in the manager, plus the account's
-    profile avatar read by the credential adapter as an opt-in.
+11. **Portrait source.** Confirmed by the owner. The account's public profile
+    picture when a sign-in makes a companion, read by the credential adapter;
+    the sponsor changes it in place, or keeps the initials.
 12. **Discovery document.** Port 5219 and the existing fields kept compatible
     (`product` `companion-lobby`, `discoveryVersion` 1, `managerOrigin`), with
     new fields only added and cross-origin headers on that one document only,

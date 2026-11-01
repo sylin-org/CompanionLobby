@@ -56,8 +56,8 @@ fn lobby_world_prints_origins_that_answer_and_stops_when_its_input_closes() {
         "/space/new-post",
         "/space/sign-ins-end",
         "/space/locked",
-        "/atmosphere/older",
-        "/atmosphere/asked",
+        "/accounts/older",
+        "/accounts/asked",
     ] {
         let origin =
             Address::parse(&value("control"), AddressPolicy::LoopbackAllowed).expect("control");
@@ -67,7 +67,7 @@ fn lobby_world_prints_origins_that_answer_and_stops_when_its_input_closes() {
         assert_eq!(answer.status, 200, "{knob}");
     }
     assert_eq!(value("passbook-holder"), "ada");
-    assert_eq!(value("atmosphere-handle"), "ada.example.test");
+    assert_eq!(value("account-handle"), "ada.example.test");
     child
         .stdin
         .take()

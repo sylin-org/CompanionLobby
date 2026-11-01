@@ -88,7 +88,6 @@ main > .button { justify-self: start; }
 .card-account { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; font-size: 12px; }
 .card-account > span { overflow-wrap: anywhere; min-width: 0; }
 .card-account .warn, .status.warn { color: var(--warn); }
-.adding { display: grid; gap: 12px; justify-items: start; }
 
 .block { display: grid; gap: 10px; padding-top: 16px; border-top: 1px solid var(--line); }
 .rows { list-style: none; margin: 0; padding: 0; }
@@ -110,10 +109,6 @@ main > .button { justify-self: start; }
 .details dt { color: var(--muted); }
 .details dd { margin: 0; color: var(--ink-soft); }
 
-.settings { font-size: 13px; }
-.settings summary { cursor: pointer; color: var(--muted); }
-.settings[open] { flex-basis: 100%; display: grid; gap: 16px; padding: 12px 0 4px; }
-.settings[open] summary { color: var(--ink); }
 .removal { padding-top: 8px; border-top: 1px solid var(--line); }
 
 form { margin: 0; }
@@ -122,9 +117,6 @@ form { margin: 0; }
 .inline-form { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: end; }
 .inline-form .field { flex: 1 1 260px; }
 .form-said, .waiting { flex-basis: 100%; margin: 0; }
-.create-row { display: flex; gap: 20px; align-items: start; }
-.create-row .fields { flex: 1; }
-.preview { padding-top: 20px; }
 .field { display: grid; gap: 4px; min-width: 0; }
 .field label { font-size: 12px; color: var(--ink-soft); }
 input[type="text"], select {
@@ -159,8 +151,6 @@ input[type="file"]::file-selector-button {
 @media (max-width: 620px) {
   main { padding-top: 16px; gap: 16px; }
   h1 { font-size: 21px; }
-  .create-row { flex-direction: column; gap: 12px; }
-  .preview { padding-top: 0; }
   .journal li { flex-direction: column; gap: 2px; }
   .word { min-width: 0; }
   .row > button, .row > .button, .row > .confirm-inline, .row > .actions { margin-left: auto; }
@@ -168,3 +158,30 @@ input[type="file"]::file-selector-button {
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
 }
+
+/* Signing in and + Add. */
+.sign-in-choices { display: grid; gap: 16px; justify-items: start; }
+.sign-in-choice { display: grid; gap: 8px; justify-items: start; }
+.sign-in-choice .details { width: 100%; max-width: 420px; }
+.sign-in-choice .details .field { margin-top: 8px; }
+.add-account { display: grid; gap: 12px; justify-items: start; margin-top: 12px; }
+.add-account > summary { list-style: none; cursor: pointer; width: max-content; padding: 7px 14px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+.add-account > summary::-webkit-details-marker { display: none; }
+.add-account.first > summary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.add-account > .sign-in-choices { margin-top: 12px; }
+
+/* A companion's names and portrait, edited where they stand. */
+.identity-words { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.identity-facts { display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; }
+.in-place { display: inline-grid; gap: 4px; max-width: 100%; }
+.in-place input { font: inherit; color: inherit; background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 0 6px; margin: 0 0 0 -7px; width: 100%; min-width: 0; }
+h1 .in-place { display: grid; }
+h1 .in-place input { font-weight: inherit; }
+.in-place input:hover { border-color: var(--line); }
+.in-place input:focus { border-color: var(--line); outline: none; background: var(--surface); }
+.identity-facts .in-place input { width: auto; }
+.portrait-in-place { display: grid; gap: 4px; justify-items: center; flex: none; }
+.portrait-pick { position: relative; display: block; cursor: pointer; border-radius: 50%; }
+.portrait-pick input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; font-size: 0; }
+.portrait-pick:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.small { font-size: 11px; padding: 0 4px; }

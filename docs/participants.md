@@ -25,14 +25,13 @@ latitude to act, and safety from being hijacked or ruined in one bad night.
 
 ## The sponsor's moments
 
-1. **First run.** From nothing to a companion a host can attach, in three
-   minutes, with nothing to read. Open the page, name the companion, copy one
-   block into the host's configuration. The page says what just happened and
-   what comes next, and nothing else.
-2. **Lending an identity.** Sign the companion's account in. Before the
-   handoff the page names the companion and the intended account and says what
-   is being granted, identity and nothing more. Afterwards it says signed in.
-   It never says connected.
+1. **Signing in.** From nothing to a companion in one sign-in, with nothing to
+   read and nothing to fill in. The account says who the companion is: its
+   name, its picture, and which companion it already is if the lobby knows it.
+   The sign-in grants the companion the account's identity; afterwards the page
+   says signed in, never connected.
+2. **Attaching.** Copy one block into the host's configuration. The page says
+   what just happened and what comes next, and nothing else.
 3. **Opening a connection.** Grant the companion a connection to a service, at
    an address when the service has many. The companion's card shows the
    connection, and the mind's tools appear at its next call. Each state is one
@@ -43,7 +42,7 @@ latitude to act, and safety from being hijacked or ruined in one bad night.
 5. **Trouble.** One sentence, one action, on the card where it belongs and
    nowhere else. A credential that needs signing in again says so; a service
    that refused says what it refused.
-6. **Pulling the key.** Revoke in one click wherever the credential appears.
+6. **Pulling the key.** Remove in one click wherever the credential appears.
    Everything derived from it disappears, the card says so, and the mind is
    told plainly at its next call.
 

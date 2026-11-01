@@ -191,7 +191,9 @@ impl Install {
         serde_json::from_slice(&answer.body).expect("JSON")
     }
 
-    /// Creates a companion and returns its id.
+    /// Creates a companion with no account, the precondition of a journey
+    /// about something else, and returns its id. The route exists only where
+    /// the test kit does; in the product a companion comes from a sign-in.
     pub fn create(&self, moniker: &str) -> String {
         let answer = self.operator(
             "POST",
@@ -226,8 +228,9 @@ impl Install {
     }
 
     /// The sponsor's browser arriving at `location`, a sign-in's return
-    /// route on this lobby: the route sends it straight on, carrying only
-    /// the outcome, and this answers the page it is sent to.
+    /// route on this lobby: the route sends it straight on, to the companion
+    /// or, carrying only the outcome, to the page that says why not, and this
+    /// answers the page it is sent to.
     pub fn arrive(&self, location: &str) -> Answer {
         let (lobby, target) = split_url(location);
         assert_eq!(lobby.port(), self.port, "back to this lobby");
@@ -238,7 +241,7 @@ impl Install {
         assert!(returned.body.is_empty());
         let onward = returned.header("location").expect("a location").to_owned();
         assert!(
-            onward.starts_with("/signin/done?outcome=")
+            (onward.starts_with("/signin/done?outcome=") || onward.starts_with("/companion/"))
                 && !onward.contains("state")
                 && !onward.contains("code"),
             "nothing the provider sent rides on: {onward}"

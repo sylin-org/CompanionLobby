@@ -108,7 +108,7 @@ app view reads.
    .\target\release\companion-lobby.exe open
    ```
 
-3. Create a companion and sign it in with the account. The provider's
+3. Sign in with the account, which makes the companion. The provider's
    consent page lists posting, liking, reposting, uploading images and
    reading the timeline. Back on the manager page, the account's details
    list every permission in the table above.

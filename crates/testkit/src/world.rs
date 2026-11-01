@@ -22,9 +22,9 @@
 //! so the next call exchanges a fresh proof, and `/space/new-post` has Cy post
 //! in the Space's gardens Topic, which is new to a companion that has already
 //! arrived;
-//! `/atmosphere/older` makes Atmosphere sign-ins grant only identity and
+//! `/accounts/older` makes Bluesky sign-ins grant only identity and
 //! the Space's leave, as an account signed in before the lobby's other
-//! services needed more, and `/atmosphere/asked` makes them grant what they
+//! services needed more, and `/accounts/asked` makes them grant what they
 //! ask for again.
 //! Each answers with a short page saying what it did.
 
@@ -40,11 +40,30 @@ use crate::space::SpaceServer;
 
 /// The passbook holder every passbook sign-in approves as.
 pub const HOLDER: &str = "ada";
+/// The name the world's atproto account goes by on its profile.
+pub const NAME: &str = "Ada Lovelace";
+
+/// The picture on that profile: a small PNG.
+pub const PORTRAIT: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08, 0x08, 0x02, 0x00, 0x00, 0x00, 0x4b, 0x6d, 0x29,
+    0xdc, 0x00, 0x00, 0x00, 0x83, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x05, 0xc1, 0xb1, 0x09, 0x00,
+    0x20, 0x0c, 0x00, 0x41, 0xe7, 0xcc, 0x00, 0x19, 0x40, 0xac, 0xc5, 0x5a, 0xac, 0x83, 0xe5, 0x23,
+    0xd6, 0x21, 0x03, 0x38, 0x40, 0xc6, 0xf2, 0xae, 0xa4, 0xf0, 0x84, 0x10, 0xae, 0xb0, 0x85, 0x25,
+    0x0c, 0xa1, 0x09, 0x25, 0x95, 0xa7, 0x84, 0x72, 0x95, 0xad, 0x2c, 0x65, 0x28, 0x4d, 0x29, 0x59,
+    0x79, 0x95, 0xa8, 0xdc, 0xca, 0xae, 0xac, 0xca, 0xa8, 0xb4, 0x4a, 0xc9, 0xce, 0xeb, 0x44, 0xe7,
+    0x76, 0x76, 0x67, 0x75, 0x46, 0xa7, 0x75, 0x4a, 0x4e, 0xde, 0x24, 0x26, 0x77, 0xb2, 0x27, 0x6b,
+    0x32, 0x26, 0x6d, 0x52, 0xd2, 0x78, 0x46, 0x18, 0xd7, 0xd8, 0xc6, 0x32, 0x86, 0xd1, 0x8c, 0x92,
+    0x87, 0x77, 0x88, 0xc3, 0x3d, 0xec, 0xc3, 0x3a, 0x8c, 0x43, 0x3b, 0x94, 0x74, 0x9e, 0x13, 0xce,
+    0x75, 0xb6, 0xb3, 0x9c, 0xe1, 0x34, 0xe7, 0x03, 0x9a, 0x3e, 0x70, 0x81, 0xe9, 0x5d, 0x48, 0xb6,
+    0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
 /// The handle of the one atproto account the world knows.
 pub const HANDLE: &str = "ada.example.test";
 /// That account's DID.
 pub const DID: &str = "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa";
-/// What an Atmosphere sign-in grants after `/atmosphere/older`: identity
+/// What a Bluesky sign-in grants after `/accounts/older`: identity
 /// and the leave the Space needs, and nothing a later service asks for.
 pub const OLDER_SCOPE: &str = "atproto rpc:org.sylin.tangent.exchangeIdentity?aud=*";
 /// The DID of Bea, who posts at the same PDS.
@@ -97,6 +116,8 @@ impl LobbyWorld {
         second_board.add_post("cy", "The second board is quiet.");
         let atproto = AtprotoWorld::start();
         atproto.add_account(HANDLE, DID);
+        atproto.display_name(DID, NAME);
+        atproto.avatar(DID, PORTRAIT);
         atproto.sign_in_as(DID);
         let space = Arc::new(SpaceServer::start(&atproto.proofs()));
         space.add_tangent("home", "Home", "Where everyone starts.");
@@ -146,13 +167,13 @@ impl LobbyWorld {
         let knobs_atproto = atproto.knobs();
         let control = Listener::start(move |request| {
             let did = match request.route() {
-                "/atmosphere/older" => {
+                "/accounts/older" => {
                     knobs_atproto.grants_scope(OLDER_SCOPE);
-                    "Atmosphere sign-ins from now on grant only identity and the Space's leave, as one made before the lobby's other services needed more."
+                    "Bluesky sign-ins from now on grant only identity and the Space's leave, as one made before the lobby's other services needed more."
                 }
-                "/atmosphere/asked" => {
+                "/accounts/asked" => {
                     knobs_atproto.grants_what_is_asked();
-                    "Atmosphere sign-ins from now on grant what they ask for."
+                    "Bluesky sign-ins from now on grant what they ask for."
                 }
                 "/space/locked" => {
                     knobs_space.lock("welcome");
@@ -210,7 +231,7 @@ impl LobbyWorld {
             format!("passbook-holder={HOLDER}"),
             format!("board={}", self.board.origin()),
             format!("second-board={}", self.second_board.origin()),
-            format!("atmosphere-handle={HANDLE}"),
+            format!("account-handle={HANDLE}"),
             format!("pds={}", self.atproto.pds_origin()),
             format!("space={}", self.space.origin()),
             format!("control={}", self.control.origin()),

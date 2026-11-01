@@ -89,9 +89,9 @@ pub mod wire;
 use std::time::{Duration, Instant};
 
 use lobby_contracts::{
-    AccountKey, AccountLabel, Address, Authorization, AuthorizationAsk, CredentialAdapter,
-    Explained, Freshness, MaterialSlot, Outcome, ProviderKind, Revocation, Secret, SignInRequest,
-    SignInReturn, SignInStart, SignedIn,
+    AccountKey, AccountLabel, AccountProfile, Address, Authorization, AuthorizationAsk,
+    CredentialAdapter, Explained, Freshness, MaterialSlot, Outcome, ProviderKind, Revocation,
+    Secret, SignInRequest, SignInReturn, SignInStart, SignedIn,
 };
 use lobby_outbound::Outbound;
 use serde_json::Value;
@@ -111,8 +111,8 @@ pub use crate::wire::World;
 pub const KIND: &str = "atproto";
 
 /// What the sponsor reads for this kind of account on the manager page: the
-/// name its own community gives the network an atproto account lives in.
-pub const TITLE: &str = "Atmosphere";
+/// name people know these accounts by.
+pub const TITLE: &str = "Bluesky";
 
 /// What the sponsor reads beside the field naming the account to sign in
 /// with.
@@ -372,6 +372,11 @@ impl CredentialAdapter for Atproto {
         let account = AccountKey::new(&subject).ok_or(Outcome::Refused)?;
         let label = self.label(&subject, &document.handles)?;
         let permissions = tokens.granted.clone();
+        let profile = if request.again.is_some() {
+            AccountProfile::default()
+        } else {
+            identity::profile(&self.outbound, &subject, &document.pds)
+        };
         let material = Material {
             subject,
             access: tokens.access,
@@ -389,6 +394,7 @@ impl CredentialAdapter for Atproto {
             label,
             permissions,
             material: material.encode(),
+            profile,
         })
     }
 

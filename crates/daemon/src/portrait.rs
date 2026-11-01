@@ -17,6 +17,10 @@ use crate::store::atomic_write;
 
 /// The largest portrait kept, in bytes.
 pub const MAX_BYTES: usize = 512 * 1024;
+/// The largest portrait kept from an account's own profile, in bytes: what
+/// the accounts' providers themselves allow, which the sponsor did not choose
+/// and cannot make smaller.
+pub const MAX_PROFILE_BYTES: usize = 1_000_000;
 /// The suffix of a kept portrait's file name.
 pub const SUFFIX: &str = ".portrait";
 

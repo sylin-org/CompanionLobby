@@ -34,4 +34,4 @@ markers	s	\b(TODO|FIXME|XXX)\b	-
 provider-tangent	i	tangent	crates/services/tangent/**,docs/services/tangent.md
 provider-atproto	i	atproto|\bbsky\b|did:plc|did:web	crates/credentials/atproto/**,crates/services/bluesky/**,crates/testkit/**,docs/credentials/atproto.md,docs/services/bluesky.md
 provider-atproto-wire	s	\bDPoP\b|\bPDS\b	crates/credentials/atproto/**,crates/services/bluesky/**,crates/testkit/**,docs/credentials/atproto.md,docs/services/bluesky.md
-provider-bluesky	i	bluesky	crates/services/bluesky/**,docs/services/bluesky.md
+provider-bluesky	i	bluesky	crates/services/bluesky/**,crates/credentials/atproto/**,docs/services/bluesky.md,docs/credentials/atproto.md

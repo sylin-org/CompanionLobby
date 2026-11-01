@@ -116,7 +116,7 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
         install.json("/api/lobby")["kinds"],
         json!([
             { "kind": "passbook", "title": "Passbook", "hint": lobby_testkit::passbook::HINT },
-            { "kind": "atproto", "title": "Atmosphere", "hint": lobby_credential_atproto::HINT },
+            { "kind": "atproto", "title": lobby_credential_atproto::TITLE, "hint": lobby_credential_atproto::HINT },
         ]),
         "each kind with the title and the hint the sponsor reads"
     );
@@ -133,18 +133,20 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
     );
     assert_eq!(install.json("/api/lobby")["signIns"], json!([waiting]));
 
-    // The companion already waits on a sign-in: a second is refused before
-    // anything is pushed.
-    let pushed = world.server().count("/oauth/par");
+    // A sponsor who left the provider's page starts over, and the sign-in
+    // left behind ends.
     let again = begin(&install, &ada, "");
-    assert_eq!(again.status, 409, "{}", text(&again));
-    assert_eq!(world.server().count("/oauth/par"), pushed);
+    assert_eq!(again.status, 201, "{}", text(&again));
+    let left_behind = world.approve(&url);
+    let url = body(&again)["url"].as_str().expect("url").to_owned();
+    let replaced = return_page(&install, &left_behind);
+    assert_eq!(replaced.status, 404, "{}", text(&replaced));
+    assert_eq!(world.server().count("/oauth/token"), 0);
 
     let location = world.approve(&url);
     let page = return_page(&install, &location);
     assert_eq!(page.status, 200, "{}", text(&page));
     let said = text(&page);
-    assert!(said.contains("The account is signed in"), "{said}");
     for echoed in [
         query_value(&location, "code"),
         query_value(&location, "state"),
@@ -175,9 +177,10 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
     );
     assert_eq!(held[0]["state"], "ready");
     let ended = install.json("/api/lobby")["signIns"].clone();
-    assert_eq!(ended.as_array().map(Vec::len), Some(1), "{ended}");
-    assert_eq!(ended[0]["status"], "signed_in");
+    assert_eq!(ended.as_array().map(Vec::len), Some(2), "{ended}");
+    assert_eq!(ended[0]["status"], "cancelled");
     assert_eq!(ended[0]["id"], waiting["id"]);
+    assert_eq!(ended[1]["status"], "signed_in");
 
     // The wire, as the fake authorization server saw it.
     let requests = world.server().requests();
@@ -283,7 +286,8 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
         [
             pair("begin_sign_in", "pending"),
             pair("begin_sign_in", "done"),
-            pair("begin_sign_in", "conflict"),
+            pair("begin_sign_in", "pending"),
+            pair("begin_sign_in", "done"),
             pair("complete_sign_in", "pending"),
             pair("complete_sign_in", "done"),
         ]
@@ -295,9 +299,8 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
     assert_eq!(taken.status, 409, "{}", text(&taken));
     assert!(!text(&taken).contains(ADA));
     assert!(
-        text(&taken).contains("that account is signed in for another companion")
-            && text(&taken)
-                .contains("Revoke it under Accounts on the page of the companion that holds it")
+        text(&taken).contains("that account belongs to ada")
+            && text(&taken).contains(&format!("href=\"/companion/{ada}\""))
             && !text(&taken).contains("already holds"),
         "the page names the one conflict it met: {}",
         text(&taken)
@@ -320,6 +323,141 @@ fn a_sponsor_signs_a_companion_in_and_the_wire_keeps_the_profile() {
     );
     assert_eq!(held[1]["state"], "ready");
     assert_ne!(held[1]["id"], held[0]["id"]);
+    install.stop();
+}
+
+/// Signs in with no companion in mind, as the sign-in page does.
+fn signed_in_anew(install: &Install, world: &AtprotoWorld) -> Answer {
+    let started = install.operator(
+        "POST",
+        "/api/sign-ins",
+        &json!({ "kind": "atproto", "hint": "" }),
+    );
+    assert_eq!(started.status, 201, "{}", text(&started));
+    assert_eq!(body(&started)["signIn"]["companion"], Value::Null);
+    let url = body(&started)["url"].as_str().expect("url").to_owned();
+    return_page(install, &world.approve(&url))
+}
+
+fn companions(install: &Install) -> Vec<Value> {
+    install.json("/api/lobby")["companions"]
+        .as_array()
+        .expect("companions")
+        .clone()
+}
+
+#[test]
+fn signing_in_makes_the_account_a_companion_and_signing_in_again_finds_it() {
+    const SECOND: &str = "did:plc:adaotheradaotheradaother";
+    let (world, proxy) = world();
+    world.add_account("ada.another.test", SECOND);
+    world.display_name(ADA, "Ada Lovelace");
+    world.avatar(ADA, lobby_testkit::world::PORTRAIT);
+    let install = install(&world, &proxy, "mint");
+    install.open();
+    assert!(companions(&install).is_empty());
+
+    // The first sign-in makes the companion, named after the account.
+    world.sign_in_as(ADA);
+    let page = signed_in_anew(&install, &world);
+    assert_eq!(page.status, 200, "{}", text(&page));
+    let made = companions(&install);
+    assert_eq!(made.len(), 1, "{made:?}");
+    assert_eq!(made[0]["displayName"], "Ada Lovelace");
+    assert_eq!(made[0]["moniker"], "ada");
+    let ada = made[0]["id"].as_str().expect("id").to_owned();
+    let held = credentials(&install);
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0]["companion"], ada.as_str());
+    assert_eq!(held[0]["label"], "ada.example.test");
+    let portrait = made[0]["portrait"].as_str().expect("the profile's picture");
+    let lobby_origin = lobby_contracts::Address::parse(
+        &format!("http://127.0.0.1:{}", install.port()),
+        lobby_contracts::AddressPolicy::LoopbackAllowed,
+    )
+    .expect("the lobby's origin");
+    let image = lobby_outbound::Outbound::new(lobby_contracts::AddressPolicy::LoopbackAllowed)
+        .send(&lobby_origin, lobby_outbound::Request::new("GET", portrait))
+        .expect("the portrait");
+    assert_eq!(image.body, lobby_testkit::world::PORTRAIT);
+    let journal = install.journal();
+    assert!(
+        journal
+            .iter()
+            .any(|entry| entry["command"] == "create_companion" && entry["outcome"] == "done"),
+        "the journal says a companion came to be"
+    );
+
+    // The same account again finds it, and asks the provider for nothing new.
+    let page = signed_in_anew(&install, &world);
+    assert_eq!(page.status, 200, "{}", text(&page));
+    assert_eq!(companions(&install).len(), 1);
+    let again = credentials(&install);
+    assert_eq!(again.len(), 1, "{again:?}");
+    assert_eq!(again[0]["id"], held[0]["id"]);
+    assert_eq!(again[0]["state"], "ready");
+
+    // Removed, the account stays reserved and comes back to the same place.
+    let id = held[0]["id"].as_str().expect("id");
+    let removed = install.operator("POST", &format!("/api/credentials/{id}/revoke"), &json!({}));
+    assert_eq!(removed.status, 200, "{}", text(&removed));
+    assert_eq!(signed_in_anew(&install, &world).status, 200);
+    assert_eq!(companions(&install).len(), 1);
+    let back = credentials(&install);
+    assert_eq!(back.len(), 2, "{back:?}");
+    assert_eq!(back[1]["companion"], ada.as_str());
+    assert_eq!(back[1]["state"], "ready");
+
+    // An account with nothing to say of itself is named by its handle, and a
+    // moniker already taken takes a number.
+    world.sign_in_as(SECOND);
+    assert_eq!(signed_in_anew(&install, &world).status, 200);
+    let both = companions(&install);
+    assert_eq!(both.len(), 2, "{both:?}");
+    assert_eq!(both[1]["displayName"], "ada");
+    assert_eq!(both[1]["moniker"], "ada-2");
+    assert_eq!(both[1]["portrait"], Value::Null, "initials");
+    let second = both[1]["id"].as_str().expect("id").to_owned();
+
+    // Adding an account another companion holds says whose it is and
+    // changes nothing.
+    world.sign_in_as(ADA);
+    let revoked_second = credentials(&install)
+        .iter()
+        .find(|credential| credential["companion"] == second.as_str())
+        .and_then(|credential| credential["id"].as_str().map(str::to_owned))
+        .expect("the second account");
+    let freed = install.operator(
+        "POST",
+        &format!("/api/credentials/{revoked_second}/revoke"),
+        &json!({}),
+    );
+    assert_eq!(freed.status, 200, "{}", text(&freed));
+    let count = credentials(&install).len();
+    let taken = sign_in(&install, &world, &second, "");
+    assert_eq!(taken.status, 409, "{}", text(&taken));
+    assert!(
+        text(&taken).contains("that account belongs to Ada Lovelace")
+            && text(&taken).contains(&format!("href=\"/companion/{ada}\"")),
+        "{}",
+        text(&taken)
+    );
+    assert_eq!(credentials(&install).len(), count);
+
+    // Removing the companion frees the account: the next sign-in makes anew.
+    let revision = companions(&install)[0]["revision"].clone();
+    let gone = install.operator(
+        "DELETE",
+        &format!("/api/companions/{ada}"),
+        &json!({ "expectedRevision": revision, "cascade": false }),
+    );
+    assert_eq!(gone.status, 200, "{}", text(&gone));
+    assert_eq!(signed_in_anew(&install, &world).status, 200);
+    let anew = companions(&install);
+    assert_eq!(anew.len(), 2, "{anew:?}");
+    assert_ne!(anew[1]["id"], ada.as_str());
+    assert_eq!(anew[1]["moniker"], "ada");
+    assert!(proxy.requests().is_empty(), "no proxy from the environment");
     install.stop();
 }
 
@@ -380,26 +518,19 @@ fn a_return_that_does_not_prove_the_sign_in_signs_nothing_in() {
         "nothing was exchanged"
     );
 
-    // A cancelled sign-in signs nothing in when the browser comes back.
+    // A sign-in another took the place of signs nothing in when the browser
+    // comes back.
     let started = begin(&install, &ada, "");
     assert_eq!(
         started.status, 201,
         "a refused sign-in has ended, so another may start"
     );
-    let id = body(&started)["signIn"]["id"]
-        .as_str()
-        .expect("id")
-        .to_owned();
     let url = body(&started)["url"].as_str().expect("url").to_owned();
-    let cancelled = install.operator("POST", &format!("/api/sign-ins/{id}/cancel"), &json!({}));
-    assert_eq!(cancelled.status, 200, "{}", text(&cancelled));
-    assert_eq!(body(&cancelled)["signIn"]["status"], "cancelled");
+    assert_eq!(begin(&install, &ada, "").status, 201);
     let late = return_page(&install, &world.approve(&url));
     assert_eq!(late.status, 404, "{}", text(&late));
     assert_eq!(world.server().count("/oauth/token"), 0);
     assert!(credentials(&install).is_empty());
-    let again = install.operator("POST", &format!("/api/sign-ins/{id}/cancel"), &json!({}));
-    assert_eq!(again.status, 404);
     install.stop();
 }
 
@@ -422,7 +553,7 @@ fn companion_lobby_refuses_a_loopback_authorization_server_and_reaches_nothing()
     product.open();
     assert_eq!(
         product.json("/api/lobby")["kinds"],
-        json!([{ "kind": "atproto", "title": "Atmosphere", "hint": lobby_credential_atproto::HINT }])
+        json!([{ "kind": "atproto", "title": lobby_credential_atproto::TITLE, "hint": lobby_credential_atproto::HINT }])
     );
     let services: Vec<(Value, Value, Value)> = product.json("/api/lobby")["services"]
         .as_array()

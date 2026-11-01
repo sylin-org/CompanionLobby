@@ -260,7 +260,9 @@ fn every_request_is_proved_on_its_own_and_its_token_never_goes_as_a_bearer_token
     let requests = fixture.world.pds().requests();
     let resources: Vec<_> = requests
         .iter()
-        .filter(|request| request.route().starts_with("/xrpc/"))
+        .filter(|request| {
+            request.route().starts_with("/xrpc/") && request.header("authorization").is_some()
+        })
         .collect();
     assert!(resources.len() >= 4, "{}", resources.len());
     let mut proofs = std::collections::HashSet::new();

@@ -9,11 +9,9 @@ and how the owner checks it against the real network.
 
 ## Signing in
 
-The sponsor starts a sign-in on a companion's page in the manager, in the
-Accounts section, with the account field left empty or holding a handle or a
-DID. The manager page then shows the sign-in's own page, which names the
-companion and the account meant, and links to the provider's page in a new
-tab.
+The sponsor starts a sign-in on the manager's sign-in page, or from a
+companion's page, with the account left unnamed or named by a handle or a DID.
+The browser goes straight to the provider's page in the same tab.
 
 1. **Where it goes.** With nothing typed, the sign-in goes to the default
    authorization server, `https://bsky.social`, whose own pages let the
@@ -51,12 +49,12 @@ tab.
    first answer (`use_dpop_nonce`) issues it and the request is made once
    more.
 4. **The wait.** The verifier and the key wait in the daemon's memory under
-   the `state`, ten minutes at most, used once. The sponsor may cancel the
-   sign-in from its page; a companion waits on one sign-in at a time.
+   the `state`, ten minutes at most, used once. A companion waits on one
+   sign-in at a time: starting another ends the one left behind.
 5. **The return.** The provider sends the browser to the return route, which
-   completes the sign-in and sends the browser straight on to
-   `/signin/done?outcome=<outcome>`, so the code and the `state` leave
-   the address bar at once. The return must carry the `state` of a sign-in
+   completes the sign-in and sends the browser straight on to the companion's
+   page, or to `/signin/done?outcome=<outcome>` when nothing was signed in, so
+   the code and the `state` leave the address bar at once. The return must carry the `state` of a sign-in
    still waiting, an `iss` naming the very authorization server it went to,
    and a code; a return carrying `error` signs nothing in. The code is
    exchanged at the token endpoint with the verifier, the same redirect URI
@@ -79,6 +77,13 @@ When the companion holds an atproto credential that needs signing in again,
 own material: the account is its DID, resolved as in step 1, and only that
 account can complete the sign-in, which restores the credential and its
 connections.
+
+6. **The profile.** Before the first sign-in of an account lands, its public
+   profile names the companion it may make: the `displayName` and `avatar` of
+   the record `app.bsky.actor.profile/self`, through
+   `com.atproto.repo.getRecord` and `com.atproto.sync.getBlob` on its PDS, of at
+   most 1 MB. Anyone may read these, so they ask for no grant and carry no token.
+   A profile that cannot be read says nothing, and the sign-in stands.
 
 ## What the lobby keeps
 
@@ -250,11 +255,11 @@ whose redirect URI carries the return route's path.
    .\target\release\companion-lobby.exe open
    ```
 
-3. On the manager page, create a companion, open its page, leave the account
-   field empty and choose **Sign in with atproto**. The sign-in's page names
-   the companion; choose **Continue to bsky.social**.
-4. In the provider's tab, sign in and approve. The tab ends on a page saying
-   the account is signed in, and its address carries no code and no state.
+3. On the manager page, choose **Sign in**, then **Sign in with Bluesky**. The
+   tab goes to bsky.social.
+4. Sign in and approve. The tab ends on the page of a companion named after the
+   account, with its name and picture when its profile has them, and its address
+   carries no code and no state.
    If the provider shows an error instead (an unknown client or redirect
    URI), note its words: the client id was refused.
 5. Back on the manager page, the companion's Accounts section lists the

@@ -33,10 +33,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lobby_contracts::{
-    AccountKey, AccountLabel, Address, AddressPolicy, Authorization, AuthorizationAsk,
-    CredentialAdapter, CredentialId, Explained, Freshness, MaterialSlot, MaterialUpdate, Outcome,
-    ProviderKind, Revocation, SealedMaterial, Secret, SignInRequest, SignInReturn, SignInStart,
-    SignedIn,
+    AccountKey, AccountLabel, AccountProfile, Address, AddressPolicy, Authorization,
+    AuthorizationAsk, CredentialAdapter, CredentialId, Explained, Freshness, MaterialSlot,
+    MaterialUpdate, Outcome, ProviderKind, Revocation, SealedMaterial, Secret, SignInRequest,
+    SignInReturn, SignInStart, SignedIn,
 };
 use lobby_outbound::{Failure, Outbound, Request};
 use serde_json::{Value, json};
@@ -632,6 +632,7 @@ impl CredentialAdapter for Passbook {
             label,
             permissions: material.granted.clone(),
             material: material.encode(),
+            profile: AccountProfile::default(),
         })
     }
 

@@ -8,7 +8,7 @@
 //! service is the account's PDS, an origin the world may reach. The PDS's
 //! protected-resource metadata names exactly one authorization server.
 
-use lobby_contracts::{Address, Outcome};
+use lobby_contracts::{AccountProfile, Address, Outcome};
 use lobby_outbound::{Outbound, Request};
 use serde_json::Value;
 
@@ -181,6 +181,39 @@ pub fn authorization_server(
             .and_then(|origin| world.origin(origin))
             .ok_or(Outcome::Refused),
         _ => Err(Outcome::Refused),
+    }
+}
+
+/// The largest picture read from a profile, in bytes: what the record's own
+/// schema allows.
+const AVATAR_LIMIT: usize = 1_000_000;
+
+/// What the account `did` says of itself in the public profile record on its
+/// `pds`. Reading it needs no grant, and whatever cannot be read is simply
+/// not said: a profile only names a companion, so it never fails a sign-in.
+pub fn profile(outbound: &Outbound, did: &str, pds: &Address) -> AccountProfile {
+    let did = percent_encode(did);
+    let path = format!(
+        "/xrpc/com.atproto.repo.getRecord?repo={did}&collection=app.bsky.actor.profile&rkey=self"
+    );
+    let Ok(record) = get_json(outbound, pds, &path) else {
+        return AccountProfile::default();
+    };
+    let value = &record["value"];
+    let portrait = value["avatar"]["ref"]["$link"].as_str().and_then(|cid| {
+        let path = format!(
+            "/xrpc/com.atproto.sync.getBlob?did={did}&cid={}",
+            percent_encode(cid)
+        );
+        outbound
+            .send(pds, Request::new("GET", &path).limit(AVATAR_LIMIT))
+            .ok()
+            .filter(|answer| answer.status == 200)
+            .map(|answer| answer.body)
+    });
+    AccountProfile {
+        display_name: value["displayName"].as_str().map(str::to_owned),
+        portrait,
     }
 }
 

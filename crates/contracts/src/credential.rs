@@ -235,6 +235,17 @@ impl SignInReturn {
     }
 }
 
+/// What an account says of itself publicly, which names the companion a
+/// first sign-in makes. Either part may be missing; an adapter that could not
+/// read it says nothing and the sign-in still stands.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccountProfile {
+    /// The name the account goes by, unchecked.
+    pub display_name: Option<String>,
+    /// The account's picture, unchecked.
+    pub portrait: Option<Vec<u8>>,
+}
+
 /// A completed sign-in: the account the provider authenticated and the
 /// material to keep for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,6 +260,9 @@ pub struct SignedIn {
     pub permissions: Vec<String>,
     /// The material only this adapter decodes.
     pub material: SealedMaterial,
+    /// What the account says of itself. An adapter may leave it empty when
+    /// the sign-in is [`SignInRequest::again`], which never names anything.
+    pub profile: AccountProfile,
 }
 
 /// What a renewal left: how long until the adapter wants to be asked again.
