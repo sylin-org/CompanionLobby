@@ -78,7 +78,13 @@ impl Peer {
         stdin.flush().expect("flush stdin");
     }
 
-    /// Closes stdin, as a host does when it is done.
+    /// Kills the shim outright, as a host that dies does.
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Closes the shim's stdin, as a host that is done does.
     pub fn close_stdin(&mut self) {
         drop(self.child.stdin.take());
     }

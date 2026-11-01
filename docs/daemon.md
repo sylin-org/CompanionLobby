@@ -584,7 +584,9 @@ A host configuration names `companion-lobby attach <companion>`. The shim:
    answer back as one line, writes each notification the stream carries as
    one line too, and detaches with the token when the host closes stdin. A
    notice stream that ends while the shim is attached is opened again, for
-   the attachment of the moment.
+   the attachment of the moment. An attachment with no notice stream open five
+   seconds after its last one closed was a host that died without detaching,
+   and the lobby ends it.
 
 The shim attaches again, once, in exactly two cases: the daemon answers 404
 (it has forgotten the attachment, because it was restarted), or nothing

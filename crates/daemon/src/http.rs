@@ -116,6 +116,9 @@ pub const FEED_PATH: &str = "/api/events";
 pub const MCP_PATH: &str = "/mcp";
 /// How often a quiet live feed sends a comment, so a vanished page is noticed.
 pub const FEED_KEEPALIVE: Duration = Duration::from_secs(15);
+/// How long an attachment whose notice stream closed may take to open another
+/// before its shim is taken to be gone.
+const UNHEARD_GRACE: Duration = Duration::from_secs(5);
 
 /// The port to use: `LOBBY_PORT` when set, the fixed default otherwise.
 pub fn resolve_port() -> Result<u16, String> {
@@ -682,7 +685,7 @@ async fn route(app: &Arc<App>, request: Request<Incoming>) -> Reply {
             })
             .await;
             match changes {
-                Ok(Ok(changes)) => notices(app, changes),
+                Ok(Ok(changes)) => notices(app, attachment, changes),
                 Ok(Err(refusal)) => refusal_reply(&refusal),
                 Err(failed) => *failed,
             }
@@ -1553,28 +1556,39 @@ async fn stop_requested(stopped: &mut watch::Receiver<bool>) {
 /// An attachment's notice stream: a comment when it opens, then one
 /// `notifications/tools/list_changed` frame each time the attachment's tools
 /// change, with a keepalive comment while nothing does. It ends when the
-/// attachment ends, the reader goes away or the daemon stops.
-fn notices(app: &Arc<App>, mut changes: watch::Receiver<u64>) -> Reply {
+/// attachment ends, the reader goes away or the daemon stops. A reader that went
+/// away and does not come back within [`UNHEARD_GRACE`] was a host that died
+/// without detaching, whose attachment ends then.
+fn notices(app: &Arc<App>, attachment: AttachmentId, mut changes: watch::Receiver<u64>) -> Reply {
     let (sender, frames) = mpsc::channel::<Bytes>(16);
     let mut stopped = app.stopped.subscribe();
+    let owner = Arc::clone(app);
     tokio::spawn(async move {
-        if !deliver(&sender, &mut stopped, Bytes::from_static(b": open\n\n")).await {
-            return;
-        }
-        loop {
-            let frame = tokio::select! {
-                changed = changes.changed() => match changed {
-                    Ok(()) => Bytes::from(format!("data: {}\n\n", mcp::list_changed())),
-                    // The attachment ended.
-                    Err(_) => return,
-                },
-                () = tokio::time::sleep(FEED_KEEPALIVE) => manager::keepalive_frame(),
-                () = stop_requested(&mut stopped) => return,
-                () = sender.closed() => return,
-            };
-            if !deliver(&sender, &mut stopped, frame).await {
-                return;
+        let reader_gone = async {
+            if !deliver(&sender, &mut stopped, Bytes::from_static(b": open\n\n")).await {
+                return true;
             }
+            loop {
+                let frame = tokio::select! {
+                    changed = changes.changed() => match changed {
+                        Ok(()) => Bytes::from(format!("data: {}\n\n", mcp::list_changed())),
+                        // The attachment ended.
+                        Err(_) => return false,
+                    },
+                    () = tokio::time::sleep(FEED_KEEPALIVE) => manager::keepalive_frame(),
+                    () = stop_requested(&mut stopped) => return false,
+                    () = sender.closed() => return true,
+                };
+                if !deliver(&sender, &mut stopped, frame).await {
+                    return true;
+                }
+            }
+        }
+        .await;
+        let _ = with_lobby(&owner, move |lobby| lobby.stopped_listening(attachment)).await;
+        if reader_gone && !*owner.stopped.borrow() {
+            tokio::time::sleep(UNHEARD_GRACE).await;
+            let _ = with_lobby(&owner, move |lobby| lobby.end_unheard(attachment)).await;
         }
     });
     let mut reply = with_hygiene(Response::new(FeedBody(frames).boxed()), StatusCode::OK);

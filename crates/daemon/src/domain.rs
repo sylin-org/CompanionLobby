@@ -385,6 +385,8 @@ struct Live {
     token: AttachmentToken,
     /// Advances whenever the attachment's tools change.
     catalog: watch::Sender<u64>,
+    /// How many notice streams its shim holds open right now.
+    listening: usize,
 }
 
 /// A sign-in the lobby started and waits to see come back.
@@ -1078,6 +1080,7 @@ impl Lobby {
                     attachment: attachment.clone(),
                     token,
                     catalog: watch::channel(0).0,
+                    listening: 0,
                 },
             );
             core.settle(mind, Some(companion.id), ATTACH, Outcome::Done);
@@ -1113,8 +1116,44 @@ impl Lobby {
         id: AttachmentId,
         presented: &str,
     ) -> Result<watch::Receiver<u64>, Refusal> {
-        let core = self.core();
-        Ok(core.proven(id, presented)?.catalog.subscribe())
+        let mut core = self.core();
+        let changes = core.proven(id, presented)?.catalog.subscribe();
+        if let Some(live) = core.attachments.get_mut(&id) {
+            live.listening += 1;
+        }
+        Ok(changes)
+    }
+
+    /// A notice stream of the attachment `id` closed.
+    pub fn stopped_listening(&self, id: AttachmentId) {
+        if let Some(live) = self.core().attachments.get_mut(&id) {
+            live.listening = live.listening.saturating_sub(1);
+        }
+    }
+
+    /// Ends the attachment `id` when no notice stream of it is open: its shim
+    /// holds one for as long as it lives and opens another at once when one
+    /// drops, so a host that died without detaching is found here.
+    pub fn end_unheard(&self, id: AttachmentId) {
+        let _ = self.run(|core| {
+            let Some(companion) = core
+                .attachments
+                .get(&id)
+                .filter(|live| live.listening == 0)
+                .map(|live| live.attachment.companion)
+            else {
+                return Ok::<(), Refusal>(());
+            };
+            let _ = core.begin(Initiator::Lobby, Some(companion), DETACH);
+            core.attachments.remove(&id);
+            core.settle(Initiator::Lobby, Some(companion), DETACH, Outcome::Done);
+            core.announce(companion);
+            trace::line(&format!(
+                "attachment {id} ended: its shim is gone; {} live",
+                core.attachments.len()
+            ));
+            Ok(())
+        });
     }
 
     /// Ends an attachment, when `presented` is its token. A refused detach is

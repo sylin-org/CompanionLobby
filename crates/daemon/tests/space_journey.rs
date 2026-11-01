@@ -114,6 +114,44 @@ fn said(answer: &Value) -> String {
 }
 
 #[test]
+fn a_host_that_dies_without_detaching_is_no_longer_counted_as_attached() {
+    let install = Install::new(Path::new(SYNTHETIC), "space-dies");
+    install.open();
+    let id = install.create("ada");
+    let attachments = |install: &Install| {
+        install.json("/api/companions")["companions"]
+            .as_array()
+            .expect("companions")
+            .iter()
+            .find(|companion| companion["id"] == id.as_str())
+            .expect("ada")["attachments"]
+            .clone()
+    };
+    let mut host = install.attach("ada");
+    initialize(&mut host);
+    assert_eq!(attachments(&install), 1);
+    host.kill();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while attachments(&install) != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the page still counts a host that died"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        install
+            .journal()
+            .iter()
+            .any(|entry| entry["command"] == "detach"
+                && entry["outcome"] == "done"
+                && entry["initiator"] == "lobby"),
+        "the journal says the lobby ended it"
+    );
+    install.stop();
+}
+
+#[test]
 fn a_mind_connects_to_what_its_account_enables_and_a_closed_connection_stays_closed() {
     let world = world();
     let install = Install::new(Path::new(SYNTHETIC), "space-connect")
