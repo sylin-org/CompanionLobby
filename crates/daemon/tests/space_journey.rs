@@ -221,12 +221,14 @@ fn a_mind_connects_to_what_its_account_enables_and_a_closed_connection_stays_clo
     assert_eq!(bad["result"]["isError"], true, "{bad}");
 
     // Connected: its tools appear, and connecting again changes nothing.
+    // However the mind was told to name this machine, the connection keeps the
+    // name the Space goes by.
     let origin = world.space.origin();
     let opened = call(
         &mut peer,
         4,
         "tangent_connect",
-        json!({ "address": origin }),
+        json!({ "address": origin.replace("127.0.0.1", "localhost") }),
     );
     assert_eq!(opened["result"]["isError"], false, "{opened}");
     assert!(
@@ -256,6 +258,7 @@ fn a_mind_connects_to_what_its_account_enables_and_a_closed_connection_stays_clo
     );
     let lobby = install.json("/api/lobby");
     assert_eq!(lobby["connections"].as_array().map(Vec::len), Some(1));
+    assert_eq!(lobby["connections"][0]["address"], origin.as_str());
     let connection = lobby["connections"][0]["id"]
         .as_str()
         .expect("id")

@@ -199,6 +199,26 @@ impl ServiceAdapter for Tangent {
         }
     }
 
+    fn goes_by(&self, address: &Address) -> Address {
+        let jar = RefCell::new(Jar::default());
+        let call = Call {
+            method: "GET",
+            path: PROFILE_PATH,
+            proof: None,
+            jar: &jar,
+            token: None,
+            body: None,
+            effect: Effect::Read,
+            within: None,
+        };
+        wire::send(&self.outbound, address, &call)
+            .ok()
+            .filter(|response| response.status == 200)
+            .and_then(|response| serde_json::from_slice::<Profile>(&response.body).ok())
+            .and_then(|profile| profile.place_named(address))
+            .unwrap_or_else(|| address.clone())
+    }
+
     fn establish(
         &self,
         address: &Address,

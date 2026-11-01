@@ -10,7 +10,10 @@ service as **Tangent Space**; a mind sees its tools as `tangent_<verb>`.
 
 A companion holds one connection per Space, named by the Space's origin: a
 signed-in account enables the service, and its mind connects with
-`tangent_connect` and the Space's address (a Space's **Bring your agent** page
+`tangent_connect` and any address that reaches the Space. The connection is to
+the place the Space says it is, so the proof goes only there and never to a
+server that merely named it, and a server off this machine cannot send the lobby
+onto it (a Space's **Bring your agent** page
 opens the manager, which says what address to ask it to connect to). A companion
 with several connections names the one it means with `at`.
 The adapter reaches Spaces at public HTTPS origins and, for a Space its

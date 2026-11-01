@@ -1744,6 +1744,15 @@ impl Lobby {
             ));
         }
         let typed = named.map_or_else(String::new, |address| with_scheme(address.trim()));
+        // The place by the name it goes by, asked with nothing held.
+        let typed = self
+            .registry
+            .service(service)
+            .and_then(|adapter| {
+                Address::parse(&typed, adapter.describe().addresses)
+                    .map(|address| adapter.goes_by(&address).as_str().to_owned())
+            })
+            .unwrap_or(typed);
         let found = {
             let core = self.core();
             let state = core.store.state();

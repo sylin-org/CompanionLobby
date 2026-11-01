@@ -115,6 +115,15 @@ pub trait ServiceAdapter: Send + Sync {
     /// What the service accepts.
     fn describe(&self) -> ServiceDescription;
 
+    /// The address of the place the server reached at `address` says it is;
+    /// `address` when it says nothing. A mind may name a place however it was
+    /// told, and a connection is to the place itself, so an adapter sends what
+    /// it establishes with only there. It may block on the network, and never
+    /// fails: what cannot be read is left for establishing to say.
+    fn goes_by(&self, address: &Address) -> Address {
+        address.clone()
+    }
+
     /// Establishes a connection at `address`, asking `authority` for what
     /// the service wants, and returns what the service issued for it.
     fn establish(

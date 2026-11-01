@@ -21,7 +21,7 @@
 //! has no derived DID, and a Space there cannot be reached. Either way the
 //! audience names the `#tangent` service.
 
-use lobby_contracts::Address;
+use lobby_contracts::{Address, AddressPolicy};
 use serde::Deserialize;
 
 /// The well-known path of the authentication profile.
@@ -62,6 +62,16 @@ pub struct ServiceProof {
 }
 
 impl Profile {
+    /// The place the server reached at `address` says it is. Any address may
+    /// reach a Space, and the connection is to the place it names: nothing is
+    /// sent to the server that said so, for the proof goes only to that place,
+    /// whose own profile must then keep to it in every particular. A server
+    /// off this machine cannot send the lobby onto it.
+    pub fn place_named(&self, address: &Address) -> Option<Address> {
+        let named = Address::parse(&self.canonical_origin, AddressPolicy::LoopbackAllowed)?;
+        (is_loopback(address.host()) || !is_loopback(named.host())).then_some(named)
+    }
+
     /// The audience the proof is for, when the profile keeps to `address`
     /// in every particular.
     pub fn audience_for(&self, address: &Address) -> Option<String> {
@@ -84,13 +94,17 @@ impl Profile {
     }
 }
 
+/// Whether `host` is this machine's loopback address, by any of its names.
+fn is_loopback(host: &str) -> bool {
+    host == "localhost" || host.starts_with("127.") || host == "[::1]"
+}
+
 /// The audience Tangent derives from `address`, naming its `#tangent`
 /// service, when it derives one.
 pub fn derived_audience(address: &Address) -> Option<String> {
     let host = address.host();
     let default_port = if address.is_https() { 443 } else { 80 };
-    let loopback = host == "localhost" || host.starts_with("127.") || host == "[::1]";
-    let named = if loopback {
+    let named = if is_loopback(host) {
         "localhost"
     } else if host.contains('.')
         && !host.starts_with('[')
@@ -112,7 +126,6 @@ pub fn derived_audience(address: &Address) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lobby_contracts::AddressPolicy;
 
     fn address(text: &str) -> Address {
         Address::parse(text, AddressPolicy::LoopbackAllowed).expect("an address")
@@ -197,6 +210,38 @@ mod tests {
         );
         let portless = profile(space.as_str(), "did:web:space.example.test#tangent");
         assert_eq!(portless.audience_for(&space), None);
+    }
+
+    #[test]
+    fn any_address_reaches_the_place_a_space_says_it_is_and_nothing_off_this_machine_leads_onto_it()
+    {
+        let local = profile("http://127.0.0.1:5220", "did:web:localhost%3A5220#tangent");
+        assert_eq!(
+            local.place_named(&address("http://localhost:5220")),
+            Some(address("http://127.0.0.1:5220"))
+        );
+        assert_eq!(
+            local.place_named(&address("https://space.example.test")),
+            None,
+            "a server elsewhere cannot send the lobby onto this machine"
+        );
+        let public = profile(
+            "https://space.example.test",
+            "did:web:space.example.test#tangent",
+        );
+        assert_eq!(
+            public.place_named(&address("https://www.space.example.test")),
+            Some(address("https://space.example.test"))
+        );
+        assert_eq!(
+            public.place_named(&address("http://localhost:5220")),
+            Some(address("https://space.example.test")),
+            "a proxy on this machine may stand in front of a public Space"
+        );
+        assert_eq!(
+            Profile::default().place_named(&address("https://space.example.test")),
+            None
+        );
     }
 
     #[test]
