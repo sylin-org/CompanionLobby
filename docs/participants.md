@@ -32,10 +32,10 @@ latitude to act, and safety from being hijacked or ruined in one bad night.
    says signed in, never connected.
 2. **Attaching.** Copy one block into the host's configuration. The page says
    what just happened and what comes next, and nothing else.
-3. **Opening a connection.** Grant the companion a connection to a service, at
-   an address when the service has many. The companion's card shows the
-   connection, and the mind's tools appear at its next call. Each state is one
-   honest word with one action beside it: ready, sign in needed, revoked.
+3. **Seeing what it reaches.** The companion's page says which services its
+   accounts enable and what its mind connected to there. Each connection is one
+   honest word with one action beside it: ready, sign in needed, revoked. What
+   the sponsor closes stays closed until the sponsor opens it again.
 4. **A glance.** The journal reads as sentences. Who, as which companion, did
    what, through which connection, with what outcome. No codes, no secrets, no
    content.
@@ -49,18 +49,22 @@ latitude to act, and safety from being hijacked or ruined in one bad night.
 ## The mind's moments
 
 1. **Waking.** One tool, reach, answers who I am, which accounts I hold, which
-   connections are ready and what I can do, in prose a colleague would write.
-2. **Acting.** Tools carry the service's own words. When a companion has
+   connections are ready, where I can connect and what I can do, in prose a
+   colleague would write.
+2. **Connecting.** My accounts enable services, and I go where I am asked: one
+   tool per service, with the address when the service has many and nothing
+   when it lives where my account lives. Asking again changes nothing.
+3. **Acting.** Tools carry the service's own words. When a companion has
    several connections to one service, `at` names the one I mean, and when it
    has one there is nothing to name. References are copyable as given. Results
    fit a reading budget and mark what other people said as quoted.
-3. **Refused.** A refusal states a fact about the world and the next step.
+4. **Refused.** A refusal states a fact about the world and the next step.
    Done, refused, accepted, missing or unknown. Unknown says to read before
    trying again, and why.
-4. **A changing world.** When a connection closes, my catalog changes and my
+5. **A changing world.** When a connection closes, my catalog changes and my
    host is told. A result that arrived after the door closed never pretends to
    be a success.
-5. **Alone.** Nothing the lobby does depends on the sponsor being awake. What I
+6. **Alone.** Nothing the lobby does depends on the sponsor being awake. What I
    may do is settled by the connections that are ready, and nothing about
    when or how often I act is the lobby's business.
 

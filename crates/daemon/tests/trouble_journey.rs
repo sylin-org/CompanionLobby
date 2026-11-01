@@ -120,7 +120,7 @@ fn an_expired_key_and_an_expired_access_token_are_renewed_without_the_mind_notic
     initialize(&mut peer);
     assert_eq!(
         names(&tools(&mut peer, 1)),
-        ["board_post", "board_read", "reach"]
+        ["board_connect", "board_post", "board_read", "reach"]
     );
     let renewed = authority.renewals_presented().len();
     wait_until("the daemon renewed the key on its own", || {
@@ -185,6 +185,9 @@ fn an_expired_key_and_an_expired_access_token_are_renewed_without_the_mind_notic
     // the rotated refresh token.
     world.access_lifetime(1);
     atproto_sign_in(&install, &world, &ada);
+    // The new account enables more to connect to, and the mind hears it once;
+    // the renewals that follow are never heard.
+    peer.notification(LIST_CHANGED);
     let first = world.live_refresh_token(ADA).expect("a refresh token");
     wait_until("the daemon refreshed the access token", || {
         world.refresh_tokens_presented().len() >= 2

@@ -19,14 +19,14 @@
 //! whose text is the lobby's own sentence for the outcome, with the outcome's
 //! code and that same sentence in the structured content, since a host may
 //! show a mind the structured form alone. The server declares that its tool list
-//! changes: the lobby tells an attached host when the companion's connections
-//! change, over the attachment's notice stream (see [`crate::http`]).
+//! changes: the lobby tells an attached host when the companion's accounts or
+//! connections change, over the attachment's notice stream (see [`crate::http`]).
 
 use lobby_contracts::{Companion, Label, Outcome, ServiceName, ToolDescriptor, ToolResult};
 use serde_json::{Map, Value, json};
 
 use crate::domain::CallRefusal;
-use crate::projections::{self, HeldAccount, Reached};
+use crate::projections::{self, Connectable, HeldAccount, Reached};
 
 /// The notification that tells a host its tool list changed.
 pub const LIST_CHANGED: &str = "notifications/tools/list_changed";
@@ -44,6 +44,9 @@ pub trait Toolbox {
 
     /// The accounts the attachment's companion holds.
     fn accounts(&self) -> Vec<HeldAccount>;
+
+    /// The services the attachment's companion may connect to.
+    fn connectable(&self) -> Vec<Connectable>;
 
     /// Calls the service tool `name`.
     fn call(&self, name: &str, arguments: Map<String, Value>) -> Result<ToolResult, CallRefusal>;
@@ -129,7 +132,7 @@ pub fn handle(companion: &Companion, tools: &dyn Toolbox, message: &Value) -> Op
         "tools/list" => success(
             &id,
             json!({
-                "tools": projections::catalog(&tools.reached())
+                "tools": projections::catalog(&tools.reached(), &tools.connectable())
                     .iter()
                     .map(|(name, tool)| tool_json(name, tool))
                     .collect::<Vec<_>>()
@@ -218,6 +221,7 @@ fn tools_call(
         &tools.reached(),
         &tools.waiting(),
         &tools.accounts(),
+        &tools.connectable(),
     );
     success(id, result_json(&answer, false))
 }
@@ -337,6 +341,10 @@ mod tests {
         }
 
         fn accounts(&self) -> Vec<HeldAccount> {
+            Vec::new()
+        }
+
+        fn connectable(&self) -> Vec<Connectable> {
             Vec::new()
         }
 

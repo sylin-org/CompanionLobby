@@ -28,9 +28,9 @@ it needs, beside what Tangent needs:
 | `rpc:app.bsky.feed.getTimeline?aud=*` | reading the timeline through the PDS |
 | `rpc:app.bsky.feed.getPosts?aud=*` | reading the post a reply, like or repost names |
 
-An account signed in before Bluesky needed these is refused a Bluesky
-connection before anything reaches its PDS, and the manager page offers one
-action: *Sign Ada in again so Ada can post to Bluesky. Tangent Space stays
+An account signed in before Bluesky needed these is refused when its mind
+calls `bluesky_connect`, before anything reaches its PDS, and the manager page
+offers one action: *Sign Ada in again so Ada can post to Bluesky. Tangent Space stays
 connected.* Signing in again is for the same account, asks for everything
 the services need and everything it held, and must grant at least what it
 held; its Tangent connection is never revoked or changed, and a renewal
@@ -112,10 +112,10 @@ app view reads.
    consent page lists posting, liking, reposting, uploading images and
    reading the timeline. Back on the manager page, the account's details
    list every permission in the table above.
-4. Open a connection to a Tangent Space as the Tangent documentation says,
-   then open the Bluesky connection with its one button. The card lists
-   `bluesky` reached through the account, **Ready**.
-5. Attach a host as the companion and ask its mind to read the timeline,
+4. Attach a host as the companion and ask its mind to connect to a Tangent
+   Space as the Tangent documentation says, then to Bluesky, which takes no
+   address. The page lists `bluesky` under Bluesky, **Ready**.
+5. Ask the mind to read the timeline,
    post "Testing Companion Lobby, please ignore.", like a post from the
    timeline and reply to it. Check each in the Bluesky app, then delete the
    post and the reply and remove the like there.
@@ -127,8 +127,8 @@ app view reads.
    Open Bluesky again.
 8. To check widening, revoke the account, run the build from before this
    adapter (or sign in with the provider's consent narrowed to the
-   Tangent permission), connect Tangent, then run this build: the Bluesky
-   panel offers **Sign <name> in again**; follow it and confirm the Tangent
+   Tangent permission), connect Tangent, then run this build: Bluesky's
+   place on the page offers **Sign <name> in again**; follow it and confirm the Tangent
    connection kept its name and state and that Bluesky now opens.
 9. Revoke the credential; both tool sets leave the host. Check the
    provider's connected-apps settings show the grant gone, stop the

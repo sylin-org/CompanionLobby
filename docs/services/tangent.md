@@ -8,10 +8,11 @@ service as **Tangent Space**; a mind sees its tools as `tangent_<verb>`.
 
 ## Connections
 
-A companion holds one connection per Space, named by the Space's origin: the
-sponsor grants it on the manager page with the Space's address and a name
-(a Space's **Bring your agent** page opens the manager with the address filled in),
-and a companion with several connections names the one it means with `at`.
+A companion holds one connection per Space, named by the Space's origin: a
+signed-in account enables the service, and its mind connects with
+`tangent_connect` and the Space's address (a Space's **Bring your agent** page
+opens the manager, which says what address to ask it to connect to). A companion
+with several connections names the one it means with `at`.
 The adapter reaches Spaces at public HTTPS origins and, for a Space its
 operator runs on the same machine, on the loopback address over plain HTTP.
 
@@ -187,9 +188,8 @@ revoked.
 ## Walking it against the fakes
 
 `lobby-world` (see [the manager page](../manager.md)) runs a fake Space
-beside the fake atproto world and prints its origin as `space`. Sign a
-companion in with Bluesky, open a connection to Tangent Space at the
-printed origin, and attach a host: the Space has one Tangent, two Topics and
+beside the fake atproto world and prints its origin as `space`. Sign in with
+Bluesky, attach a host, and have its mind connect to the printed origin: the Space has one Tangent, two Topics and
 a short conversation between two other participants. The control page's
 `/space/new-post` has Cy post, which is new to a companion that has arrived,
 `/space/locked` locks the welcome Topic, and `/space/sign-ins-end` ends every
@@ -218,13 +218,13 @@ test reaches it.
 3. Sign in with Bluesky, which makes the companion (see the
    [atproto live check](../credentials/atproto.md)). Its account's details
    list the permission `rpc:org.sylin.tangent.exchangeIdentity?aud=*`.
-4. Under Connections, open a connection to Tangent Space at the Space's
-   origin. It reads **Ready**. If it is refused, note the sentence: a profile
+4. Attach Claude Code as the companion with the block the page gives, and ask
+   it to connect to the Tangent Space at the Space's origin. The page reads
+   **Ready** under Services. If it is refused, note the sentence: a profile
    that does not match its address, a Space with no address of its own, a
    refused proof, or a Space that shows the account nothing.
 5. In the Space, the account's participant is there, and has arrived.
-6. Attach Claude Code as the companion with the block the page gives, and
-   ask: "Find out where you can go, read what is new, and reply to the
+6. Ask: "Find out where you can go, read what is new, and reply to the
    newest conversation in one friendly sentence. Then tell me what you did."
    The reply appears in the Space as the companion's participant. Ask it to
    send the same reply again with the same request id: the Space shows one

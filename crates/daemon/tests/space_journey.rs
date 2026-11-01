@@ -114,6 +114,155 @@ fn said(answer: &Value) -> String {
 }
 
 #[test]
+fn a_mind_connects_to_what_its_account_enables_and_a_closed_connection_stays_closed() {
+    let world = world();
+    let install = Install::new(Path::new(SYNTHETIC), "space-connect")
+        .with_env("LOBBY_AUTHSERVER", &world.atproto.origin());
+    install.open();
+    let started = install.operator(
+        "POST",
+        "/api/sign-ins",
+        &json!({ "kind": "atproto", "hint": "" }),
+    );
+    assert_eq!(started.status, 201, "{}", text(&started));
+    let url = body(&started)["url"].as_str().expect("url").to_owned();
+    assert_eq!(install.arrive(&world.atproto.approve(&url)).status, 200);
+    let lobby = install.json("/api/lobby");
+    let moniker = lobby["companions"][0]["moniker"]
+        .as_str()
+        .expect("moniker")
+        .to_owned();
+    assert_eq!(
+        lobby["connections"],
+        json!([]),
+        "signing in connects nothing"
+    );
+    let mut peer = install.attach(&moniker);
+    initialize(&mut peer);
+
+    // The account enables the services, each with its own way to connect.
+    let tools = |peer: &mut lobby_testkit::Peer| -> Vec<Value> {
+        peer.ask(&json!({ "jsonrpc": "2.0", "id": 900, "method": "tools/list" }))["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .clone()
+    };
+    let listed = tools(&mut peer);
+    let tool =
+        |listed: &[Value], name: &str| listed.iter().find(|tool| tool["name"] == name).cloned();
+    assert_eq!(
+        tool(&listed, "tangent_connect").expect("by address")["inputSchema"]["required"],
+        json!(["address"])
+    );
+    assert_eq!(
+        tool(&listed, "bluesky_connect").expect("where the account lives")["inputSchema"]["properties"],
+        json!({})
+    );
+    let reach = call(&mut peer, 1, "reach", json!({}));
+    assert!(
+        said(&reach).contains("can connect to a Tangent Space by its address with tangent_connect")
+            && said(&reach).contains("can connect to Bluesky with bluesky_connect"),
+        "{}",
+        said(&reach)
+    );
+    assert_eq!(
+        reach["result"]["structuredContent"]["canConnect"][0]["takesAddress"],
+        true
+    );
+
+    // A missing address says what it takes, and a bad one reaches nothing.
+    let bare = call(&mut peer, 2, "tangent_connect", json!({}));
+    assert_eq!(bare["result"]["isError"], true, "{bare}");
+    assert!(said(&bare).contains("address"), "{}", said(&bare));
+    let bad = call(
+        &mut peer,
+        3,
+        "tangent_connect",
+        json!({ "address": "http://10.0.0.1" }),
+    );
+    assert_eq!(bad["result"]["isError"], true, "{bad}");
+
+    // Connected: its tools appear, and connecting again changes nothing.
+    let origin = world.space.origin();
+    let opened = call(
+        &mut peer,
+        4,
+        "tangent_connect",
+        json!({ "address": origin }),
+    );
+    assert_eq!(opened["result"]["isError"], false, "{opened}");
+    assert!(
+        said(&opened).starts_with("Connected to Tangent Space at tangent"),
+        "{}",
+        said(&opened)
+    );
+    assert!(
+        said(&opened).contains("Start with tangent_"),
+        "{}",
+        said(&opened)
+    );
+    assert!(
+        tool(&tools(&mut peer), "tangent_topics").is_some(),
+        "its tools appear"
+    );
+    let again = call(
+        &mut peer,
+        5,
+        "tangent_connect",
+        json!({ "address": origin }),
+    );
+    assert!(
+        said(&again).starts_with("Already connected"),
+        "{}",
+        said(&again)
+    );
+    let lobby = install.json("/api/lobby");
+    assert_eq!(lobby["connections"].as_array().map(Vec::len), Some(1));
+    let connection = lobby["connections"][0]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    assert!(
+        install
+            .journal()
+            .iter()
+            .any(|entry| entry["command"] == "grant_connection"
+                && entry["outcome"] == "done"
+                && entry["initiator"] == "mind"),
+        "the journal says the mind did it"
+    );
+
+    // What the sponsor closes stays closed until the sponsor opens it again.
+    let closed = install.operator(
+        "POST",
+        &format!("/api/connections/{connection}/revoke"),
+        &json!({}),
+    );
+    assert_eq!(closed.status, 200, "{}", text(&closed));
+    let refused = call(
+        &mut peer,
+        6,
+        "tangent_connect",
+        json!({ "address": origin }),
+    );
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert!(
+        said(&refused).contains("The sponsor closed"),
+        "{}",
+        said(&refused)
+    );
+
+    // The service that lives where the account lives takes nothing, and its
+    // tool is gone once it stands.
+    let home = call(&mut peer, 7, "bluesky_connect", json!({}));
+    assert_eq!(home["result"]["isError"], false, "{home}");
+    assert!(tool(&tools(&mut peer), "bluesky_connect").is_none());
+    peer.close_stdin();
+    peer.wait_exit(std::time::Duration::from_secs(10));
+    install.stop();
+}
+
+#[test]
 fn a_companion_connects_through_the_proof_exchange_reads_what_is_new_and_replies_once() {
     let world = world();
     let (install, connection, mut peer) = connected(&world, "space");
@@ -301,7 +450,7 @@ fn reach_names_the_account_and_how_the_space_knows_the_companion_and_never_lets_
     assert_eq!(
         told,
         format!(
-            "You are ada, attached through Companion Lobby. ada holds the Bluesky account \"{HANDLE}\". ada reaches Tangent Space at main ({origin}) with the account \"{HANDLE}\"; Tangent Space knows it there as \"Ada\" (participant \"{participant}\") and lets it read, but not post: start with tangent_arrive."
+            "You are ada, attached through Companion Lobby. ada holds the Bluesky account \"{HANDLE}\". ada reaches Tangent Space at main ({origin}) with the account \"{HANDLE}\"; Tangent Space knows it there as \"Ada\" (participant \"{participant}\") and lets it read, but not post: start with tangent_arrive. ada can connect to a Tangent Space by its address with tangent_connect. ada can connect to Bluesky with bluesky_connect."
         )
     );
     let structured = &reach["result"]["structuredContent"];
@@ -394,7 +543,7 @@ fn a_connection_revoked_while_a_reply_is_on_its_way_turns_it_into_an_unknown_out
     peer.notification(LIST_CHANGED);
     assert_eq!(
         names(&tools(&mut peer, 11)),
-        ["reach"],
+        ["bluesky_connect", "reach", "tangent_connect"],
         "the Space's tools are gone"
     );
     let after = call(

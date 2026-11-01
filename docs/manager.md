@@ -4,7 +4,8 @@ The manager page is where the sponsor keeps the keys. It is served by the
 daemon at `http://127.0.0.1:<port>/` as three embedded files, holds no truth,
 and follows the lobby through the live feed (see [daemon.md](daemon.md)). It
 serves the sponsor's moments in [participants.md](participants.md): signing
-in, opening a connection, the glance, trouble, and pulling the key.
+in, attaching a mind, seeing what it reaches, the glance, trouble, and pulling
+the key.
 
 ## Routes
 
@@ -12,8 +13,8 @@ in, opening a connection, the glance, trouble, and pulling the key.
 | --- | --- |
 | `/` | The companion cards, or the words that there are none yet. Each card has its portrait or initials, how many minds are attached, how many connections are ready or need a sign-in, and each account it holds by its label and kind, with *Remove*, confirmed in place; an account that needs a sign-in also offers *Sign in again*. One primary action, *Sign in*. |
 | `/sign-in` | One way to sign in per kind of account: a button that goes straight to the provider's page, and *Name the account first* for a field holding the kind's hint. |
-| `/companion/<id>/attach` | The companion's `mcpServers` block, keyed by the companion's moniker and naming it by its immutable id, with *Copy block*. The page says whether a mind is attached yet, and once one is, leads to opening a connection. |
-| `/companion/<id>` | The companion's page: its display name, moniker and portrait, each edited where it stands, and its attachments, then three sections in this order: Accounts, Connections, Journal, and last the companion's removal, confirmed in place. *Host configuration* leads to the block. |
+| `/companion/<id>/attach` | The companion's `mcpServers` block, keyed by the companion's moniker and naming it by its immutable id, with *Copy block*. The page says whether a mind is attached yet, and once one is, leads back to the companion. |
+| `/companion/<id>` | The companion's page: its display name, moniker and portrait, each edited where it stands, and its attachments, then three sections in this order: Accounts, Services, Journal, and last the companion's removal, confirmed in place. *Attach a mind*, the primary action until one is, leads to the block; afterwards it reads *Host configuration*. |
 | `/journal` | The whole journal as sentences, newest first, with paging. |
 
 ## The moments
@@ -51,9 +52,13 @@ way to sign in, for this companion. A companion with no account left says which
 one was removed and that signing in with it again brings it back. Starting a
 sign-in again ends one that was left behind at the provider's page.
 
-**Opening a connection.** Connections lists the companion's connections,
-each by the sponsor's name for it, its service and its address, with one
-word and one action:
+**Services.** Services lists each installed service and what enables it: the
+account the companion holds that the service takes, or the kind of account that
+would. The sponsor connects nothing here: an account enables a service, and a
+mind attached as the companion connects to it with the service's own connect
+tool, by an address when the service has many, with none when it lives where
+the account lives. Each connection the mind opened shows under its service, by
+its name and its address, with one word and one action:
 
 | Word | When | Action |
 | --- | --- | --- |
@@ -61,19 +66,13 @@ word and one action:
 | Sign in needed | The connection stands but its account needs signing in again. | *Sign in again*, which leads to the account's own *Sign in again*, and a quieter *Revoke*, confirmed in place. |
 | Revoked | The sponsor revoked it, or removed its account. | *Open again* with a ready account the service takes, or *Sign in* when there is none. |
 
-A revoked connection is shown only while nothing ready or newer holds its
-name. A service's own page may open the manager at `/?service=<name>&address=<origin>`:
-the manager takes those once and clears them from the address, says on the
-list of companions which place was offered, and fills that service's form with
-the address and a suggested name. It only fills the form: nothing connects
-until the sponsor reads it and opens the connection. Below the list, each
-installed service has a form: the address (a
-bare host is read as `https://`, and a bare `localhost`, `127.0.0.1` or
-`[::1]`, with or without a port, as `http://`), a name suggested from the address, and,
-when the companion holds more than one account the service takes, which
-account. A service whose kind of account the companion does not hold says
-which kind it takes. A lobby with no service installed says so, and offers
-nothing.
+A revoked connection is shown only while nothing ready or newer holds its name,
+and what the sponsor closed stays closed to the mind while that account stands:
+only *Open again* opens it. An account signed in before a service needed more
+of it is offered one thing there, signing it in again. A service's own page may
+open the manager at `/?service=<name>&address=<origin>`: the manager takes those
+once, clears them from the address, and says where to ask the mind to connect,
+until a connection stands there. A lobby with no service installed says so.
 
 **The glance.** The journal reads as sentences: who, as which companion, did
 what, through which connection, and how it ended, in the names the sponsor
@@ -146,8 +145,8 @@ documented with that service under `docs/services`, with `/space/new-post`,
 Bluesky sign-ins from then on grant only identity and the Space's leave,
 as an account signed in before the second service needed more, and
 `/accounts/asked` makes them grant what they ask for again: sign in after
-the first, open a connection to the Space, open the second, and the page
-offers signing the companion in again. Opening a
+the first, have the mind connect to the Space, and the page offers signing the
+companion in again for the second. Opening a
 path on the printed `control` origin turns the passbook authority's knobs:
 `/keys/brief` (keys issued from then on live two seconds, so the lobby
 renews them over and over), `/keys/long` (an hour), `/renewals/refuse` and
@@ -162,10 +161,10 @@ LOBBY_AUTHSERVER=<printed origin> LOBBY_DATA_DIR=<an empty directory> LOBBY_PORT
 
 Then walk the moments: sign in with Bluesky, which makes a companion of the
 printed handle; add Passbook to it by typing the printed `passbook` origin;
-open a connection to the printed `board`, and one to the printed `space`;
-revoke them; read the journal.
+attach a mind and have it connect to the printed `board` and the printed
+`space`; revoke them; read the journal.
 Every sign-in is approved at once as the printed account. For trouble, open
-`control/keys/brief` before signing in with Passbook, open a connection,
+`control/keys/brief` before signing in with Passbook, have the mind connect,
 then open `control/renewals/refuse`: within a second or two the card says
 *Sign in again*. Open `control/renewals/allow` and `control/keys/long`, then
 sign in again from the card. Revoke an account from its card. Stop the

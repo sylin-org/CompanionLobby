@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use lobby_contracts::{
     AccountLabel, Address, Companion, Connection, ConnectionState, Credential, CredentialState,
-    Effect, KnownAs, Label, Passage, ProviderKind, ServiceName, ToolDescriptor, ToolName,
+    Effect, KnownAs, Label, Passage, ProviderKind, Retry, ServiceName, ToolDescriptor, ToolName,
     ToolResult,
 };
 use serde_json::{Map, Value, json};
@@ -42,6 +42,10 @@ use crate::store::State;
 pub const REACH: &str = "reach";
 /// The argument every service tool takes to say which connection it acts through.
 pub const AT: &str = "at";
+/// The tool, under each service a companion may connect to, that connects it.
+pub const CONNECT: &str = "connect";
+/// The argument a connect tool takes for a service with many addresses.
+pub const ADDRESS: &str = "address";
 
 /// What a companion reaches through one service: the service's tools and
 /// the sponsor's label and address of each ready connection to it.
@@ -83,6 +87,67 @@ impl ReachedAt {
     }
 }
 
+/// A service one of a companion's accounts enables, which its mind may connect
+/// to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Connectable {
+    /// The service.
+    pub service: ServiceName,
+    /// The name its makers give it.
+    pub title: String,
+    /// Whether it lives where the account lives, so connecting names no
+    /// address.
+    pub home: bool,
+}
+
+impl Connectable {
+    /// The name a mind calls its connect tool by.
+    pub fn tool(&self) -> String {
+        connect_name().projected(&self.service)
+    }
+
+    /// The descriptor of its connect tool.
+    fn descriptor(&self) -> ToolDescriptor {
+        let title = &self.title;
+        let (description, input_schema) = if self.home {
+            (
+                format!(
+                    "Connects this companion to {title}, where its account lives. It takes no arguments; {title}'s tools appear once it is connected."
+                ),
+                json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            )
+        } else {
+            (
+                format!(
+                    "Connects this companion to the {title} at an address, with the account it holds; that {title}'s tools appear once it is connected. Connecting again to the same address changes nothing."
+                ),
+                json!({
+                    "type": "object",
+                    "properties": {
+                        ADDRESS: {
+                            "type": "string",
+                            "description": format!("Where the {title} is: its origin, such as https://example.test, or http://localhost:8080 for one on this machine."),
+                        },
+                    },
+                    "required": [ADDRESS],
+                    "additionalProperties": false,
+                }),
+            )
+        };
+        ToolDescriptor {
+            name: connect_name(),
+            title: format!("Connect to {title}"),
+            description,
+            input_schema,
+            effect: Effect::Write { retry: Retry::Safe },
+        }
+    }
+}
+
+fn connect_name() -> ToolName {
+    ToolName::new(CONNECT).unwrap_or_else(|| unreachable!("connect is a valid tool name"))
+}
+
 /// An account a companion holds, as `reach` names it: by the label the
 /// sponsor knows it by and its kind's title, and whether it waits for the
 /// sponsor to sign it in again.
@@ -104,9 +169,9 @@ pub fn reach_descriptor() -> ToolDescriptor {
         name: ToolName::new(REACH).unwrap_or_else(|| unreachable!("reach is a valid tool name")),
         title: "Reach".to_owned(),
         description: "Says which companion you are attached as and what that companion can reach \
-                      right now: each connected service, the addresses it reaches there, and the \
-                      tools you can call for it. Call it first, and again whenever a tool you \
-                      expected is missing."
+                      right now: each connected service, the addresses it reaches there, the \
+                      tools you can call for it, and the services you can connect to. Call it \
+                      first, and again whenever a tool you expected is missing."
             .to_owned(),
         input_schema: json!({
             "type": "object",
@@ -118,8 +183,9 @@ pub fn reach_descriptor() -> ToolDescriptor {
 }
 
 /// The tools an attachment sees, in order, each with the name a mind calls
-/// it by: `reach`, then each reached service's tools with `at` added.
-pub fn catalog(reached: &[Reached]) -> Vec<(String, ToolDescriptor)> {
+/// it by: `reach`, then each reached service's tools with `at` added, then a
+/// connect tool for each service the companion may connect to.
+pub fn catalog(reached: &[Reached], connectable: &[Connectable]) -> Vec<(String, ToolDescriptor)> {
     let mut tools = vec![(REACH.to_owned(), reach_descriptor())];
     for place in reached {
         let labels: Vec<&str> = place
@@ -132,6 +198,9 @@ pub fn catalog(reached: &[Reached]) -> Vec<(String, ToolDescriptor)> {
             descriptor.input_schema = with_at(&tool.input_schema, &place.title, &labels);
             tools.push((tool.name.projected(&place.service), descriptor));
         }
+    }
+    for place in connectable {
+        tools.push((place.tool(), place.descriptor()));
     }
     tools
 }
@@ -201,10 +270,11 @@ pub fn unknown_argument(
 /// The answer to `reach` for `companion`, which holds `accounts`, reaches
 /// `reached` and whose connections `waiting` wait for the sponsor to sign
 /// their account in again: who the companion is and which accounts it
-/// holds, then for each connection where it is, by the sponsor's names,
+/// holds, then for each connection where it is, by its names,
 /// with which account, how the service knows it there, what the
 /// connection's grants allow in the service's words, and the tool to start
-/// with, in a few sentences. What a service or a provider wrote, the name
+/// with, then the services it may connect to, in a few sentences. What a
+/// service or a provider wrote, the name
 /// and reference it gave the companion and an account's label, is quoted.
 /// The structured answer holds the same facts, with the whole tool list,
 /// which the catalog has too.
@@ -213,8 +283,12 @@ pub fn reach(
     reached: &[Reached],
     waiting: &[(ServiceName, String, Label)],
     accounts: &[HeldAccount],
+    connectable: &[Connectable],
 ) -> ToolResult {
-    let tools: Vec<String> = catalog(reached).into_iter().map(|(name, _)| name).collect();
+    let tools: Vec<String> = catalog(reached, connectable)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
     let display = companion.display_name.as_str();
     let mut text: Vec<Passage> = Vec::new();
     let say = |text: &mut Vec<Passage>, said: &str| text.push(Passage::Authored(said.to_owned()));
@@ -250,12 +324,14 @@ pub fn reach(
         say(&mut text, ".");
     }
     if reached.is_empty() && waiting.is_empty() {
-        say(
-            &mut text,
-            &format!(
-                " {display} reaches nothing yet: the sponsor has not connected a service for this companion."
-            ),
-        );
+        let said = if connectable.is_empty() {
+            format!(
+                " {display} reaches nothing yet: it holds no account that enables a service, and the sponsor signs one in on the manager page."
+            )
+        } else {
+            format!(" {display} reaches nothing yet.")
+        };
+        say(&mut text, &said);
     }
     for place in reached {
         let title = &place.title;
@@ -316,6 +392,15 @@ pub fn reach(
             ),
         );
     }
+    for place in connectable {
+        let (title, tool) = (&place.title, place.tool());
+        let said = if place.home {
+            format!(" {display} can connect to {title} with {tool}.")
+        } else {
+            format!(" {display} can connect to a {title} by its address with {tool}.")
+        };
+        say(&mut text, &said);
+    }
     // A host may show a mind the structured answer and not the text, so it
     // gives every fact the text does, what a service or provider wrote
     // quoted as in the text.
@@ -342,9 +427,21 @@ pub fn reach(
             })
         })
         .collect();
+    let can_connect: Vec<Value> = connectable
+        .iter()
+        .map(|place| {
+            json!({
+                "service": place.service.as_str(),
+                "title": place.title,
+                "tool": place.tool(),
+                "takesAddress": !place.home,
+            })
+        })
+        .collect();
     ToolResult {
         text,
         structured: Some(json!({
+            "canConnect": can_connect,
             "companion": {
                 "id": companion.id.to_string(),
                 "moniker": companion.moniker.as_str(),
@@ -682,6 +779,10 @@ pub fn sentence(entry: &Value, names: &Names) -> String {
             format!("ended an unfinished renewal of {the_account} for {companion}"),
             format!("end an unfinished renewal of {the_account} for {companion}"),
         ),
+        (_, "grant_connection") if mind => (
+            format!("connected to {service}{at}"),
+            format!("connect to {service}{at}"),
+        ),
         (_, "grant_connection") => (
             format!("opened a connection for {companion} to {service}{at}"),
             format!("open a connection for {companion} to {service}{at}"),
@@ -939,7 +1040,7 @@ mod tests {
         plain.display_name = DisplayName::new("ada").expect("name");
         assert_eq!(named(&plain), "ada");
         assert!(
-            reach(&plain, &[], &[], &[])
+            reach(&plain, &[], &[], &[], &[])
                 .rendered()
                 .starts_with("You are ada, attached through Companion Lobby.")
         );
@@ -1020,7 +1121,7 @@ mod tests {
 
     #[test]
     fn a_companion_without_connections_sees_reach_alone() {
-        let catalog = catalog(&[]);
+        let catalog = catalog(&[], &[]);
         assert_eq!(catalog.len(), 1);
         assert_eq!(catalog[0].0, REACH);
         assert!(catalog[0].1.read_only_hint());
@@ -1028,7 +1129,7 @@ mod tests {
 
     #[test]
     fn reach_reports_the_companion_and_the_live_tool_set() {
-        let answer = reach(&ada(), &[], &[], &[]);
+        let answer = reach(&ada(), &[], &[], &[], &[]);
         let text = answer.rendered();
         assert!(text.contains("Ada") && text.contains("reach"));
         let structured = answer.structured.expect("structured");
@@ -1039,7 +1140,7 @@ mod tests {
 
     #[test]
     fn service_tools_take_at_naming_the_sponsors_labels() {
-        let one = catalog(&[board(&["front"])]);
+        let one = catalog(&[board(&["front"])], &[]);
         assert_eq!(
             one.iter()
                 .map(|(name, _)| name.as_str())
@@ -1053,11 +1154,17 @@ mod tests {
             "one connection needs no at"
         );
         assert_eq!(schema["properties"]["limit"]["type"], "integer");
-        let two = catalog(&[board(&["front", "back"])]);
+        let two = catalog(&[board(&["front", "back"])], &[]);
         let schema = &two[1].1.input_schema;
         assert_eq!(schema["properties"]["at"]["enum"], json!(["front", "back"]));
         assert_eq!(schema["required"], json!(["at"]));
-        let answer = reach(&ada(), &[board(&["front", "back"])], &[], &[passbook()]);
+        let answer = reach(
+            &ada(),
+            &[board(&["front", "back"])],
+            &[],
+            &[passbook()],
+            &[],
+        );
         let waiting = reach(
             &ada(),
             &[],
@@ -1066,6 +1173,7 @@ mod tests {
                 "Board".to_owned(),
                 Label::new("front").expect("label"),
             )],
+            &[],
             &[],
         );
         assert!(
@@ -1105,7 +1213,7 @@ mod tests {
     fn at_is_described_by_the_service_title_never_its_tool_prefix() {
         let mut place = board(&["front"]);
         place.title = "Notice Board".to_owned();
-        let tools = catalog(&[place]);
+        let tools = catalog(&[place], &[]);
         let described = tools[1].1.input_schema["properties"]["at"]["description"]
             .as_str()
             .expect("described")
@@ -1145,6 +1253,7 @@ mod tests {
             std::slice::from_ref(&place),
             &[],
             &[passbook(), waiting],
+            &[],
         );
         assert_eq!(
             answer.rendered(),
@@ -1172,7 +1281,7 @@ mod tests {
         place.connections[0].known = None;
         place.connections[0].account = None;
         assert_eq!(
-            reach(&ada(), std::slice::from_ref(&place), &[], &[]).rendered(),
+            reach(&ada(), std::slice::from_ref(&place), &[], &[], &[]).rendered(),
             "You are Ada (moniker ada), attached through Companion Lobby. Ada reaches Board at front (http://127.0.0.1:5300): start with board_read."
         );
         assert_eq!(

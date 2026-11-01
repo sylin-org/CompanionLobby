@@ -278,15 +278,18 @@ adapters whose words belong to no real provider or service. The daemon's
 library never names them, and a test checks that `companion-lobby`, built
 beside it with every test feature on, carries no passbook material tag.
 
-- **Signing in.** `POST /api/sign-ins` names a companion, a provider kind and
-  a hint (what the sponsor typed). The lobby refuses a companion that already
-  holds a ready credential of that kind, and one that already waits on a
-  sign-in of that kind, before the adapter starts anything; then it asks the
+- **Signing in.** `POST /api/sign-ins` names a provider kind, a hint (what the
+  sponsor typed) and, from a companion's own page, the companion. With none, the
+  account it comes back as says which: the companion that holds it, however it
+  stands, or a new one made from it in the same commit. The lobby refuses a
+  companion that already holds a ready credential of that kind before the
+  adapter starts anything, and a sign-in that waits for that companion ends;
+  then it asks the
   credential adapter where the browser goes, and remembers the sign-in for
   10 minutes under a random `state` (at most 32 wait at once, the oldest
   expiring first). The sponsor follows it by an id of its own, never the
   `state`: it is `pending` while it waits and ends `signed_in`, `refused`,
-  `cancelled` (`POST /api/sign-ins/<id>/cancel`) or `expired`, and the live
+  `cancelled` (another took its place) or `expired`, and the live
   feed says each. The provider sends the browser back to
   `/signin/<kind>/return` with that `state`; a return the lobby is not
   waiting for is refused unjournaled, since nothing proves who sent it, and
@@ -316,8 +319,13 @@ beside it with every test feature on, carries no passbook material tag.
   touched: no state, revision or issued data of theirs changes, and their
   tools never leave the catalog. Another account, or a narrower grant,
   changes nothing and the sign-in page says so. A renewal never widens.
-- **Connecting.** `POST /api/connections` names a companion, one of its
-  credentials, a service, an address and a label. The lobby checks that the
+- **Connecting.** A mind calls `<service>_connect`, listed for each service a
+  ready account of its companion enables, with `address` when the service has
+  many: the lobby picks the account, names the connection from the address's
+  host, answers as connected when it already reaches that address, and refuses
+  one the sponsor closed while that account stands. `POST /api/connections` is
+  the sponsor's *Open again*, naming a companion, one of its credentials, a
+  service, an address and a label. Either way the lobby checks that the
   credential is ready, of a kind the service accepts and granted every
   permission the service declares it needs (otherwise the answer is
   `needs_permission`, saying the sponsor signs the companion in again and
@@ -496,23 +504,21 @@ state file and the journal before it answers.
 | Route | Rule | What it does |
 | --- | --- | --- |
 | `GET`, `OPTIONS /api/discovery` | Host | The discovery document; the only response with cross-origin headers. |
-| `GET /`, `/journal`, `/companion/<id>`, `/companion/<id>/attach`, `/companion/<id>/sign-in/<sign-in id>` | Host | The manager page; see [manager.md](manager.md). |
+| `GET /`, `/sign-in`, `/journal`, `/companion/<id>`, `/companion/<id>/attach` | Host | The manager page; see [manager.md](manager.md). |
 | `GET /manager.css`, `/manager.js` | Host | Its stylesheet and script. |
 | `GET /api/lobby` | Host | `{"storeId", "feed": {"epoch", "position"}, "companions": [...], "credentials": [...], "connections": [...], "signIns": [...], "kinds": [...], "services": [...], "journal": {"healthy", "highWater"}}`, one consistent picture. `signIns` are the sign-ins the lobby waits on, then the last 64 it remembers ending, each `{"id", "companion", "kind", "account", "status", "expiresAt"}`, `account` being what the sponsor typed to name the account meant (empty when the provider's page chooses) and `status` one of `pending`, `signed_in`, `cancelled`, `expired` or `refused`; a sign-in past its time is ended as expired before the picture is taken. A credential is `{"id", "companion", "kind", "account", "label", "permissions", "state"}` and a connection `{"id", "companion", "credential", "service", "address", "label", "state", "revision"}`; neither ever carries material or what a service issued. `kinds` are the provider kinds the sponsor may sign in with, each `{"kind", "title", "hint"}`, the title being what the sponsor reads and the hint what the sponsor reads beside the field naming the account; `services` are the installed services, each `{"name", "title", "accepts", "home", "needs", "lets"}`, `accepts` naming the kinds whose accounts can open a connection to it, `home` whether it lives where the account lives and takes no address, `needs` the permissions an account must hold for it, in the provider's words, and `lets` what signing an account in again for it lets a companion do, as a clause after "can". |
 | `GET /api/companions` | Host | `{"companions": [{"id", "moniker", "displayName", "revision", "portrait", "attachments", "hostConfig"}]}`; `portrait` is the path of the companion's portrait, or `null`. |
 | `GET /api/companions/<id>/portrait` | Host | The companion's portrait, typed by its own leading bytes, or 404. |
 | `GET /api/journal?before=<cursor>&limit=<n>&companion=<id>&finished=1&routine=0` | Host | `{"entries", "upper", "next"}`, newest first; 409 for a cursor of another journal. With `companion`, only the entries about that companion; with `finished=1`, only the entries that say how something ended, leaving out the pending ones; with `routine=0`, none of the renewals that kept an account signed in, which the journal keeps all the same. Each entry carries its `sentence`: who, as which companion, did what, through which connection, and how it ended, named the way the sponsor named them. |
 | `GET /api/events` | Host | The live feed, as server-sent events. |
-| `POST /api/companions` | operator write | Creates a companion from `{"moniker", "displayName"}`: 201 with `{"companion"}`, or 400 for an invalid name, 409 for a moniker in use. |
 | `PATCH /api/companions/<id>` | operator write | Renames from `{"expectedRevision", "moniker", "displayName"}` (either name may be left out): 200 with `{"companion"}`, or 400, 404, or 409 for a moved revision or a moniker in use. |
 | `PUT /api/companions/<id>/portrait` | operator write | Gives the companion a portrait from `{"expectedRevision", "image"}`, `image` being a `data:` URL of a PNG, JPEG, WebP or GIF image of at most 512 KiB, recognized by its own bytes, or `null` to go back to initials: 200 with `{"companion"}`, or 400 for anything else, 404, or 409 for a moved revision. |
 | `DELETE /api/companions/<id>` | operator write | Removes from `{"expectedRevision", "cascade"}`: 200 with `{"removed", "endedAttachments"}`, or 404, or 409 for a moved revision or live attachments without `"cascade": true`. |
-| `POST /api/sign-ins` | operator write | Starts a sign-in from `{"companion", "kind", "hint"}`: 201 with `{"signIn": {"id", "companion", "kind", "account", "status", "expiresAt"}, "url"}`, `url` being where the sponsor's browser goes; or 404 for an unknown companion or kind, 409 when the companion already holds a ready credential of that kind or already waits on a sign-in of it. When the companion holds a credential of the kind that needs signing in again, the sign-in is for that account and `account` is its label. |
-| `POST /api/sign-ins/<id>/cancel` | operator write | Cancels a sign-in while it waits: 200 with `{"signIn"}`, or 404 when none with that id waits. |
-| `GET /signin/<kind>/return` | Host | Where a provider sends the browser back. Completes a sign-in the lobby waits for, once, and answers 303 to `/signin/done?outcome=<outcome>&companion=<id>&conflict=<another_companion\|already_held\|another_waits>` with no body, the companion named only when the lobby knew the sign-in and the conflict only for a 409, so the code and the `state` leave the address bar at once and nothing the provider sent rides on. |
-| `GET /signin/done` | Host | The page that says how a sign-in ended, from the outcome alone: 200 when the account is signed in, 404 when the lobby does not remember a sign-in waiting for this answer (cancelled, expired, finished or never started), 409 for an account another companion holds (`another_companion`), a kind the companion already holds (`already_held`) or another account than the one that waits to be signed in again (`another_waits`), each said in its own sentence, 403 for a return that did not prove the sign-in, 503 when the provider could not be reached. It loads only the manager page's stylesheet, echoes nothing, and offers one link: back to the companion's page, by its display name, when the lobby knows the companion, and back to the lobby otherwise. |
+| `POST /api/sign-ins` | operator write | Starts a sign-in from `{"kind", "hint"}`, with `"companion"` from a companion's own page: 201 with `{"signIn": {"id", "companion", "kind", "account", "status", "expiresAt"}, "url"}`, `url` being where the sponsor's browser goes; or 404 for an unknown companion or kind, 409 when the companion already holds a ready credential of that kind. When the companion holds a credential of the kind that needs signing in again, the sign-in is for that account and `account` is its label. |
+| `GET /signin/<kind>/return` | Host | Where a provider sends the browser back. Completes a sign-in the lobby waits for, once, and answers 303 with no body: to `/companion/<id>`, or, when nothing was signed in, to `/signin/done?outcome=<outcome>&companion=<id>&conflict=<another_companion\|already_held\|another_waits>`, the companion named only when the lobby knows one and the conflict only for a 409, so the code and the `state` leave the address bar at once and nothing the provider sent rides on. |
+| `GET /signin/done` | Host | The page that says why a sign-in signed nothing in, from the outcome alone: 404 when the lobby does not remember a sign-in waiting for this answer (replaced, expired, finished or never started), 409 for an account another companion holds (`another_companion`), a kind the companion already holds (`already_held`) or another account than the one that waits to be signed in again (`another_waits`), each said in its own sentence, 403 for a return that did not prove the sign-in, 503 when the provider could not be reached. It loads only the manager page's stylesheet, echoes nothing, and offers one link: back to the companion's page, by its display name, when the lobby knows the companion, and back to the lobby otherwise. |
 | `POST /api/credentials/<id>/revoke` | operator write | Revokes the credential and every connection made from it, then at the provider: 200 with `{"credential", "provider"}`, `provider` being `confirmed`, `not_offered`, `not_confirmed`, `sent_last_known` (the credential waited for a sign-in, so the provider was sent the last secret the lobby held and its answer confirms nothing) or `not_asked` (no material to name the account with); or 404, or 409 when it is already revoked. |
-| `POST /api/connections` | operator write | Establishes a connection from `{"companion", "credential", "service", "address", "label"}`: 201 with `{"connection"}`; or 400 for an address or label the rules refuse, 404, 409 for a label in use, 403 for a credential that was revoked (`revoked`) or needs signing in again (`needs_sign_in`), or the outcome the adapters answered (`unsupported` is 403). |
+| `POST /api/connections` | operator write | Opens a connection again, from `{"companion", "credential", "service", "address", "label"}`: 201 with `{"connection"}`; or 400 for an address or label the rules refuse, 404, 409 for a label in use, 403 for a credential that was revoked (`revoked`) or needs signing in again (`needs_sign_in`), or the outcome the adapters answered (`unsupported` is 403). |
 | `POST /api/connections/<id>/revoke` | operator write | Revokes the connection: 200 with `{"connection"}`, or 404, or 409 when it is already revoked. |
 | `POST /api/stop` | operator write | 202, then the daemon stops accepting connections, ends every live feed, lets accepted requests finish (at most 10 seconds), closes its listener, releases the lock and exits. |
 | `POST /mcp/attach` | attachment, install secret | Attaches as `{"companion": "<id or moniker>"}`: 201 with `{"attachment", "token", "companion"}`, or 404 for an unknown companion. |

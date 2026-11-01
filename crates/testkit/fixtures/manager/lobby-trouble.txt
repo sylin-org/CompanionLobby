@@ -1,13 +1,13 @@
-recorded against manager.js sha256 f4713b81340cfbda67511997b347a815fffffcf91ac6a962571dc9dd96eb49bf
+recorded against manager.js sha256 08439f69a12db90c84aa8449084a289ff24c5a7d849b9328f1ec38eddc059143
 Companions
 AL
 Ada Lovelace
 
 No mind attached · 1 connection ready · 1 connection needs a sign-in
 
+ada.example.test · Bluesky
+Remove
 ada · Passbook · Sign in needed
 Sign in again
-Remove
-ada.example.test · Bluesky
 Remove
 Sign in

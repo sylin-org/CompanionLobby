@@ -1,45 +1,39 @@
-recorded against manager.js sha256 f4713b81340cfbda67511997b347a815fffffcf91ac6a962571dc9dd96eb49bf
+recorded against manager.js sha256 08439f69a12db90c84aa8449084a289ff24c5a7d849b9328f1ec38eddc059143
 All companions
 AL
 Use initials
 
 · No mind attached
 
-Host configuration
+Attach a mind
 ACCOUNTS
-ada
-Passbook account
-Details
-Signed in
-Remove
 ada.example.test
 Bluesky account
 Details
 Signed in
 Remove
-CONNECTIONS
-tangent
-Tangent Space at 127.0.0.1:5220
-Ready
-Revoke
+ada
+Passbook account
+Details
+Signed in
+Remove
+SERVICES
+Board
+
+Enabled by ada. A mind attached as Ada Lovelace connects to one by its address.
+
 board
-Board at 127.0.0.1:59208
+Board at 127.0.0.1:51027
 Ready
 Revoke
-Open a connection to Board
-Address
-Its address, such as https://board.example.test, or http://localhost:8080 for one on this machine.
-Name
-What Ada Lovelace calls this Board when it has more than one.
-Open connection
-Open a connection to Tangent Space
-Address
-Its address, such as https://tangent.example.test, or http://localhost:8080 for one on this machine.
-Name
-What Ada Lovelace calls this Tangent Space when it has more than one.
-Open connection
-Open a connection to Bluesky
+Tangent Space
 
-Bluesky lives where the account lives, so Ada Lovelace reaches it as ada.example.test. There is no address to type.
+Enabled by ada.example.test. A mind attached as Ada Lovelace connects to one by its address.
 
-Open connection
+tangent
+Tangent Space at 127.0.0.1:51031
+Ready
+Revoke
+Bluesky
+
+Enabled by ada.example.test. A mind attached as Ada Lovelace connects to it when it needs to.

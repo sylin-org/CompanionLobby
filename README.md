@@ -25,8 +25,10 @@ named `<service>_<tool>`.
 Each service and each kind of account has a page of its own under
 `docs/services` and `docs/credentials`.
 
-The sponsor signs in once per account, turns connections on and off, revokes
-in one click, and reads the journal, all on the manager page.
+The sponsor signs in once per account, which makes the companion, sees which
+services that account enables and what the mind connected to there, revokes in
+one click, and reads the journal, all on the manager page. The mind connects
+itself, with `<service>_connect`.
 
 ## Build
 

@@ -96,7 +96,7 @@ use lobby_contracts::{
     Companion, CompanionId, Connection, ConnectionId, ConnectionState, Credential,
     CredentialAdapter, CredentialId, CredentialState, DisplayName, Explained, Freshness, Initiator,
     IssuedSlot, JournalEntry, JournalKind, JournalNames, Label, MaterialSlot, MaterialUpdate,
-    Moniker, NameProblem, Outcome, ProviderKind, Revocation, SealedIssued, SealedMaterial,
+    Moniker, NameProblem, Outcome, Passage, ProviderKind, Revocation, SealedIssued, SealedMaterial,
     ServiceAdapter, ServiceName, SignInRequest, SignInReturn, SignInStart, SignedIn, Sponsor,
     ToolArguments, ToolName, ToolResult,
 };
@@ -108,7 +108,7 @@ use crate::calls::{self, Ticket};
 use crate::journal::{Journal, Note, Page, PageProblem};
 use crate::keyring::{self, AttachmentToken};
 use crate::portrait::{self, Portrait};
-use crate::projections::{self, Feed, Reached, ReachedAt, Subscription};
+use crate::projections::{self, Connectable, Feed, Reached, ReachedAt, Subscription};
 use crate::registry::Registry;
 use crate::store::{CompanionRecord, State, Store};
 use crate::trace;
@@ -350,7 +350,7 @@ pub struct Grant<'a> {
     pub service: &'a str,
     /// Where the service is.
     pub address: &'a str,
-    /// The sponsor's name for the connection.
+    /// The name the connection goes by.
     pub label: &'a str,
 }
 
@@ -1642,15 +1642,235 @@ impl Lobby {
         })
     }
 
-    /// Establishes a connection the sponsor granted: the companion's
-    /// credential is pinned, the service adapter establishes it with no lock
-    /// held, minting what it needs through the credential's adapter, and the
-    /// connection is committed only when the credential is still ready and
-    /// the label still free.
+    /// Opens again a connection the sponsor closed, or any the sponsor names.
     pub fn grant_connection(&self, grant: Grant<'_>) -> Result<Connection, Refusal> {
+        self.open_connection(grant, Initiator::Sponsor)
+    }
+
+    /// The services `companion` may connect to: those a ready account of its
+    /// enables. A service that lives where the account lives drops out once
+    /// a connection stands, and while the sponsor keeps one closed.
+    pub fn connectable(&self, companion: CompanionId) -> Vec<Connectable> {
+        let core = self.core();
+        let state = core.store.state();
+        self.registry
+            .services()
+            .into_iter()
+            .filter(|(service, description)| {
+                let mut accounts = state.credentials.iter().filter(|credential| {
+                    credential.companion == companion
+                        && credential.state == CredentialState::Ready
+                        && description.accepts.contains(&credential.kind)
+                });
+                accounts.any(|credential| {
+                    !description.home
+                        || !state.connections.iter().any(|connection| {
+                            connection.credential == credential.id && connection.service == *service
+                        })
+                })
+            })
+            .map(|(service, description)| Connectable {
+                title: self.registry.service_title(&service),
+                home: description.home,
+                service,
+            })
+            .collect()
+    }
+
+    /// Connects the attachment's companion to `place` at the address its mind
+    /// named: the mind's own `<service>_connect`. An address it already reaches
+    /// answers as connected, and one the sponsor closed stays closed while
+    /// that account stands.
+    fn connect(
+        &self,
+        attachment: &Attachment,
+        place: &Connectable,
+        arguments: &Map<String, Value>,
+    ) -> Result<ToolResult, Refusal> {
+        let companion = attachment.companion;
+        let (service, title, tool) = (&place.service, &place.title, place.tool());
+        let takes = if place.home { 0 } else { 1 };
+        let named = arguments.get(projections::ADDRESS).and_then(Value::as_str);
+        if arguments.len() != takes || (!place.home && named.is_none()) {
+            return Err(Refusal::new(
+                Outcome::InvalidInput,
+                if place.home {
+                    format!("{tool} takes no arguments; {title} lives where the account lives.")
+                } else {
+                    format!(
+                        "{tool} takes one argument, {}: where the {title} is.",
+                        projections::ADDRESS
+                    )
+                },
+            ));
+        }
+        let typed = named.map_or_else(String::new, |address| with_scheme(address.trim()));
+        let found = {
+            let core = self.core();
+            let state = core.store.state();
+            let description = self
+                .registry
+                .service(service)
+                .map(|adapter| adapter.describe());
+            let accounts: Vec<&Credential> = state
+                .credentials
+                .iter()
+                .filter(|credential| {
+                    credential.companion == companion
+                        && credential.state == CredentialState::Ready
+                        && description.as_ref().is_some_and(|description| {
+                            description.accepts.contains(&credential.kind)
+                        })
+                })
+                .collect();
+            let credential = accounts
+                .iter()
+                .find(|credential| {
+                    description.as_ref().is_some_and(|description| {
+                        description
+                            .permissions
+                            .iter()
+                            .all(|permission| credential.permissions.contains(permission))
+                    })
+                })
+                .or_else(|| accounts.first())
+                .map(|credential| (*credential).clone());
+            let address = description
+                .as_ref()
+                .and_then(|description| Address::parse(&typed, description.addresses));
+            let same = |connection: &&Connection| {
+                connection.companion == companion
+                    && connection.service == *service
+                    && Some(&connection.address) == address.as_ref()
+            };
+            let standing = state
+                .connections
+                .iter()
+                .filter(same)
+                .find(|connection| connection.state != ConnectionState::Revoked)
+                .cloned();
+            let closed = credential.as_ref().is_some_and(|credential| {
+                state.connections.iter().filter(same).any(|connection| {
+                    connection.state == ConnectionState::Revoked
+                        && connection.credential == credential.id
+                })
+            });
+            let label = connection_label(service, address.as_ref(), |candidate| {
+                !state.connections.iter().any(|connection| {
+                    connection.companion == companion
+                        && connection.service == *service
+                        && connection.state != ConnectionState::Revoked
+                        && connection.label.as_str() == candidate
+                })
+            });
+            (credential, standing, closed, label)
+        };
+        let (credential, standing, closed, label) = found;
+        let Some(credential) = credential else {
+            return Err(Refusal::new(
+                Outcome::NeedsSignIn,
+                format!(
+                    "No account of this companion enables {title} now; the sponsor signs one in on the manager page."
+                ),
+            ));
+        };
+        if let Some(connection) = standing {
+            if connection.state == ConnectionState::NeedsSignIn {
+                return Err(Refusal::new(
+                    Outcome::NeedsSignIn,
+                    format!(
+                        "{title} at {} waits for the sponsor to sign its account in again on the manager page; it comes back then.",
+                        connection.label
+                    ),
+                ));
+            }
+            return Ok(self.connected_result(place, &connection, true));
+        }
+        if closed {
+            return Err(Refusal::new(
+                Outcome::Refused,
+                format!(
+                    "The sponsor closed the connection to this {title}, so it stays closed until they open it again on the manager page."
+                ),
+            ));
+        }
+        let connection = self.open_connection(
+            Grant {
+                companion,
+                credential: credential.id,
+                service: service.as_str(),
+                address: &typed,
+                label: &label,
+            },
+            Initiator::Mind {
+                attachment: attachment.id,
+            },
+        )?;
+        Ok(self.connected_result(place, &connection, false))
+    }
+
+    /// What a connect tool answers: where the companion is now, and the tool
+    /// to start with there.
+    fn connected_result(
+        &self,
+        place: &Connectable,
+        connection: &Connection,
+        already: bool,
+    ) -> ToolResult {
+        let start = self
+            .reached(connection.companion)
+            .iter()
+            .find(|reached| reached.service == connection.service)
+            .and_then(|reached| {
+                reached
+                    .connections
+                    .iter()
+                    .find(|at| at.label == connection.label)
+                    .and_then(|at| {
+                        reached
+                            .tools
+                            .iter()
+                            .find(|tool| at.allows.contains(&tool.name))
+                            .map(|tool| tool.name.projected(&connection.service))
+                    })
+            });
+        let opening = if already {
+            "Already connected"
+        } else {
+            "Connected"
+        };
+        let mut said = format!(
+            "{opening} to {} at {} ({}).",
+            place.title, connection.label, connection.address
+        );
+        if let Some(start) = &start {
+            said.push_str(&format!(" Start with {start}."));
+        }
+        ToolResult {
+            text: vec![Passage::Authored(said)],
+            structured: Some(serde_json::json!({
+                "service": connection.service.as_str(),
+                "title": place.title,
+                "at": connection.label.as_str(),
+                "address": connection.address.as_str(),
+                "startWith": start,
+            })),
+        }
+    }
+
+    /// Establishes a connection for `initiator`: the companion's credential is
+    /// pinned, the service adapter establishes it with no lock held, minting
+    /// what it needs through the credential's adapter, and the connection is
+    /// committed only when the credential is still ready and the label still
+    /// free.
+    fn open_connection(
+        &self,
+        grant: Grant<'_>,
+        initiator: Initiator,
+    ) -> Result<Connection, Refusal> {
         let (pinned, subject) = self.run(|core| {
             let mut subject = core.named(
-                Subject::new(Initiator::Sponsor, Some(grant.companion), GRANT_CONNECTION)
+                Subject::new(initiator, Some(grant.companion), GRANT_CONNECTION)
                     .through(None, ServiceName::new(grant.service)),
             );
             subject.names.connection = Label::new(grant.label).ok();
@@ -2206,6 +2426,15 @@ impl Lobby {
         mut arguments: Map<String, Value>,
     ) -> Result<ToolResult, CallRefusal> {
         let companion = attachment.companion;
+        if let Some(place) = self
+            .connectable(companion)
+            .into_iter()
+            .find(|place| place.tool() == name)
+        {
+            return self
+                .connect(attachment, &place, &arguments)
+                .map_err(CallRefusal::Ended);
+        }
         let mind = Initiator::Mind {
             attachment: attachment.id,
         };
@@ -2967,21 +3196,9 @@ impl Core {
 
     /// `base`, or `base` with the first number that makes it free.
     fn free_moniker(&self, base: &str) -> Moniker {
-        (1u32..)
-            .find_map(|number| {
-                let candidate = if number == 1 {
-                    base.to_owned()
-                } else {
-                    let suffix = format!("-{number}");
-                    let room = Moniker::MAX_BYTES.saturating_sub(suffix.len());
-                    let kept = base[..base.len().min(room)].trim_end_matches('-');
-                    format!("{kept}{suffix}")
-                };
-                Moniker::new(&candidate)
-                    .ok()
-                    .filter(|moniker| self.moniker_free(moniker, None).is_ok())
-            })
-            .unwrap_or_else(|| unreachable!("the numbers outlast the companions"))
+        free_name(base, |candidate| {
+            Moniker::new(candidate).is_ok_and(|moniker| self.moniker_free(&moniker, None).is_ok())
+        })
     }
 
     /// Commits the credential `id` and every ready connection made from it
@@ -3521,17 +3738,21 @@ impl Core {
                 command,
             ));
             match event {
-                // The catalog handler: a companion whose connections changed
-                // is noted, and hears it once when the drain ends.
+                // The catalog handler: a companion whose connections or
+                // accounts changed is noted, and hears it once when the drain
+                // ends, since an account decides what it may connect to.
                 Event::ConnectionChanged(connection) => {
                     if !changed.contains(&connection.companion) {
                         changed.push(connection.companion);
                     }
                 }
-                // The keep-alive handler: a credential that changed is
+                // The keep-alive handler too: a credential that changed is
                 // looked at again at once.
-                Event::CredentialChanged(_) => {
+                Event::CredentialChanged(credential) => {
                     self.renewals.send_modify(|changes| *changes += 1);
+                    if !changed.contains(&credential.companion) {
+                        changed.push(credential.companion);
+                    }
                 }
                 // The cascade handler: a removed companion's attachments end.
                 Event::CompanionRemoved(companion) => self.end_attachments_of(companion),
@@ -3577,6 +3798,59 @@ fn find<'a>(companions: &'a [CompanionRecord], name: &str) -> Option<&'a Compani
             .iter()
             .find(|record| record.companion.moniker.as_str() == name),
     }
+}
+
+/// The address a mind named, with its scheme: plain HTTP for one on this
+/// machine when none was named, HTTPS for any other.
+fn with_scheme(named: &str) -> String {
+    if named.is_empty() || named.contains("://") {
+        return named.to_owned();
+    }
+    let host = named.trim_end_matches('/');
+    let host = match host.rsplit_once(':') {
+        Some((host, port))
+            if !host.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            host
+        }
+        _ => host,
+    };
+    let local = matches!(
+        host.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "[::1]"
+    );
+    format!("{}://{named}", if local { "http" } else { "https" })
+}
+
+/// The name a new connection goes by: the first word of its address's host,
+/// or the service's own name, with a number when `free` says it is taken.
+fn connection_label(
+    service: &ServiceName,
+    address: Option<&Address>,
+    free: impl Fn(&str) -> bool,
+) -> String {
+    let word = address
+        .map(|address| address.host().split('.').next().unwrap_or_default())
+        .filter(|word| word.starts_with(|first: char| first.is_ascii_lowercase()));
+    let base = moniker_base(word.unwrap_or(service.as_str()));
+    free_name(&base, free).as_str().to_owned()
+}
+
+/// `base`, or `base` with the first number `free` accepts.
+fn free_name(base: &str, free: impl Fn(&str) -> bool) -> Moniker {
+    (1u32..)
+        .find_map(|number| {
+            let candidate = if number == 1 {
+                base.to_owned()
+            } else {
+                let suffix = format!("-{number}");
+                let room = Moniker::MAX_BYTES.saturating_sub(suffix.len());
+                let kept = base[..base.len().min(room)].trim_end_matches('-');
+                format!("{kept}{suffix}")
+            };
+            Moniker::new(&candidate).ok().filter(|_| free(&candidate))
+        })
+        .unwrap_or_else(|| unreachable!("the numbers outlast the names"))
 }
 
 /// The moniker `text` suggests: lowercase ASCII letters, digits and single

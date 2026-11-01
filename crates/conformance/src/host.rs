@@ -468,7 +468,10 @@ pub fn two_boards_are_reached_through_one_set_of_tools(exe: &Path) {
     let mut peer = install.attach("ada");
     initialize(&mut peer);
     let listed = tools(&mut peer, 1);
-    assert_eq!(names(&listed), ["board_post", "board_read", "reach"]);
+    assert_eq!(
+        names(&listed),
+        ["board_connect", "board_post", "board_read", "reach"]
+    );
     for name in ["board_read", "board_post"] {
         assert_eq!(at_of(&listed, name), json!(["front", "back"]), "{name}");
         let tool = listed
@@ -493,13 +496,7 @@ pub fn two_boards_are_reached_through_one_set_of_tools(exe: &Path) {
     let listing = Value::Array(listed.clone())
         .to_string()
         .to_ascii_lowercase();
-    for word in [
-        "session",
-        "connect\"",
-        "listcompanions",
-        "whoami",
-        "context",
-    ] {
+    for word in ["session", "listcompanions", "whoami", "context"] {
         assert!(!listing.contains(word), "{word} in {listing}");
     }
 
@@ -637,7 +634,7 @@ pub fn another_companion_sees_none_of_the_first_ones_tools(exe: &Path) {
     initialize(&mut first);
     assert_eq!(
         names(&tools(&mut first, 1)),
-        ["board_post", "board_read", "reach"]
+        ["board_connect", "board_post", "board_read", "reach"]
     );
     let mut second = install.attach("bea");
     initialize(&mut second);

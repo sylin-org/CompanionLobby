@@ -118,7 +118,7 @@ fn state_of(install: &Install, kind: &str, id: &str) -> Value {
 fn has_tools_of(listed: &[String], service: &str) -> bool {
     listed
         .iter()
-        .any(|name| name.starts_with(&format!("{service}_")))
+        .any(|name| name.starts_with(&format!("{service}_")) && !name.ends_with("_connect"))
 }
 
 #[test]

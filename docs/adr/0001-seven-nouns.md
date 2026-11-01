@@ -21,12 +21,13 @@ reach, and keeps an attributed record of everything that happened.
 | Mind | A model or agent run by an MCP host, known to the lobby only through its attachment. One attachment is one companion. | `Attachment`, `AttachmentId` |
 | Credential | An account the sponsor signed in to, which says which companion it is: the one that holds it, or a new one named from it. The record never holds material. | `Credential`, `CredentialId` |
 | Service | Something a companion reaches, spoken to by a service adapter in its own words. | `ServiceName` |
-| Connection | The sponsor's decision that a companion may use one credential to reach a service at an address. | `Connection`, `ConnectionId` |
+| Connection | A companion using one credential to reach a service at an address: its mind opens it with a service its accounts enable, and the sponsor may close it. | `Connection`, `ConnectionId` |
 | Journal | Attribution: who did what, when, through which connection, with which outcome, named as the sponsor read it then. | `JournalEntry` |
 
 These words are the whole product vocabulary. The mind-facing surface is
-exactly `reach`, `<service>_<tool>` with an optional `at` argument for services
-with many addresses, and later `attention`. Every outcome, from every adapter
+exactly `reach`, `<service>_connect` for each service the companion's accounts
+enable, `<service>_<tool>` with an optional `at` argument for services with many
+addresses, and later `attention`. Every outcome, from every adapter
 and from the daemon, is one value of a single `Outcome` enum that cannot carry
 provider text.
 

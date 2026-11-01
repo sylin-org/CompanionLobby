@@ -1702,6 +1702,10 @@ impl mcp::Toolbox for Attached<'_> {
             .collect()
     }
 
+    fn connectable(&self) -> Vec<crate::projections::Connectable> {
+        self.lobby.connectable(self.attachment.companion)
+    }
+
     fn call(
         &self,
         name: &str,
