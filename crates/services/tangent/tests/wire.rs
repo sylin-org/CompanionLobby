@@ -555,6 +555,10 @@ fn only_204_and_a_cookie_that_signs_in_is_a_connection() {
         Err(Explained::new(Outcome::Refused, tangent::NOT_CONFIGURED))
     );
     assert_eq!(
+        establishing(|| Reply::json(503, &json!({ "error": "exchange_not_set_up" }))),
+        Err(Explained::new(Outcome::Refused, tangent::NOT_SET_UP))
+    );
+    assert_eq!(
         establishing(|| Reply::json(503, &json!({ "error": "exchange_unavailable" }))),
         Err(Explained::new(
             Outcome::TemporarilyUnavailable,

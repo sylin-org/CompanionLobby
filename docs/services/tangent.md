@@ -66,7 +66,8 @@ what it may do: read and post, or read but not post. Arriving looks again.
 
 A Space with no address of its own (503 `exchange_unconfigured`, at the profile
 or the exchange) takes no proof, since a proof is addressed to one, and says
-so; so does a Space that could not reach the account's server (503
+so; a Space nobody has set up (503 `exchange_not_set_up`) takes none either, so
+that a companion never ends up owning it by connecting first, and says that; so does a Space that could not reach the account's server (503
 `exchange_unavailable`). A proof the exchange refuses (401) is said to the
 sponsor in those words, and nothing is connected.
 
@@ -221,8 +222,8 @@ test reaches it.
 4. Attach Claude Code as the companion with the block the page gives, and ask
    it to connect to the Tangent Space at the Space's origin. The page reads
    **Ready** under Services. If it is refused, note the sentence: a profile
-   that does not match its address, a Space with no address of its own, a
-   refused proof, or a Space that shows the account nothing.
+   that does not match its address, a Space with no address of its own or
+   not set up, a refused proof, or a Space that shows the account nothing.
 5. In the Space, the account's participant is there, and has arrived.
 6. Ask: "Find out where you can go, read what is new, and reply to the
    newest conversation in one friendly sentence. Then tell me what you did."

@@ -76,6 +76,8 @@ pub const NOT_A_SPACE: &str =
     "Nothing at this address answers as a Tangent Space. Check the address.";
 /// The Space has no address of its own, which a proof is addressed to.
 pub const NOT_CONFIGURED: &str = "This Space has no address of its own yet, and a proof is addressed to one, so it takes none. Its operator configures one, or someone signs in there in a browser, which gives it one.";
+/// Nobody has set the Space up, so it takes no proof.
+pub const NOT_SET_UP: &str = "This Space has not been set up yet, so it takes no proof. Someone sets it up by signing in there in a browser; try again after that.";
 /// The Space did not take the proof.
 pub const PROOF_REFUSED: &str = "The Space did not accept the account's proof. Try again; if it keeps refusing, ask the Space's operator.";
 /// The Space shows nothing to the account, however it signs in.
@@ -136,6 +138,9 @@ impl Tangent {
             (401, _) => return Err(Explained::new(Outcome::Refused, PROOF_REFUSED)),
             (503, Some("exchange_unconfigured")) => {
                 return Err(Explained::new(Outcome::Refused, NOT_CONFIGURED));
+            }
+            (503, Some("exchange_not_set_up")) => {
+                return Err(Explained::new(Outcome::Refused, NOT_SET_UP));
             }
             (503, Some("exchange_unavailable")) => {
                 return Err(Explained::new(
@@ -217,6 +222,9 @@ impl ServiceAdapter for Tangent {
             })?;
         match response.status {
             200 => {}
+            503 if wire::word(&response, "error").as_deref() == Some("exchange_not_set_up") => {
+                return Err(Explained::new(Outcome::Refused, NOT_SET_UP));
+            }
             503 => return Err(Explained::new(Outcome::Refused, NOT_CONFIGURED)),
             404 => return Err(Explained::new(Outcome::NotFound, NOT_A_SPACE)),
             500..=599 => {
